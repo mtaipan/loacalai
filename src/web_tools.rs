@@ -103,6 +103,7 @@ pub struct Session {
     pub enabled: bool,
     pub last_page: String,
     pub user_texts: Vec<String>,
+    pub audit_urls: Vec<String>,
     touched: std::time::Instant,
 }
 impl Session {
@@ -115,6 +116,7 @@ impl Session {
             worker: None,
             last_page: String::new(),
             user_texts: vec![text.into()],
+            audit_urls: vec![],
             touched: std::time::Instant::now(),
         }
     }
@@ -190,7 +192,7 @@ impl Session {
         self.authorize(name, args)?;
         self.start(app).await?;
         let config = app.settings.lock().await.web.clone();
-        let request = json!({"name":name,"args":args,"user_urls":self.user_urls,"user_texts":self.user_texts,"config":config});
+        let request = json!({"name":name,"args":args,"user_urls":self.user_urls,"user_texts":self.user_texts,"audit_urls":self.audit_urls,"config":config});
         let worker = self.worker.as_mut().unwrap();
         let call = async {
             worker

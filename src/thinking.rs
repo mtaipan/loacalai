@@ -39,7 +39,10 @@ pub async fn show(app: &Shared, model: &str) -> Result<Value> {
     crate::model_adapter::prepare(app, model).await?;
     let v: Value = app
         .client
-        .post(format!("{}/api/show", crate::engine::ollama_url()))
+        .post(format!(
+            "{}/api/show",
+            crate::model_storage::endpoint(app, model).await?
+        ))
         .json(&json!({"model":model}))
         .send()
         .await?

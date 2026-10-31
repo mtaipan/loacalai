@@ -114,7 +114,15 @@ pub fn python(app: &crate::api::App) -> Option<PathBuf> {
     options.into_iter().find(|path| path.exists())
 }
 pub fn speech_model(app: &crate::api::App) -> PathBuf {
-    app.data.join("models/whisper-small")
+    let locations: std::collections::BTreeMap<String, String> =
+        std::fs::read(app.data.join("model-locations.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+    locations
+        .get("whisper-small")
+        .map(|p| PathBuf::from(p).join("whisper-small"))
+        .unwrap_or_else(|| app.data.join("models/whisper-small"))
 }
 pub fn ollama(app: &crate::api::App) -> PathBuf {
     if let Some(value) = std::env::var_os("LOCAL_GEMMA_OLLAMA_BIN") {
@@ -416,7 +424,10 @@ pub async fn execute(
                             ""
                         })
                 };
-                let details=format!("Страница: {}\nДействие: {action}\nЭлемент: «{label}» ({}){}\nПроверьте действие перед разрешением. Приложение повторно проверит элемент перед выполнением.",preview["url"].as_str().unwrap_or(&web.last_page),element["type"].as_str().unwrap_or(""),if entered.is_empty(){String::new()}else{format!("\nЗначение: {entered}")});
+                let mut details=format!("Страница: {}\nДействие: {action}\nЭлемент: «{label}» ({}){}\nПроверьте действие перед разрешением. Приложение повторно проверит элемент перед выполнением.",preview["url"].as_str().unwrap_or(&web.last_page),element["type"].as_str().unwrap_or(""),if entered.is_empty(){String::new()}else{format!("\nЗначение: {entered}")});
+                if element["security_test"] == true {
+                    details.push_str("\nРежим аудита: вводимые данные могут быть тестовыми значениями, а не известными учётными данными.");
+                }
                 args["_expected_element"] = element.clone();
                 let waiting = std::time::Instant::now();
                 approval(app, "Действие на сайте", &details, tx, cancel, tool_id).await?;

@@ -11,7 +11,9 @@ export PYTHONUTF8=1
 cd "$TASK_ROOT"
 mkdir -p runtime data/logs
 TASK_NEEDS_BUILD=0
-if [ ! -x LocalGemmaStudio ] || [ "$(cat .build-version 2>/dev/null || true)" != '0.12.1' ]; then TASK_NEEDS_BUILD=1; fi
+TASK_SOURCE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+if [ ! -x LocalGemmaStudio ] || [ "$(cat .build-version 2>/dev/null || true)" != "$TASK_SOURCE_VERSION" ]; then TASK_NEEDS_BUILD=1; fi
+if [ -x LocalGemmaStudio ] && find src web Cargo.toml Cargo.lock -type f -newer LocalGemmaStudio -print -quit | grep -q .; then TASK_NEEDS_BUILD=1; fi
 if [ "$TASK_NEEDS_BUILD" = 1 ] && ! xcode-select -p >/dev/null 2>&1; then
   echo 'macOS needs Command Line Tools to build the Rust app. Complete the Apple installer, then launch this file again.'
   xcode-select --install
@@ -35,10 +37,12 @@ if [ -z "$TASK_PYTHON" ]; then
   TASK_PYTHON="$TASK_ROOT/runtime/python/bin/python3"
 fi
 if [ ! -x runtime/.venv/bin/python ]; then "$TASK_PYTHON" -m venv runtime/.venv; fi
-if ! runtime/.venv/bin/python -c 'import faster_whisper, sounddevice, PIL, Vision, pypdfium2, playwright' >/dev/null 2>&1; then
+TASK_REQUIREMENTS_HASH="$(shasum -a 256 runtime/requirements.txt | cut -d' ' -f1)"
+if [ "$(cat runtime/.requirements-version 2>/dev/null || true)" != "$TASK_REQUIREMENTS_HASH" ] || ! runtime/.venv/bin/python -c 'import faster_whisper, sounddevice, PIL, Vision, pypdfium2, playwright' >/dev/null 2>&1; then
   runtime/.venv/bin/python -m pip install -r runtime/requirements.txt
+  printf '%s\n' "$TASK_REQUIREMENTS_HASH" > runtime/.requirements-version
 fi
-if [ ! -f data/models/whisper-small/model.bin ]; then runtime/.venv/bin/python runtime/setup_media.py; fi
+# Model weights are optional. Do not download Whisper or LLMs on launch.
 if ! command -v ollama >/dev/null 2>&1 && [ ! -x runtime/Ollama.app/Contents/Resources/ollama ]; then
   echo 'Downloading Ollama from ollama.com...'
   curl -fL --retry 3 https://ollama.com/download/Ollama-darwin.zip -o runtime/Ollama-darwin.zip
@@ -57,7 +61,7 @@ if [ "$TASK_NEEDS_BUILD" = 1 ]; then
   fi
   cargo build --release --locked
   cp target/release/local-gemma-studio LocalGemmaStudio
-  printf '0.12.1\n' > .build-version
+  printf '%s\n' "$TASK_SOURCE_VERSION" > .build-version
 fi
 TASK_PORT="${LOCAL_GEMMA_PORT:-3210}"
 TASK_URL="http://127.0.0.1:$TASK_PORT"
@@ -73,7 +77,7 @@ for attempt in $(seq 1 60); do
   sleep .5
 done
 export LOCAL_GEMMA_BOOTSTRAP_URL="$TASK_URL"
-runtime/.venv/bin/python scripts/prepare_models.py
+# Choose models and storage folders in Settings after launch.
 if [ "${1:-}" = --browser ]; then
   open "$TASK_URL"
   echo "Local web app: $TASK_URL"

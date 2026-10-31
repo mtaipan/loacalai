@@ -165,6 +165,7 @@ pub struct App {
     pub startup: Mutex<()>,
     pub compute: Mutex<crate::compute::Runtime>,
     pub model_setup: Mutex<()>,
+    pub model_stores: Mutex<HashMap<String, crate::model_storage::Store>>,
     pub web_sessions: Mutex<HashMap<String, Arc<Mutex<crate::web_tools::Session>>>>,
     pub model_lifecycle: Arc<tokio::sync::RwLock<()>>,
     pub shutdown: CancellationToken,
@@ -224,6 +225,7 @@ impl App {
             startup: Mutex::new(()),
             compute: Mutex::new(compute),
             model_setup: Mutex::new(()),
+            model_stores: Mutex::new(HashMap::new()),
             web_sessions: Mutex::new(HashMap::new()),
             model_lifecycle: Arc::new(tokio::sync::RwLock::new(())),
             shutdown: CancellationToken::new(),
@@ -398,6 +400,7 @@ async fn quick_translate(State(app): State<Shared>, Json(value): Json<Value>) ->
     Ok(Json(json!({"id":id})))
 }
 async fn shutdown(State(app): State<Shared>) -> Json<Value> {
+    app.model_stores.lock().await.clear();
     for run in app.runs.lock().await.values() {
         run.cancel.cancel();
     }
@@ -449,26 +452,17 @@ async fn guard(State(app): State<Shared>, req: Request<Body>, next: Next) -> Res
 }
 async fn bootstrap(State(app): State<Shared>) -> Json<Value> {
     Json(
-        json!({"app":"Local Gemma Studio","version":env!("CARGO_PKG_VERSION"),"token":app.token,"settings":app.settings.lock().await.clone(),"platform":std::env::consts::OS,"catalog":crate::models::catalog()}),
+        json!({"app":"Local Gemma Studio","root":app.root.to_string_lossy(),"version":env!("CARGO_PKG_VERSION"),"token":app.token,"settings":app.settings.lock().await.clone(),"platform":std::env::consts::OS,"catalog":crate::models::catalog()}),
     )
 }
 async fn status(State(app): State<Shared>) -> Json<Value> {
     let hotkey = std::fs::read(app.root.join("data/hotkey-status.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-    let result = app
-        .client
-        .get(format!("{}/api/tags", engine::ollama_url()))
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await;
-    let models = match result {
-        Ok(response) => response.json::<Value>().await.unwrap_or(json!({})),
-        Err(_) => json!({}),
-    };
+    let models = crate::model_storage::tags(&app).await;
     let compute = crate::compute::summary(&app).await;
     Json(
-        json!({"compute":compute,"online":models.get("models").is_some(),"models":models["models"],"python":tools::python(&app).map(|p|p.to_string_lossy().to_string()),"models_path":app.data.join("models").to_string_lossy(),"speech_ready":tools::speech_model(&app).join("model.bin").exists(),"workspace":app.settings.lock().await.workspace,"hotkey":hotkey,"active_tasks":app.runs.lock().await.len(),"quick_busy":matches!(app.quick.lock().await["status"].as_str(),Some("translating"|"capturing"))}),
+        json!({"compute":compute,"online":models["online"],"model_locations":models["locations"],"storage_errors":models["errors"],"models":models["models"],"python":tools::python(&app).map(|p|p.to_string_lossy().to_string()),"models_path":app.data.join("models").to_string_lossy(),"speech_ready":tools::speech_model(&app).join("model.bin").exists(),"workspace":app.settings.lock().await.workspace,"hotkey":hotkey,"active_tasks":app.runs.lock().await.len(),"quick_busy":matches!(app.quick.lock().await["status"].as_str(),Some("translating"|"capturing"))}),
     )
 }
 async fn settings(
@@ -832,6 +826,8 @@ async fn execution(State(app): State<Shared>, Path(id): Path<String>) -> ApiResu
 }
 #[derive(Deserialize)]
 pub struct ChatInput {
+    #[serde(default)]
+    pub security_test: bool,
     #[serde(default = "thinking_off")]
     pub thinking: String,
     #[serde(default = "web_auto")]
@@ -1045,9 +1041,30 @@ async fn pull(
     };
     for model in &models {
         require(
-            crate::models::valid(model, "translate") || crate::models::valid(model, "assistant"),
+            crate::models::catalog()
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == model.as_str()),
             "Модель отсутствует в каталоге",
         )?;
+    }
+    if let Some(directory) = value["directory"].as_str().filter(|s| !s.is_empty()) {
+        let _guard = app
+            .model_lifecycle
+            .try_write()
+            .map_err(|_| anyhow::anyhow!("Дождитесь завершения работы с моделями"))?;
+        if models[0] != "whisper-small"
+            && !crate::model_storage::locations(&app).contains_key(&models[0])
+        {
+            let tags = crate::model_storage::tags(&app).await;
+            if crate::models::installed(&models[0], &tags["models"]) {
+                let requested = dunce::canonicalize(directory).ok();
+                let current = dunce::canonicalize(app.data.join("models")).ok();
+                require(requested.is_some() && requested==current,"Модель уже установлена в основной папке. Удалите её перед скачиванием на другой диск")?;
+            }
+        }
+        crate::model_storage::set_location(&app, &models[0], directory)?;
     }
     let (tx, mut rx) = mpsc::channel::<Value>(64);
     let model_guard = app.model_lifecycle.clone().read_owned().await;
@@ -1071,10 +1088,28 @@ async fn delete_model(State(app): State<Shared>, Json(value): Json<Value>) -> Ap
     let model = value["model"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Укажите модель"))?;
-    engine::ensure_ollama(&app).await?;
+    if model == "whisper-small" {
+        let path = tools::speech_model(&app);
+        // Only remove the fixed model filenames, never an arbitrary user folder.
+        for name in [
+            "config.json",
+            "model.bin",
+            "tokenizer.json",
+            "vocabulary.json",
+            "vocabulary.txt",
+        ] {
+            let file = path.join(name);
+            if file.is_file() {
+                std::fs::remove_file(file)?;
+            }
+        }
+        crate::model_storage::forget(&app, model)?;
+        return Ok(Json(json!({"ok":true,"model":model})));
+    }
+    let endpoint = crate::model_storage::endpoint(&app, model).await?;
     let tags: Value = app
         .client
-        .get(format!("{}/api/tags", engine::ollama_url()))
+        .get(format!("{}/api/tags", endpoint))
         .send()
         .await?
         .error_for_status()?
@@ -1085,11 +1120,12 @@ async fn delete_model(State(app): State<Shared>, Json(value): Json<Value>) -> Ap
         "Эта модель не установлена",
     )?;
     app.client
-        .delete(format!("{}/api/delete", engine::ollama_url()))
+        .delete(format!("{}/api/delete", endpoint))
         .json(&json!({"model":model}))
         .send()
         .await?
         .error_for_status()?;
+    crate::model_storage::forget(&app, model)?;
     Ok(Json(json!({"ok":true,"model":model})))
 }
 async fn asset(req: Request<Body>) -> Response {
@@ -1115,9 +1151,16 @@ async fn assistant_config(State(app): State<Shared>) -> Json<Value> {
     let mut result = json!({"agent":{"model":settings.agent_model,"system_prompt":engine::system_prompt(&settings,&settings.agent_model,true)},"chat":{"model":settings.chat_model,"system_prompt":engine::system_prompt(&settings,&settings.chat_model,false)},"sampling":settings.assistant,"application_content_filter":false});
     for role in ["agent", "chat"] {
         let model = result[role]["model"].as_str().unwrap_or("").to_owned();
+        let endpoint = match crate::model_storage::endpoint(&app, &model).await {
+            Ok(v) => v,
+            Err(e) => {
+                result[role]["error"] = json!(e.to_string());
+                continue;
+            }
+        };
         let response = app
             .client
-            .post(format!("{}/api/show", engine::ollama_url()))
+            .post(format!("{}/api/show", endpoint))
             .timeout(std::time::Duration::from_secs(5))
             .json(&json!({"model":model}))
             .send()

@@ -14,7 +14,10 @@ except (urllib.error.URLError, TimeoutError):
     raise SystemExit(0)
 if app.get('app') != 'Local Gemma Studio':
     raise SystemExit('Another app is using the Studio port.')
-if app.get('version') == '0.12.1':
+from pathlib import Path
+import re
+expected = re.search(r'^version\s*=\s*"([^"]+)"', (Path(__file__).resolve().parent.parent / 'Cargo.toml').read_text(), re.M)[1]
+if app.get('version') == expected:
     raise SystemExit(0)
 with http.open(base + '/api/status', timeout=5) as response:
     status = json.load(response)

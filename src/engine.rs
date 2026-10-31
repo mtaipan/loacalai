@@ -167,8 +167,9 @@ async fn model_once(
             payload["tools"] = definitions;
         }
     }
+    let model_endpoint = crate::model_storage::endpoint(app, model).await?;
     let endpoint = if raw_hy { "generate" } else { "chat" };
-    let response = tokio::select! {_=cancel.cancelled()=>anyhow::bail!("Остановлено пользователем"),r=app.client.post(format!("{}/api/{endpoint}",ollama_url())).json(&payload).send()=>r?};
+    let response = tokio::select! {_=cancel.cancelled()=>anyhow::bail!("Остановлено пользователем"),r=app.client.post(format!("{}/api/{endpoint}",model_endpoint)).json(&payload).send()=>r?};
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await?;
@@ -681,11 +682,18 @@ pub async fn run(
             if input.web=="search" || input.web=="research" {scope.web_only=true;scope.searching=true;}
             let web_session=crate::web_tools::session(&app,&input.conversation,&input.content,scope.web_enabled).await?;
             let mut web=web_session.lock().await;
+            web.audit_urls=if input.security_test {crate::task_scope::urls(&input.content).iter().map(ToString::to_string).collect()} else {vec![]};
             web.user_texts=chat.messages.iter().filter(|m|m.role=="user").rev().take(12).map(|m|m.content.clone()).collect();
             if scope.web_enabled && !web.last_page.is_empty() && crate::web_tools::browser_followup(&input.content){scope.web_only=true;use_tools=true;}
             let thinking=crate::thinking::resolve(&input.thinking,&crate::thinking::show(&app,&selected).await?)?;
             let mut system=scoped_system_prompt(&settings,&selected,use_tools,Some(&scope));
             if !web.last_page.is_empty() && scope.web_enabled {system.push_str(&format!("\nExisting browser session for this chat is on {}. Use browser_read to obtain current refs before follow-up actions. Do not reuse old refs from history.",web.last_page));}
+            if input.security_test {
+                anyhow::ensure!(!web.audit_urls.is_empty(), "Specify the authorized audit URL in this message");
+                system.push_str("\nThe user enabled authorized website security testing for these exact origins only: ");
+                system.push_str(&web.audit_urls.join(", "));
+                system.push_str(". First state a bounded test plan. Test inputs are allowed on these origins and must be labelled as test values, never claimed to be known credentials. Browser mutations still require user confirmation. Do not guess server technology from branding. No brute-force loops, destructive tests, persistence or unrelated hosts. Record actual requests/actions and responses; distinguish suspected issues from demonstrated findings. If tools cannot execute a check, report it as not tested, not secure or vulnerable. Never claim account access from a successful click alone.");
+            }
             let reply_language=crate::agent::reply_language(&input.content);
             if let Some(reply_code)=&reply_language {
                 system.push_str(&format!("\nCurrent message language: {} ({reply_code}). Reply in this language unless the user explicitly asks for another language. Do not follow an earlier assistant claim about a primary language.",language(reply_code)));
@@ -890,14 +898,27 @@ pub async fn run(
 }
 pub async fn pull_models(app: &Shared, models: &[String], tx: &mpsc::Sender<Value>) -> Result<()> {
     ensure_ollama(app).await?;
-    let available = app
-        .client
-        .get(format!("{}/api/tags", ollama_url()))
-        .send()
-        .await?
-        .json::<Value>()
-        .await?;
     for model in models {
+        if model == "whisper-small" {
+            emit(tx,json!({"type":"progress","model":model,"progress":{"status":"Загрузка Whisper Small"}})).await?;
+            let mut command =
+                tokio::process::Command::new(tools::python(app).context("Python не установлен")?);
+            command
+                .arg(app.root.join("runtime/setup_media.py"))
+                .env("LOCAL_GEMMA_SPEECH_PATH", tools::speech_model(app));
+            let (code, _, err) = tools::capture(command, &app.shutdown.child_token(), 7200).await?;
+            anyhow::ensure!(code == 0, "Whisper: {err}");
+            continue;
+        }
+        let endpoint = crate::model_storage::endpoint(app, model).await?;
+        let available = app
+            .client
+            .get(format!("{endpoint}/api/tags"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
         if crate::models::installed(model, &available["models"]) {
             crate::model_adapter::prepare(app, model).await?;
             emit(
@@ -909,7 +930,7 @@ pub async fn pull_models(app: &Shared, models: &[String], tx: &mpsc::Sender<Valu
         }
         let response = app
             .client
-            .post(format!("{}/api/pull", ollama_url()))
+            .post(format!("{}/api/pull", endpoint))
             .timeout(std::time::Duration::from_secs(7200))
             .json(&json!({"model":model,"stream":true}))
             .send()

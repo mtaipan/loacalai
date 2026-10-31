@@ -8,6 +8,7 @@ mod engine;
 mod executions;
 mod filesystem;
 mod model_adapter;
+mod model_storage;
 mod models;
 mod projects;
 #[cfg(all(windows, feature = "desktop"))]

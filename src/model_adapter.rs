@@ -13,7 +13,7 @@ pub async fn prepare(app: &Shared, model: &str) -> Result<()> {
         return Ok(());
     }
     let _setup = app.model_setup.lock().await;
-    let endpoint = crate::engine::ollama_url();
+    let endpoint = crate::model_storage::endpoint(app, model).await?;
     let show: Value = app
         .client
         .post(format!("{endpoint}/api/show"))

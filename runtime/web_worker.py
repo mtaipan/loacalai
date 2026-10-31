@@ -115,7 +115,7 @@ class SearchText(PageText):
             self.snippet = None
 
 
-def get(value, headers=None):
+def get(value, headers=None, include_headers=False):
     url(value)
     req = urllib.request.Request(value, headers={'User-Agent': 'Mozilla/5.0 LocalGemmaStudio/0.12', **(headers or {})})
     op = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
@@ -127,7 +127,18 @@ def get(value, headers=None):
         data = r.read(LIMIT + 1)
         ct = r.headers.get('Content-Type', '')
         body = data[:LIMIT].decode(r.headers.get_content_charset() or 'utf-8', errors='replace')
-        return r.code, ct, body, len(data) <= LIMIT, r.headers.get('Location')
+        result = (r.code, ct, body, len(data) <= LIMIT, r.headers.get('Location'))
+        if include_headers:
+            names = ('Content-Security-Policy', 'Strict-Transport-Security', 'X-Frame-Options',
+                     'X-Content-Type-Options', 'Referrer-Policy', 'Permissions-Policy',
+                     'Cross-Origin-Opener-Policy', 'Content-Type', 'Server')
+            metadata = {'headers': {k: r.headers[k] for k in names if k in r.headers},
+                        'cookies': [{'name': c.split('=', 1)[0], 'secure': bool(re.search(r';\s*secure(?:;|$)', c, re.I)),
+                                     'httponly': bool(re.search(r';\s*httponly(?:;|$)', c, re.I)),
+                                     'samesite': bool(re.search(r';\s*samesite=', c, re.I))}
+                                    for c in r.headers.get_all('Set-Cookie', [])]}
+            return result + (metadata,)
+        return result
 
 
 def search(query, config, count):
@@ -195,6 +206,7 @@ class Browser:
         self.visible = False
         self.namespace = '__localgemma_'+uuid.uuid4().hex
         self.user_texts = []
+        self.audit_origins = set()
 
     def allow(self, value):
         if private(value) and origin(value) not in self.local_origins:
@@ -312,8 +324,10 @@ class Browser:
                 raise ValueError('fill/select require an explicit text string; use an empty string only to clear the field')
             supplied = text and any(text in t for t in self.user_texts)
             placeholder = bool(re.fullmatch(r'(?:your[ _-]?(?:login|username|password|email)|ваш[а]?[ _-]?(?:логин|пароль|почта)|<[^>]+>|\{[^}]+\})', text.strip(), re.I))
-            if args.get('action') in ('fill', 'select') and text and not supplied and (actual['auth'] or placeholder):
+            audit = origin(self.page.url) in self.audit_origins
+            if args.get('action') in ('fill', 'select') and text and not supplied and (placeholder or (actual['auth'] and not audit)):
                 raise BrowserIssue('needs_input', 'Не указаны данные для поля «'+(actual['name'] or actual['type'] or 'ввод')+'». Автоматический ввод остановлен: модель не должна придумывать учётные данные или вводить шаблоны. Введите данные самостоятельно в видимом браузере либо явно укажите их для этой задачи.')
+            actual['security_test'] = audit
             return element, actual
         except Exception:
             element.dispose()
@@ -390,20 +404,21 @@ def main():
                 browser.local_origins = {origin(u) for u in req.get('user_urls', [])}
                 browser.visible = bool(req.get('config', {}).get('browser_visible', False))
                 browser.user_texts = req.get('user_texts', [])
+                browser.audit_origins = {origin(u) for u in req.get('audit_urls', [])}
                 if name == 'close':
                     break
                 if name == 'web_search':
                     result = search(args.get('query', ''), req.get('config', {}), args.get('count', 5))
                 elif name == 'fetch_url':
                     browser.allow(args['url'])
-                    status, ct, body, complete, redirect = get(args['url'])
+                    status, ct, body, complete, redirect, metadata = get(args['url'], include_headers=True)
                     if not (300 <= status < 400) and ct and not any(t in ct.lower() for t in ('text/', 'json', 'xml', 'javascript')):
                         raise ValueError('This URL is not a text page; use browser_open for rendered content')
                     parser = PageText(args['url'])
                     parser.feed(body)
                     text = parser.text() if 'html' in ct.lower() else body
                     offset = max(0, min(int(args.get('offset', 0)), len(text)))
-                    result = {'url': args['url'], 'status': status, 'title': parser.title, 'text': text[offset:offset+12000],
+                    result = {**metadata, 'url': args['url'], 'status': status, 'title': parser.title, 'text': text[offset:offset+12000],
                               'body': text[offset:offset+12000], 'offset': offset, 'next_offset': offset+12000 if len(text)>offset+12000 else None,
                               'complete': complete and len(text) <= offset+12000, 'links': parser.links[:100],
                               'redirect_to': urllib.parse.urljoin(args['url'], redirect) if redirect else None,

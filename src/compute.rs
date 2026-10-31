@@ -464,6 +464,7 @@ pub async fn reconfigure(app: &Shared, config: &Config) -> Result<()> {
         anyhow::ensure!(["auto","cpu"].contains(&config.backend.as_str()),"При подключении внешней Ollama выбор конкретной видеокарты настраивается на её сервере");
     }
     validate(app, config).await?;
+    app.model_stores.lock().await.clear();
     clear_fallback(app).await;
     ensure(app, config).await?;
     Ok(())
@@ -476,22 +477,37 @@ pub async fn summary(app: &Shared) -> Value {
     } else {
         None
     };
-    let models = match app
-        .client
-        .get(format!("{}/api/ps", crate::engine::ollama_url()))
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-    {
-        Ok(response) => response.json::<Value>().await.unwrap_or(json!({}))["models"].clone(),
-        Err(_) => json!([]),
-    };
+    let mut urls = vec![crate::engine::ollama_url()];
+    urls.extend(
+        app.model_stores
+            .lock()
+            .await
+            .values()
+            .map(|s| s.url.clone()),
+    );
+    let mut models = vec![];
+    for url in urls {
+        if let Ok(response) = app
+            .client
+            .get(format!("{url}/api/ps"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+        {
+            if let Ok(value) = response.json::<Value>().await {
+                models.extend(value["models"].as_array().into_iter().flatten().cloned());
+            }
+        }
+    }
     json!({"requested":config,"forced_cpu":fallback,"fallback_error":error,"loaded_models":models,"installing":app.compute.lock().await.installing})
 }
 pub async fn model_on_gpu(app: &Shared, model: &str) -> Option<bool> {
     let value = app
         .client
-        .get(format!("{}/api/ps", crate::engine::ollama_url()))
+        .get(format!(
+            "{}/api/ps",
+            crate::model_storage::endpoint(app, model).await.ok()?
+        ))
         .timeout(std::time::Duration::from_secs(2))
         .send()
         .await
