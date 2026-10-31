@@ -828,8 +828,6 @@ async fn execution(State(app): State<Shared>, Path(id): Path<String>) -> ApiResu
 }
 #[derive(Deserialize)]
 pub struct ChatInput {
-    #[serde(default)]
-    pub security_test: bool,
     #[serde(default = "thinking_off")]
     pub thinking: String,
     #[serde(default = "web_auto")]

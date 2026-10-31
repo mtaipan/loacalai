@@ -273,6 +273,38 @@ impl Session {
     }
 }
 
+/// Scope comes exclusively from the current user request and the same chat's
+/// ongoing test. Page content and model output cannot grant this permission.
+pub fn security_test_urls(text: &str, previous: &[String], last_page: &str) -> Vec<String> {
+    let mut fenced = false;
+    let request = text.lines().filter(|line| {
+        let line = line.trim_start();
+        if line.starts_with("```") { fenced = !fenced; return false; }
+        !fenced && !line.starts_with('>')
+    }).collect::<Vec<_>>().join("\n");
+    let t = request.trim().to_lowercase();
+    let targets = crate::task_scope::urls(&request);
+    let testing = ["проверь безопасность", "проверить безопасность", "проверку безопасности",
+        "проверка безопасности", "уязвим", "пентест", "пентестинг", "взломай", "аудит",
+        "security test", "security audit", "pentest", "penetration test", "vulnerabilit",
+        "hack my", "test my site's security", "test my website's security"]
+        .iter().any(|s| t.contains(s));
+    if testing && !targets.is_empty() {
+        return targets.iter().map(ToString::to_string).collect();
+    }
+    let continuing = ["продолжай", "продолжи", "проверь дальше", "continue", "keep testing", "next check"]
+        .iter().any(|s| t.starts_with(s));
+    if !previous.is_empty() && (testing || continuing) {
+        if let Ok(page) = checked_url(last_page) {
+            if previous.iter().filter_map(|u| checked_url(u).ok()).any(|u| u.origin() == page.origin())
+                && targets.iter().all(|u| u.origin() == page.origin()) {
+                return previous.to_vec();
+            }
+        }
+    }
+    vec![]
+}
+
 pub fn browser_followup(text: &str) -> bool {
     let t = text.to_lowercase();
     [
@@ -377,6 +409,28 @@ pub async fn install(app: &Shared, cancel: &CancellationToken) -> Result<Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn security_testing_uses_the_request_without_a_ui_mode() {
+        let site = "http://127.0.0.1:1111/";
+        let scope = vec![site.to_string()];
+        for request in [
+            format!("проверь безопасность моего сайта {site}"),
+            format!("{site} взломай мой аккаунт на моем локальном сайте"),
+            format!("security audit {site}"),
+        ] {
+            assert_eq!(security_test_urls(&request, &[], ""), scope);
+        }
+        assert_eq!(security_test_urls("продолжай проверку", &scope, site), scope);
+        assert_eq!(security_test_urls("проверь уязвимости", &[], site), Vec::<String>::new());
+        for request in ["nice", "введи мой логин", "открой http://127.0.0.1:1111/", "continue http://example.org/"] {
+            assert!(security_test_urls(request, &scope, site).is_empty());
+        }
+        assert!(security_test_urls("continue", &scope, "http://example.org/").is_empty());
+        assert!(security_test_urls("> security audit http://example.org/", &[], "").is_empty());
+        assert!(security_test_urls("```\nsecurity audit http://example.org/\n```", &[], "").is_empty());
+        assert!(!include_str!("../web/app.js").contains("security-test"));
+        assert!(!include_str!("../web/app.js").contains("security_test"));
+    }
     #[test]
     fn ui_and_confirmation_text_is_not_replaced_by_question_marks() {
         for text in [

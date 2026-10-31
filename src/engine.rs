@@ -713,15 +713,15 @@ pub async fn run(
             if input.web=="search" || input.web=="research" {scope.web_only=true;scope.searching=true;}
             let web_session=crate::web_tools::session(&app,&input.conversation,&input.content,scope.web_enabled).await?;
             let mut web=web_session.lock().await;
-            web.audit_urls=if input.security_test {crate::task_scope::urls(&input.content).iter().map(ToString::to_string).collect()} else {vec![]};
+            web.audit_urls=if scope.web_enabled {crate::web_tools::security_test_urls(&input.content,&web.audit_urls,&web.last_page)} else {vec![]};
+            if !web.audit_urls.is_empty(){scope.web_only=true;use_tools=true;}
             web.user_texts=chat.messages.iter().filter(|m|m.role=="user").rev().take(12).map(|m|m.content.clone()).collect();
             if scope.web_enabled && !web.last_page.is_empty() && crate::web_tools::browser_followup(&input.content){scope.web_only=true;use_tools=true;}
             let thinking=crate::thinking::resolve(&input.thinking,&crate::thinking::show(&app,&selected).await?)?;
             let mut system=scoped_system_prompt(&settings,&selected,use_tools,Some(&scope));
             if !web.last_page.is_empty() && scope.web_enabled {system.push_str(&format!("\nExisting browser session for this chat is on {}. Use browser_read to obtain current refs before follow-up actions. Do not reuse old refs from history.",web.last_page));}
-            if input.security_test {
-                anyhow::ensure!(!web.audit_urls.is_empty(), "Specify the authorized audit URL in this message");
-                system.push_str("\nThe user enabled authorized website security testing for these exact origins only: ");
+            if !web.audit_urls.is_empty() {
+                system.push_str("\nThe user requested website security testing for these exact origins: ");
                 system.push_str(&web.audit_urls.join(", "));
                 system.push_str(". First state a bounded test plan. Test inputs are allowed on these origins and must be labelled as test values, never claimed to be known credentials. Browser mutations still require user confirmation. Do not guess server technology from branding. No brute-force loops, destructive tests, persistence or unrelated hosts. Record actual requests/actions and responses; distinguish suspected issues from demonstrated findings. If tools cannot execute a check, report it as not tested, not secure or vulnerable. Never claim account access from a successful click alone.");
             }

@@ -426,7 +426,7 @@ pub async fn execute(
                 };
                 let mut details=format!("Страница: {}\nДействие: {action}\nЭлемент: «{label}» ({}){}\nПроверьте действие перед разрешением. Приложение повторно проверит элемент перед выполнением.",preview["url"].as_str().unwrap_or(&web.last_page),element["type"].as_str().unwrap_or(""),if entered.is_empty(){String::new()}else{format!("\nЗначение: {entered}")});
                 if element["security_test"] == true {
-                    details.push_str("\nРежим аудита: вводимые данные могут быть тестовыми значениями, а не известными учётными данными.");
+                    details.push_str("\nПроверка безопасности: вводимые данные могут быть тестовыми значениями, а не известными учётными данными.");
                 }
                 args["_expected_element"] = element.clone();
                 let waiting = std::time::Instant::now();
