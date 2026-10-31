@@ -255,6 +255,14 @@ pub fn attachment_review_request(text: &str) -> bool {
             || ["исправ", "измени", "перепиши", "сохрани", "запусти", "выполни"].iter().any(|s|word.starts_with(s)))
 }
 
+/// Keep a pasted source body separate from the user's review instruction.
+/// Identifiers such as save/run inside the source are not requests to act.
+pub fn review_instruction(text: &str) -> Option<String> {
+    let lines:Vec<_>=text.lines().filter(|s|!s.trim().is_empty()).collect();
+    let candidates=if lines.len()>3 {vec![*lines.last()?,*lines.first()?]} else {vec![text]};
+    candidates.into_iter().map(str::trim).find(|line|line.chars().count()<=500 && attachment_review_request(line)).map(str::to_string)
+}
+
 /// UTF-8 safe pages, preferring a newline near the end of each page.
 pub fn review_pages(text: &str, chars: usize) -> Vec<String> {
     let mut rest=text;
@@ -610,6 +618,9 @@ mod tests {
         assert!(attachment_review_request("REVIEW_ATTACHMENT_FIXTURE оцени код"));
         assert!(!attachment_review_request("оцени код и исправь ошибки"));
         assert!(!attachment_review_request("review this and run tests"));
+        assert_eq!(review_instruction("fn run() {}\nfn save() {}\nfn fix() {}\nоцени код").as_deref(),Some("оцени код"));
+        assert_eq!(review_instruction("оцени код\n```rust\nfn run() {}\n```").as_deref(),Some("оцени код"));
+        assert!(review_instruction("fn run() {}\nfn save() {}\nfn fix() {}\nоцени код и исправь ошибки").is_none());
         let text="fn main() {}\n// привет 🦀\n".repeat(2000);
         let pages=review_pages(&text,5000);
         assert_eq!(pages.concat(),text);

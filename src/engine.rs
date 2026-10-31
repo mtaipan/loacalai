@@ -747,10 +747,11 @@ pub async fn run(
             answer.content=translation_input;
             emit(tx,json!({"type":"token","text":answer.content})).await?;
             chat.history.clear();
-        }else if ["agent","chat"].contains(&input.mode.as_str()) && !attachments.is_empty() && attachments.iter().all(|a|a.kind=="text") && (input.content.to_lowercase().contains("код") || input.content.to_lowercase().contains("code") || attachments.iter().any(|a|["rs","py","js","ts","tsx","jsx","java","kt","go","c","cpp","h","cs","php","html","css","sql","sh"].contains(&a.name.rsplit('.').next().unwrap_or("")))) && crate::agent::attachment_review_request(&input.content) {
+        }else if ["agent","chat"].contains(&input.mode.as_str()) && attachments.iter().all(|a|a.kind=="text") && (!attachments.is_empty() || input.content.chars().count()>2000) && crate::agent::review_instruction(&input.content).is_some() {
             emit(tx,json!({"type":"notice","message":"Анализирую приложенный код без действий с файлами…"})).await?;
             let think=crate::thinking::resolve(&input.thinking,&crate::thinking::show(&app,&selected).await?)?;
-            let operation=review_attachment(&app,&selected,&input.content,&context,&think,tx,&cancel);
+            let instruction=crate::agent::review_instruction(&input.content).unwrap();
+            let operation=review_attachment(&app,&selected,&instruction,&context,&think,tx,&cancel);
             let (text,parts)=tokio::time::timeout(std::time::Duration::from_secs(settings.agent_timeout_seconds.clamp(60,3600)),operation).await.context("Истекло время анализа вложения")??;
             answer.content=if parts>1 {format!("Вложение разобрано на {parts} частей; итог собран по заметкам к ним. Связи между частями требуют дополнительной проверки.\n\n{text}")} else {text};
             answer.diagnostics=Some(json!({"model":selected,"tools_enabled":false,"attachment_review":true,"source_parts":parts,"num_ctx":16384,"summary_based":parts>1}));

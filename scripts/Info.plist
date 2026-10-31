@@ -4,7 +4,7 @@
 <key>CFBundleName</key><string>Local Gemma Studio</string>
 <key>CFBundleDisplayName</key><string>Local Gemma Studio</string>
 <key>CFBundleIdentifier</key><string>local.gemma.studio</string>
-<key>CFBundleVersion</key><string>0.15.1</string>
+<key>CFBundleVersion</key><string>0.15.2</string>
 <key>CFBundleExecutable</key><string>local-gemma-studio</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>NSHighResolutionCapable</key><true/>

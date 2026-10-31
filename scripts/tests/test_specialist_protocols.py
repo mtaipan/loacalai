@@ -144,6 +144,13 @@ try:
  assert 'REVIEW_ATTACHMENT_COMPLETE' in a['content'] and a['diagnostics']['source_parts']==1,a
  assert len(review_requests)==1 and source in review_requests[0]['messages'][-1]['content'],a
  assert not any(t.get('status') for t in a['tools']),a
+ for mode in ['agent','chat']:
+  review_requests.clear()
+  pasted=source+'\n---\n\nREVIEW_ATTACHMENT_FIXTURE \u043e\u0446\u0435\u043d\u0438 \u043a\u043e\u0434'
+  a=run('qwen2.5:3b',pasted,'off',mode)
+  assert 'REVIEW_ATTACHMENT_COMPLETE' in a['content'] and a['diagnostics']['attachment_review'] is True,a
+  assert len(review_requests)==1 and review_requests[0]['messages'][-1]['content'].count(source)==1,review_requests
+ print('PASS pasted source followed by a review instruction, in both Agent and Chat, without duplicating source in the prompt')
  review_requests.clear();large_source=source*3;attachment=upload_source(large_source)
  a=run('qwen2.5:3b','REVIEW_ATTACHMENT_FIXTURE review attached code','off',attachments=[attachment])
  assert 'REVIEW_ATTACHMENT_COMPLETE' in a['content'] and a['diagnostics']['source_parts']>1 and a['diagnostics']['summary_based'] is True,a
