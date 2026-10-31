@@ -1,0 +1,8 @@
+faster-whisper==1.2.1
+sounddevice==0.5.6
+pillow==13.0.0
+av==16.0.1
+pypdfium2==5.14.0
+pyobjc-framework-Vision>=10; sys_platform == "darwin"
+
+playwright==1.64.1

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>Local Gemma Studio</string>
+<key>CFBundleDisplayName</key><string>Local Gemma Studio</string>
+<key>CFBundleIdentifier</key><string>local.gemma.studio</string>
+<key>CFBundleVersion</key><string>0.12.1</string>
+<key>CFBundleExecutable</key><string>local-gemma-studio</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSMicrophoneUsageDescription</key><string>Record speech for local transcription with Whisper. Audio is processed on this Mac.</string>
+<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+</dict></plist>
+

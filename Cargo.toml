@@ -1,0 +1,46 @@
+[package]
+name = "local-gemma-studio"
+version = "0.12.1"
+edition = "2021"
+description = "Local Rust desktop and web chat for TranslateGemma and a tool agent"
+license = "MIT"
+
+[features]
+default = ["desktop"]
+desktop = ["dep:wry", "dep:tao", "dep:clipboard-rs", "dep:global-hotkey", "dep:enigo"]
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tokio-stream = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+futures-util = "0.3"
+async-stream = "0.3"
+include_dir = "0.7"
+mime_guess = "2"
+webbrowser = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dunce = "1"
+wry = { version = "0.47.2", optional = true }
+tao = { version = "0.30", optional = true }
+clipboard-rs = { version = "0.3.5", optional = true }
+global-hotkey = { version = "0.9", optional = true }
+enigo = { version = "0.6", optional = true }
+whatlang = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win = { version = "5.4.3", features = ["std"] }
+
+[profile.release]
+opt-level = 2
+strip = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
