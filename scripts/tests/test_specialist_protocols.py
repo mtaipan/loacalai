@@ -8,6 +8,7 @@ root=project/'build-tools'/('protocols-'+uuid.uuid4().hex[:8]);(root/'data/works
 foundation='hf.co/DevQuasar/huihui-ai.Foundation-Sec-8B-abliterated-GGUF:Q4_K_M'
 websailor='hf.co/mradermacher/WebSailor-7B-GGUF:Q4_K_M'
 team_requests=[]
+review_requests=[]
 specialist_available=True
 class Fixture(BaseHTTPRequestHandler):
  def log_message(self,*a):pass
@@ -51,6 +52,10 @@ class Fixture(BaseHTTPRequestHandler):
    return self.reply({'response':answer,'done':True})
   if self.path=='/api/chat':
    messages=b['messages']
+   if any('REVIEW_ATTACHMENT_FIXTURE' in m.get('content','') for m in messages if m.get('role')=='user'):
+    assert not b.get('tools') and b['options']['num_ctx']==16384,b
+    review_requests.append(b)
+    return self.reply({'message':{'role':'assistant','content':'REVIEW_ATTACHMENT_COMPLETE: static source observations only; no commands or edits were performed.'},'done':True})
    if any('TEAM_WORKFLOW_FIXTURE' in m.get('content','') for m in messages if m.get('role')=='user'):
     team_requests.append(('controller',b))
     if any('TEAM_BROWSER_FIXTURE' in m.get('content','') for m in messages if m.get('role')=='user'):
@@ -81,11 +86,11 @@ def call(path,body=None):
  return http.open(urllib.request.Request(base+path,data=json.dumps(body).encode() if body is not None else None,headers={'Content-Type':'application/json','X-Studio-Token':token}),timeout=60)
 def read(path,body=None):
  with call(path,body) as r:return json.load(r)
-def run(model,text,web,mode='agent',allow_error=False):
+def run(model,text,web,mode='agent',allow_error=False,attachments=None):
  settings=read('/api/bootstrap')['settings'];settings['agent_model']=settings['chat_model']=model;read('/api/settings',settings)
  if mode=='team':settings['team_model']=model;read('/api/settings',settings)
  chat=read('/api/chats',{})
- with call('/api/chat',{'conversation':chat['id'],'content':text,'mode':mode,'source':'en','target':'ru','web':web,'thinking':'off'}) as r:
+ with call('/api/chat',{'conversation':chat['id'],'content':text,'mode':mode,'source':'en','target':'ru','web':web,'thinking':'off','attachments':attachments or []}) as r:
   for line in r:
    if line.startswith(b'data:'):
     e=json.loads(line[5:]);assert allow_error or e['type']!='error',e
@@ -129,6 +134,22 @@ try:
  assert 'LOGIN_REJECTED_FIXTURE' in a['content'] and 'not demonstrated' in a['content'],a
  assert team_requests[0][0]=='specialist' and 'LOGIN_FORM_FIXTURE' in team_requests[0][1]['prompt'],team_requests
  print('PASS real browser open -> Foundation observes form -> controller fills test login/password and clicks with approvals -> observed rejection, not invented access')
+ def upload_source(source):
+  boundary='AuditAttachmentBoundary';body=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="files.rs"\r\nContent-Type: text/plain\r\n\r\n'.encode()+source.encode()+f'\r\n--{boundary}--\r\n'.encode())
+  req=urllib.request.Request(base+'/api/upload',data=body,headers={'Content-Type':'multipart/form-data; boundary='+boundary,'X-Studio-Token':token})
+  with http.open(req,timeout=10) as r:return json.load(r)['id']
+ source=Path(os.environ['REVIEW_REGRESSION_FILE']).read_text(encoding='utf-8') if os.environ.get('REVIEW_REGRESSION_FILE') else '// SOURCE_START\n'+('// source code line\n'*850)+'// SOURCE_END\n'
+ review_requests.clear();attachment=upload_source(source)
+ a=run('qwen2.5:3b','REVIEW_ATTACHMENT_FIXTURE \u043e\u0446\u0435\u043d\u0438 \u043a\u043e\u0434','off',attachments=[attachment])
+ assert 'REVIEW_ATTACHMENT_COMPLETE' in a['content'] and a['diagnostics']['source_parts']==1,a
+ assert len(review_requests)==1 and source in review_requests[0]['messages'][-1]['content'],a
+ assert not any(t.get('status') for t in a['tools']),a
+ review_requests.clear();large_source=source*3;attachment=upload_source(large_source)
+ a=run('qwen2.5:3b','REVIEW_ATTACHMENT_FIXTURE review attached code','off',attachments=[attachment])
+ assert 'REVIEW_ATTACHMENT_COMPLETE' in a['content'] and a['diagnostics']['source_parts']>1 and a['diagnostics']['summary_based'] is True,a
+ pages=[b['messages'][-1]['content'].split('Report concrete findings briefly, with exact supporting excerpts.\n',1)[1] for b in review_requests if 'Source fragment ' in b['messages'][-1]['content']]
+ assert large_source in ''.join(pages),'Source lost during automatic paging'
+ print('PASS uploaded 16 KB source reaches model intact without tools; larger source automatically paged and consolidated with complete source coverage')
  specialist_available=False;team_requests.clear()
  a=run('qwen2.5:3b','TEAM_WORKFLOW_FIXTURE Read fixture.txt','off','team',allow_error=True)
  assert not a['tools'] and not team_requests and foundation in a['content'],a

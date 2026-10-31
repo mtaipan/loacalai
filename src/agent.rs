@@ -246,6 +246,27 @@ impl Budget {
     }
 }
 
+pub fn attachment_review_request(text: &str) -> bool {
+    let t=text.to_lowercase();
+    ["оцени", "оценить", "ревью", "review", "проанализируй", "анализ кода", "проверь код", "check this code"]
+        .iter().any(|s| t.contains(s))
+        && !t.split(|c:char|!c.is_alphanumeric()).any(|word|
+            ["fix","modify","rewrite","save","execute","run"].contains(&word)
+            || ["исправ", "измени", "перепиши", "сохрани", "запусти", "выполни"].iter().any(|s|word.starts_with(s)))
+}
+
+/// UTF-8 safe pages, preferring a newline near the end of each page.
+pub fn review_pages(text: &str, chars: usize) -> Vec<String> {
+    let mut rest=text;
+    let mut parts=vec![];
+    while !rest.is_empty() {
+        let end=rest.char_indices().nth(chars).map(|(i,_)|i).unwrap_or(rest.len());
+        let cut=if end<rest.len() {rest[..end].rfind('\n').filter(|i|*i>end/2).map(|i|i+1).unwrap_or(end)} else {end};
+        parts.push(rest[..cut].to_string());rest=&rest[cut..];
+    }
+    parts
+}
+
 /// Keep complete task rounds. Ollama must not silently discard the current task.
 pub fn fit_history(history: &mut Vec<serde_json::Value>, limit: usize) -> anyhow::Result<bool> {
     fn cost(history: &[serde_json::Value]) -> usize {
@@ -582,6 +603,19 @@ pub fn wrong_reply_language(text: &str, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attached_reviews_are_read_only_and_pages_preserve_all_text() {
+        assert!(attachment_review_request("оцени код"));
+        assert!(attachment_review_request("Review attached files.rs"));
+        assert!(attachment_review_request("REVIEW_ATTACHMENT_FIXTURE оцени код"));
+        assert!(!attachment_review_request("оцени код и исправь ошибки"));
+        assert!(!attachment_review_request("review this and run tests"));
+        let text="fn main() {}\n// привет 🦀\n".repeat(2000);
+        let pages=review_pages(&text,5000);
+        assert_eq!(pages.concat(),text);
+        assert!(pages.iter().all(|p|p.chars().count()<=5000));
+        assert_eq!(review_pages(&"я".repeat(15000),5000).concat(),"я".repeat(15000));
+    }
 
     #[test]
     fn browser_success_cannot_be_invented_from_open_or_click() {
