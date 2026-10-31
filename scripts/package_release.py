@@ -2,7 +2,7 @@ from pathlib import Path
 import zipfile,hashlib,json,subprocess,os
 r=Path(__file__).resolve().parent.parent;dist=r/'dist';dist.mkdir(exist_ok=True)
 (r/'build-tools').mkdir(exist_ok=True)
-base=[r/n for n in ['.gitignore','.gitattributes','Cargo.toml','Cargo.lock','README.md','START-HERE.md','MODELS.md','WEB-AND-THINKING.md','LICENSE','RELEASE-0.4.md','RELEASE-0.13.md','RELEASE-0.14.md'] if (r/n).exists()]
+base=[r/n for n in ['.gitignore','.gitattributes','Cargo.toml','Cargo.lock','README.md','START-HERE.md','MODELS.md','WEB-AND-THINKING.md','LICENSE','RELEASE-0.4.md','RELEASE-0.13.md','RELEASE-0.14.md','RELEASE-0.15.md'] if (r/n).exists()]
 source=base+[p for folder in ['src','web','scripts'] for p in (r/folder).rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix not in ['.exe']]
 source += [p for p in (r/'runtime').iterdir() if p.is_file() and p.suffix in ['.py','.ps1','.txt']]
 source += list(r.glob('*.command'))+list(r.glob('*.bat'))
@@ -15,7 +15,7 @@ def archive(path,files,prefix=''):
  with zipfile.ZipFile(path) as z: assert z.testzip() is None
 archive(dist/'LocalGemmaStudio-macOS-source.zip',source,'LocalGemmaStudio/')
 payload=[r/'LocalGemmaStudio.exe',r/'LICENSE',r/'src/QWEN3-TEMPLATE-LICENSE.txt',r/'RELEASE-0.4.md',r/'WEB-AND-THINKING.md',r/'scripts/provision-windows.ps1']+[p for p in (r/'runtime').iterdir() if p.is_file() and p.suffix in ['.py','.ps1','.txt']]
-payload += [r/'scripts/ensure-webview.ps1',r/'scripts/install_models.py',r/'scripts/uninstall.ps1',r/'RELEASE-0.13.md',r/'RELEASE-0.14.md']
+payload += [r/'scripts/ensure-webview.ps1',r/'scripts/install_models.py',r/'scripts/uninstall.ps1',r/'RELEASE-0.13.md',r/'RELEASE-0.14.md',r/'RELEASE-0.15.md']
 payload += [p for p in (r/'runtime/python').rglob('*') if p.is_file() and '__pycache__' not in p.parts and not p.name.endswith(('.pyc','.pyo'))]
 payload += [r/'runtime/ollama/ollama.exe']+[p for p in (r/'runtime/ollama/lib/ollama').iterdir() if p.is_file()]
 webview=r/'build-tools/MicrosoftEdgeWebView2RuntimeInstallerX64.exe'

@@ -62,6 +62,8 @@ pub struct Settings {
     #[serde(default = "crate::models::default_assistant")]
     pub agent_model: String,
     #[serde(default = "crate::models::default_assistant")]
+    pub team_model: String,
+    #[serde(default = "crate::models::default_assistant")]
     pub chat_model: String,
     pub workspace: String,
     #[serde(default)]
@@ -187,6 +189,7 @@ impl App {
             translation_model: crate::models::default_translation(),
             quick_model: String::new(),
             agent_model: crate::models::default_assistant(),
+            team_model: crate::models::default_assistant(),
             chat_model: crate::models::default_assistant(),
             workspace: data.join("workspace").to_string_lossy().into(),
             recent_projects: vec![],
@@ -518,6 +521,7 @@ async fn settings(
                 && value.computer_access == previous.computer_access
                 && value.translation_model == previous.translation_model
                 && value.agent_model == previous.agent_model
+                && value.team_model == previous.team_model
                 && value.chat_model == previous.chat_model
                 && value.web == previous.web
                 && value.assistant == previous.assistant),

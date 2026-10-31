@@ -6,6 +6,21 @@ use tokio_util::sync::CancellationToken;
 
 pub const FOUNDATION: &str = "hf.co/DevQuasar/huihui-ai.Foundation-Sec-8B-abliterated-GGUF:Q4_K_M";
 pub const WEBSAILOR: &str = "hf.co/mradermacher/WebSailor-7B-GGUF:Q4_K_M";
+
+pub fn team_evidence(tools: &[Value]) -> String {
+    let parts: Vec<_> = tools.iter().filter(|t| t["status"] == "succeeded" && matches!(t["name"].as_str(),
+        Some("browser_open" | "browser_read" | "browser_action" | "fetch_url" | "web_search" |
+            "read_file" | "read_document" | "read_image" | "transcribe_audio" | "run_command")))
+        .rev().take(3).map(|t| format!("Observed tool {} (succeeded):\n{}",t["name"],
+            crate::tools::truncate(t["result"].as_str().unwrap_or(""),5000))).collect();
+    parts.into_iter().rev().collect::<Vec<_>>().join("\n\n")
+}
+
+pub fn consultation(question: &str, evidence: &str) -> Value {
+    json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"security_analyze","arguments":{
+        "question":format!("Advise the Qwen controller on the user's task: {}. Suggest a bounded next check and explain what the evidence does and does not establish. You have no tool execution authority.",question.chars().take(800).collect::<String>()),
+        "evidence":evidence.chars().take(17000).collect::<String>()}}}]})
+}
 pub fn adapted(model: &str) -> bool {
     model == FOUNDATION || model == WEBSAILOR
 }
@@ -205,7 +220,7 @@ pub async fn analyze(
     if config.cpu_threads > 0 {
         payload["options"]["num_thread"] = json!(config.cpu_threads);
     }
-    let value:Value=tokio::select!{_=cancel.cancelled()=>anyhow::bail!("Анализ остановлен"),r=app.client.post(format!("{url}/api/generate")).json(&payload).send()=>r?}.error_for_status()?.json().await?;
+    let value:Value=tokio::select!{_=cancel.cancelled()=>anyhow::bail!("Анализ остановлен"),r=async {app.client.post(format!("{url}/api/generate")).json(&payload).send().await?.error_for_status()?.json::<Value>().await}=>r?};
     anyhow::ensure!(
         value["done"] == true
             && value["response"]
@@ -221,6 +236,21 @@ pub async fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn team_consultation_contains_only_bounded_actual_evidence() {
+        let evidence=team_evidence(&[
+            json!({"name":"read_file","status":"succeeded","result":"ACTUAL_FILE"}),
+            json!({"name":"browser_read","status":"failed","result":"FAILED_PAGE"}),
+            json!({"name":"security_analyze","status":"succeeded","result":"SPECULATION"}),
+        ]);
+        assert!(evidence.contains("ACTUAL_FILE"));
+        assert!(!evidence.contains("FAILED_PAGE") && !evidence.contains("SPECULATION"));
+        let call=consultation(&"я".repeat(10000),&"x".repeat(30000));
+        let args=&call["tool_calls"][0]["function"]["arguments"];
+        assert!(args["question"].as_str().unwrap().len()<=4000);
+        assert!(args["evidence"].as_str().unwrap().chars().count()<=18000);
+        assert_eq!(call["tool_calls"][0]["function"]["name"],"security_analyze");
+    }
     #[test]
     fn strict_protocols() {
         assert!(normalize(FOUNDATION, "I created a file", true).is_err());

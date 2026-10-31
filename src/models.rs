@@ -18,6 +18,8 @@ pub fn valid(id: &str, role: &str) -> bool {
         .any(|m| m["id"] == id && m["role"] == role)
 }
 pub fn validate_settings(settings: &crate::api::Settings) -> anyhow::Result<()> {
+    anyhow::ensure!(valid(&settings.team_model, "assistant") && settings.team_model.to_lowercase().contains("qwen"),
+        "Для команды выберите Qwen как управляющую модель");
     anyhow::ensure!(
         valid(&settings.translation_model, "translate"),
         "Неизвестная модель перевода"

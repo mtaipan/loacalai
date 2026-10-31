@@ -305,6 +305,14 @@ pub fn security_test_urls(text: &str, previous: &[String], last_page: &str) -> V
     vec![]
 }
 
+pub fn website_execution_requested(text: &str) -> bool {
+    let t=text.to_lowercase();
+    !["только план", "пока ничего", "не открывай", "не заходи", "plan only", "do not open", "don't open"]
+        .iter().any(|s|t.contains(s))
+        && ["открой", "зайди", "заходи", "проверь", "взломай", "тестируй", "open ", "visit ", "check ", "security test", "security audit", "pentest", "hack my"]
+            .iter().any(|s|t.contains(s))
+}
+
 pub fn browser_followup(text: &str) -> bool {
     let t = text.to_lowercase();
     [
@@ -411,6 +419,10 @@ mod tests {
     use super::*;
     #[test]
     fn security_testing_uses_the_request_without_a_ui_mode() {
+        assert!(website_execution_requested("зайди на мой сайт и проверь безопасность"));
+        assert!(website_execution_requested("взломай мой аккаунт; сначала план, потом начинай"));
+        assert!(!website_execution_requested("только план: проверь безопасность сайта"));
+        assert!(!website_execution_requested("do not open the site, plan only"));
         let site = "http://127.0.0.1:1111/";
         let scope = vec![site.to_string()];
         for request in [
