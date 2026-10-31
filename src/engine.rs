@@ -109,7 +109,8 @@ async fn model_once(
     };
     let thinking_enabled = think != json!(false);
     let agent = matches!(&mode, InferenceMode::Agent(_));
-    let buffered_reply = matches!(&mode, InferenceMode::Reply);
+    let reply_mode = matches!(&mode, InferenceMode::Reply);
+    let buffered_reply = reply_mode || model == crate::specialists::WEBSAILOR;
     crate::model_adapter::prepare(app, model).await?;
     let mut payload = json!({"model":model,"messages":messages,"stream":true,"think":think,"keep_alive":"2m","options":{"temperature":0.1,"num_ctx":8192,"num_predict":2048}});
     if thinking_enabled {
@@ -162,13 +163,26 @@ async fn model_once(
         payload["options"]["num_thread"] = json!(config.cpu_threads);
     }
 
+    let definitions = if let InferenceMode::Agent(d) = &mode {
+        d.clone()
+    } else {
+        json!([])
+    };
     if agent {
-        if let InferenceMode::Agent(definitions) = mode {
-            payload["tools"] = definitions;
-        }
+        payload["tools"] = definitions.clone();
+    }
+    let adapted = crate::specialists::adapted(model);
+    if adapted {
+        let options = payload["options"].clone();
+        payload = crate::specialists::request(model, messages, &definitions, agent);
+        payload["options"] = options;
     }
     let model_endpoint = crate::model_storage::endpoint(app, model).await?;
-    let endpoint = if raw_hy { "generate" } else { "chat" };
+    let endpoint = if raw_hy || adapted {
+        "generate"
+    } else {
+        "chat"
+    };
     let response = tokio::select! {_=cancel.cancelled()=>anyhow::bail!("Остановлено пользователем"),r=app.client.post(format!("{}/api/{endpoint}",model_endpoint)).json(&payload).send()=>r?};
     if !response.status().is_success() {
         let status = response.status();
@@ -234,7 +248,7 @@ async fn model_once(
                 thinking.push_str(token);
                 emit(tx, json!({"type":"thinking","text":token})).await?;
             }
-            let token = if raw_hy {
+            let token = if raw_hy || adapted {
                 value["response"].as_str()
             } else {
                 value["message"]["content"].as_str()
@@ -271,6 +285,23 @@ async fn model_once(
     );
     if !calls.is_empty() {
         result["tool_calls"] = json!(calls);
+    }
+    if adapted {
+        let normalized = crate::specialists::normalize(model, &content, agent)?;
+        if model == crate::specialists::WEBSAILOR && !agent && !reply_mode {
+            emit(tx, json!({"type":"token","text":normalized["content"]})).await?;
+        }
+        result = normalized;
+        anyhow::ensure!(
+            !(length_limited
+                && result["tool_calls"]
+                    .as_array()
+                    .is_some_and(|a| !a.is_empty())),
+            "Ответ адаптера достиг лимита длины; инструменты не выполнялись"
+        );
+        if length_limited {
+            result["length_limited"] = json!(true);
+        }
     }
     anyhow::ensure!(
         !result["content"].as_str().unwrap_or("").is_empty() || result["tool_calls"].as_array().is_some_and(|calls| !calls.is_empty()),

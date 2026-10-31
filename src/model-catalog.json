@@ -1,5 +1,15 @@
 [
-  {"id":"whisper-small","name":"Whisper Small","role":"speech","category":"Голос","size":"≈0,5 ГБ","description":"Распознавание речи локально. Не является чат-моделью; скачивается отдельно только по вашей команде.","source":"https://huggingface.co/Systran/faster-whisper-small"},
+  {"id":"hf.co/ggml-org/Qwen3-reranker-0.6B-Q8_0-GGUF:Q8_0","name":"Qwen3-Reranker 0.6B · Q8","role":"reranker","category":"Поиск по смыслу","size":"639 МБ","description":"Переранжирует настоящие результаты веб-поиска с помощью специализированной головы ранжирования. CPU, процесс завершается после запроса. Проверенная Abliterated-версия не найдена; используется GGUF от ggml-org. Не ищет сайты самостоятельно и не отвечает в чате.","source":"https://huggingface.co/ggml-org/Qwen3-reranker-0.6B-Q8_0-GGUF"},
+  {"id":"hf.co/mradermacher/WebSailor-7B-GGUF:Q4_K_M","name":"WebSailor 7B · Q4","role":"assistant","category":"Веб-исследование","size":"4,8 ГБ","description":"Специализация — поиск и чтение источников. Подключён адаптер протокола search/visit с переводом в инструменты приложения, разбором <tool_call>, <think> и <answer>. Проверенная Abliterated-версия не найдена. Экспериментальная интеграция: качество этой квантованной версии на вашем компьютере требует проверки. Предпочтительны английские поисковые запросы.","source":"https://huggingface.co/Alibaba-NLP/WebSailor-7B"},
+  {
+    "id": "whisper-small",
+    "name": "Whisper Small",
+    "role": "speech",
+    "category": "Голос",
+    "size": "≈0,5 ГБ",
+    "description": "Распознавание речи локально. Не является чат-моделью; скачивается отдельно только по вашей команде.",
+    "source": "https://huggingface.co/Systran/faster-whisper-small"
+  },
   {
     "id": "hf.co/IndexTeam/Index-Translate-2B-GGUF:Q6_K",
     "name": "Index-Translate 2B · Q6",
@@ -147,11 +157,12 @@
   {
     "id": "hf.co/DevQuasar/huihui-ai.Foundation-Sec-8B-abliterated-GGUF:Q4_K_M",
     "name": "Foundation-Sec 8B Abliterated · Q4",
-    "role": "specialist",
+    "role": "assistant",
     "category": "Безопасность исходников",
     "size": "≈5 ГБ",
-    "description": "Специализированная базовая модель Cisco для кибербезопасности, вариант сообщества Huihui. Это не готовый универсальный чат-агент; в этой версии доступно скачивание и хранение, отдельный адаптер исследования ещё не подключён.",
-    "source": "https://huggingface.co/DevQuasar/huihui-ai.Foundation-Sec-8B-abliterated-GGUF"
+    "description": "Модель Cisco для анализа кода, журналов, угроз и уязвимостей, вариант Huihui Abliterated. Подключены текстовый формат базовой Llama и JSON-протокол инструментов; доступна в чате и агенте. Также другой агент может вызвать её через security_analyze. Это базовая модель: адаптер не заменяет instruction tuning и не гарантирует надёжность длинных цепочек. Выводы требуют проверки по фактам; отдельного фильтра содержания приложение не добавляет.",
+    "source": "https://huggingface.co/DevQuasar/huihui-ai.Foundation-Sec-8B-abliterated-GGUF",
+    "adapter": "foundation-raw-json"
   },
   {
     "id": "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q4_K_M",

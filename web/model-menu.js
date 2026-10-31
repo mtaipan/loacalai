@@ -71,6 +71,7 @@ async function chooseActiveModel(selected){
 async function openModelDownloads(id=null){
   closeModelMenu();await showSettings();
   const target=id?[...document.querySelectorAll('[data-download-model]')].find(b=>b.dataset.downloadModel===id):$('#models-status');
+  const category=target?.closest('details.catalog-category');if(category)category.open=true;
   target?.scrollIntoView({block:'center',behavior:'smooth'});target?.focus({preventScroll:true});
 }
 function bindModelMenu(){

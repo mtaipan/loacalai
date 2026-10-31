@@ -165,6 +165,7 @@ pub struct App {
     pub startup: Mutex<()>,
     pub compute: Mutex<crate::compute::Runtime>,
     pub model_setup: Mutex<()>,
+    pub reranker: Mutex<()>,
     pub model_stores: Mutex<HashMap<String, crate::model_storage::Store>>,
     pub web_sessions: Mutex<HashMap<String, Arc<Mutex<crate::web_tools::Session>>>>,
     pub model_lifecycle: Arc<tokio::sync::RwLock<()>>,
@@ -225,6 +226,7 @@ impl App {
             startup: Mutex::new(()),
             compute: Mutex::new(compute),
             model_setup: Mutex::new(()),
+            reranker: Mutex::new(()),
             model_stores: Mutex::new(HashMap::new()),
             web_sessions: Mutex::new(HashMap::new()),
             model_lifecycle: Arc::new(tokio::sync::RwLock::new(())),
@@ -462,7 +464,7 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
     let models = crate::model_storage::tags(&app).await;
     let compute = crate::compute::summary(&app).await;
     Json(
-        json!({"compute":compute,"online":models["online"],"model_locations":models["locations"],"storage_errors":models["errors"],"models":models["models"],"python":tools::python(&app).map(|p|p.to_string_lossy().to_string()),"models_path":app.data.join("models").to_string_lossy(),"speech_ready":tools::speech_model(&app).join("model.bin").exists(),"workspace":app.settings.lock().await.workspace,"hotkey":hotkey,"active_tasks":app.runs.lock().await.len(),"quick_busy":matches!(app.quick.lock().await["status"].as_str(),Some("translating"|"capturing"))}),
+        json!({"compute":compute,"online":models["online"],"model_locations":models["locations"],"storage_errors":models["errors"],"models":models["models"],"python":tools::python(&app).map(|p|p.to_string_lossy().to_string()),"models_path":app.data.join("models").to_string_lossy(),"speech_ready":tools::speech_model(&app).join("model.bin").exists(),"workspace":app.settings.lock().await.workspace,"hotkey":hotkey,"active_tasks":app.runs.lock().await.len(),"models_busy":app.model_lifecycle.try_write().is_err(),"quick_busy":matches!(app.quick.lock().await["status"].as_str(),Some("translating"|"capturing"))}),
     )
 }
 async fn settings(

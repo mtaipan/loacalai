@@ -66,13 +66,24 @@ def inventory():
         except Exception as e:result['errors'].append('CUDA enumeration: '+str(e))
     return result
 
-def stop_engine(executable,port):
+def stop_engine(executable,port,check_only=False):
     if port!=11435:raise ValueError('Only the private application port may be adopted')
     if os.name!='nt':raise RuntimeError('Legacy engine adoption is only available on Windows; restart the app-owned engine manually once')
-    env={**os.environ,'LOCAL_GEMMA_EXPECTED_ENGINE':str(executable.resolve())}
-    script=r"""$ErrorActionPreference='Stop'; $taskIds=@(Get-NetTCPConnection -LocalPort 11435 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique); if($taskIds.Count -ne 1){throw 'Private engine listener not found'}; $taskProcess=Get-CimInstance Win32_Process -Filter ('ProcessId='+$taskIds[0]); if(![string]::Equals($taskProcess.ExecutablePath,$env:LOCAL_GEMMA_EXPECTED_ENGINE,[StringComparison]::OrdinalIgnoreCase) -or $taskProcess.CommandLine -notmatch '\bserve\b'){throw 'Listener belongs to a different application; it was not stopped'}; & taskkill.exe /PID $taskIds[0] /T /F | Out-Null; if($LASTEXITCODE -ne 0){throw 'Engine could not be stopped'}; @{stopped=$true;pid=$taskIds[0]} | ConvertTo-Json -Compress"""
-    return json.loads(powershell(script,25,env))
+    # Some Windows networking/filter drivers omit LISTEN rows while accepted
+    # connections remain visible. Hold our own connection and identify its
+    # server-side tuple; never kill a process merely by its executable name.
+    import socket
+    try:
+        probe=socket.create_connection(('127.0.0.1',port),timeout=3)
+    except ConnectionRefusedError:
+        return {'stopped':False,'already_stopped':True}
+    with probe:
+        env={**os.environ,'LOCAL_GEMMA_EXPECTED_ENGINE':str(executable.resolve()),'LOCAL_GEMMA_PROBE_PORT':str(probe.getsockname()[1])}
+        script=r"""$ErrorActionPreference='Stop'; $taskIds=@(Get-NetTCPConnection -LocalPort 11435 -ErrorAction SilentlyContinue | Where-Object {$_.LocalAddress -eq '127.0.0.1' -and $_.RemotePort -eq [int]$env:LOCAL_GEMMA_PROBE_PORT -and $_.OwningProcess -gt 0} | Select-Object -ExpandProperty OwningProcess -Unique); if($taskIds.Count -ne 1){throw 'Could not verify the private engine connection owner; no process was stopped'}; $taskProcess=Get-CimInstance Win32_Process -Filter ('ProcessId='+$taskIds[0]); if(![string]::Equals($taskProcess.ExecutablePath,$env:LOCAL_GEMMA_EXPECTED_ENGINE,[StringComparison]::OrdinalIgnoreCase) -or $taskProcess.CommandLine -notmatch '\bserve\b'){throw 'Connection belongs to a different application; it was not stopped'}; & taskkill.exe /PID $taskIds[0] /T /F | Out-Null; if($LASTEXITCODE -ne 0 -and (Get-Process -Id $taskIds[0] -ErrorAction SilentlyContinue)){throw 'Engine could not be stopped'}; @{stopped=$true;pid=$taskIds[0]} | ConvertTo-Json -Compress"""
+        if check_only:
+            script=script.replace('& taskkill.exe /PID', "@{verified=$true;pid=$taskIds[0]} | ConvertTo-Json -Compress; return; & taskkill.exe /PID")
+        return json.loads(powershell(script,25,env))
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--stop-engine',type=Path);p.add_argument('--port',type=int,default=11435);a=p.parse_args()
-    print(json.dumps(stop_engine(a.stop_engine,a.port) if a.stop_engine else inventory(),ensure_ascii=False),flush=True)
+    p=argparse.ArgumentParser();p.add_argument('--stop-engine',type=Path);p.add_argument('--check-engine',type=Path);p.add_argument('--port',type=int,default=11435);a=p.parse_args()
+    print(json.dumps(stop_engine(a.stop_engine or a.check_engine,a.port,bool(a.check_engine)) if a.stop_engine or a.check_engine else inventory(),ensure_ascii=False),flush=True)

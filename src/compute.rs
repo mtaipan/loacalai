@@ -315,6 +315,9 @@ async fn stop_private(app: &Shared) -> Result<()> {
             .arg(tools::ollama(app))
             .env("PYTHONUTF8", "1");
         let (code, _, err) = tools::capture(cmd, &app.shutdown.child_token(), 30).await?;
+        if code != 0 && !healthy(app).await {
+            return Ok(());
+        }
         anyhow::ensure!(
             code == 0,
             "Встроенный движок не остановлен: {}",
@@ -546,6 +549,7 @@ pub async fn install_package(
         .context("Для скачивания компонентов нужен Python из комплекта приложения")?;
     {
         let _startup = app.startup.lock().await;
+        app.model_stores.lock().await.clear();
         stop_private(app).await?;
     }
     app.compute.lock().await.installing = true;

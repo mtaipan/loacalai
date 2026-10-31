@@ -12,7 +12,7 @@ mkdir -p "$TASK_KIT/runtime"
 for folder in src web scripts; do cp -R "$TASK_ROOT/$folder" "$TASK_KIT/$folder"; done
 for source in "$TASK_ROOT"/runtime/*.py "$TASK_ROOT"/runtime/*.ps1 "$TASK_ROOT"/runtime/*.txt; do [ ! -f "$source" ] || cp "$source" "$TASK_KIT/runtime/$(basename "$source")"; done
 for source in "$TASK_ROOT"/*.command; do cp "$source" "$TASK_KIT/$(basename "$source")"; done
-for name in Cargo.toml Cargo.lock README.md START-HERE.md MODELS.md RELEASE-0.4.md RELEASE-0.13.md WEB-AND-THINKING.md LICENSE; do cp "$TASK_ROOT/$name" "$TASK_KIT/$name"; done
+for name in Cargo.toml Cargo.lock README.md START-HERE.md MODELS.md RELEASE-0.4.md RELEASE-0.13.md RELEASE-0.14.md WEB-AND-THINKING.md LICENSE; do cp "$TASK_ROOT/$name" "$TASK_KIT/$name"; done
 cp "$TASK_ROOT/target/release/local-gemma-studio" "$TASK_KIT/LocalGemmaStudio"
 awk -F '"' '/^version =/ {print $2;exit}' "$TASK_ROOT/Cargo.toml" > "$TASK_KIT/.build-version"
 cp -R "$TASK_ROOT/Local Gemma Studio.app" "$TASK_KIT/Local Gemma Studio.app"

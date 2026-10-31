@@ -11,8 +11,10 @@ mod model_adapter;
 mod model_storage;
 mod models;
 mod projects;
+mod reranker;
 #[cfg(all(windows, feature = "desktop"))]
 mod selection_clipboard;
+mod specialists;
 mod system_paths;
 mod system_translate;
 mod task_scope;

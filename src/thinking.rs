@@ -37,7 +37,7 @@ pub fn resolve(selection: &str, show: &Value) -> Result<Value> {
 pub async fn show(app: &Shared, model: &str) -> Result<Value> {
     crate::engine::ensure_ollama(app).await?;
     crate::model_adapter::prepare(app, model).await?;
-    let v: Value = app
+    let mut v: Value = app
         .client
         .post(format!(
             "{}/api/show",
@@ -49,6 +49,9 @@ pub async fn show(app: &Shared, model: &str) -> Result<Value> {
         .error_for_status()?
         .json()
         .await?;
+    if crate::specialists::adapted(model) {
+        v["thinking"] = json!({"values":[false]});
+    }
     Ok(v)
 }
 #[cfg(test)]

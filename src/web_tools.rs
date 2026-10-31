@@ -12,6 +12,7 @@ pub struct Config {
     pub searxng_url: String,
     pub brave_key: String,
     pub browser_visible: bool,
+    pub reranker_enabled: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -20,6 +21,7 @@ impl Default for Config {
             searxng_url: String::new(),
             brave_key: String::new(),
             browser_visible: false,
+            reranker_enabled: true,
         }
     }
 }
@@ -243,6 +245,15 @@ impl Session {
                 .map_err(|e| e.0)?;
             value["screenshot"] =
                 json!({"id":a.id,"url":format!("/api/files/{}",a.id),"name":a.name});
+        }
+        if name == "web_search" {
+            crate::reranker::apply(
+                app,
+                args["query"].as_str().unwrap_or(""),
+                &mut value,
+                cancel,
+            )
+            .await;
         }
         self.observe(&value);
         Ok(value)

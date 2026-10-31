@@ -225,7 +225,7 @@ impl TaskScope {
         }
         if self.web_only {
             return crate::web_tools::is_web_tool(name)
-                || ["update_plan", "translate_text"].contains(&name);
+                || ["update_plan", "translate_text", "security_analyze"].contains(&name);
         }
         if self.creating_desktop {
             if name == "fetch_url" {
@@ -241,6 +241,7 @@ impl TaskScope {
                 "read_document",
                 "read_image",
                 "transcribe_audio",
+                "security_analyze",
                 "translate_text",
                 "update_plan",
             ]
