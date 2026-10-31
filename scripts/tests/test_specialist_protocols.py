@@ -27,7 +27,12 @@ class Fixture(BaseHTTPRequestHandler):
    assert b.get('raw') is True and 'messages' not in b and 'tools' not in b,b
    prompt=b['prompt']
    if b['model']==foundation:
-    if not b['stream']:answer='Supplied SQL concatenates user input; use bound parameters. No live tests were performed.'
+    if 'BROWSER_FALSE_SUCCESS_FIXTURE' in prompt:
+     if 'ZERO_BROWSER_ACTIONS' in prompt or '"role":"tool"' in prompt or '"role": "tool"' in prompt:
+      answer=json.dumps({'answer':'Successfully logged in.','tool_calls':[]})
+     else:
+      answer=json.dumps({'answer':'Already logged in before tool execution.','tool_calls':[{'function':{'name':'browser_open','arguments':{'url':site+'/page'}}}]})
+    elif not b['stream']:answer='Supplied SQL concatenates user input; use bound parameters. No live tests were performed.'
     elif 'FOUNDATION_PROTOCOL_EVIDENCE' in prompt:answer=json.dumps({'answer':'FOUNDATION_PROTOCOL_EVIDENCE','tool_calls':[]})
     else:
      assert b['format']['type']=='object',b
@@ -71,6 +76,13 @@ try:
  assert [t['name'] for t in a['tools']][:2]==['web_search','fetch_url'],a
  search=json.loads(a['tools'][0]['result']);assert search['reranking']['applied'] is False and search['reranking']['original_order_preserved'] is True
  a=run('qwen2.5:3b','Review the supplied SQL security evidence using the specialist.','off');assert any(t['name']=='security_analyze' and t['status']=='succeeded' for t in a['tools']),a
+ for extra,expected_tools in [('',1),(' ZERO_BROWSER_ACTIONS',0)]:
+  a=run(foundation,'BROWSER_FALSE_SUCCESS_FIXTURE'+extra+' Check the login at '+site+'/page','auto')
+  assert 'Successfully logged in' not in a['content'] and 'Already logged in' not in a['content'],a
+  assert len(a['tools'])==expected_tools and a['diagnostics']['browser_claim_retry'] is True and a['diagnostics']['browser_claim_warning'] is True,a
+  assert a['content'].startswith('\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u044f'),a
+  if expected_tools:assert a['tools'][0]['name']=='browser_open' and a['tools'][0]['status']=='succeeded',a
+ print('PASS fabricated browser login rejected after open-only and zero-action responses; bounded retry and deterministic evidence fallback')
  print('PASS Foundation raw/JSON tool loop, WebSailor search/visit/source loop, missing-reranker fallback without downloads, and independent specialist analysis')
 finally:
  try:call('/api/shutdown',{}).close()

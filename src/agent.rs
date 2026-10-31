@@ -97,6 +97,33 @@ pub fn needs_grounding(text: &str, tools: &[serde_json::Value]) -> bool {
     .any(|phrase| text.contains(phrase))
 }
 
+/// A bounded check for categorical browser claims. Browser actions and page
+/// text do not independently verify authentication or an exploited weakness.
+/// Describe observed evidence instead; never promote a click to a login proof.
+pub fn browser_claim_issue(text: &str, tools: &[serde_json::Value], browser_context: bool) -> Option<String> {
+    let browser_tools: Vec<_> = tools.iter().filter(|t| matches!(t["name"].as_str(),
+        Some("browser_open" | "browser_read" | "browser_action" | "fetch_url"))).collect();
+    if !browser_context && browser_tools.is_empty() { return None; }
+    let lower = text.to_lowercase();
+    let claims = ["авторизация выполнена", "авторизация успешна", "успешно авториз", "успешная авторизация выполнена",
+        "взлом осуществл", "взлом сайта осуществл", "сайт взломан", "аккаунт взломан", "взломал сайт", "взломал аккаунт",
+        "успешно вош", "успешный вход выполнен", "доступ к аккаунту получен", "обход авторизации выполнен",
+        "successfully logged in", "successfully authenticated", "authentication succeeded", "login successful",
+        "successfully hacked", "account was hacked", "site was hacked", "bypassed authentication"];
+    let unsupported_claim = lower.split(['\n', '.', '!', '?']).any(|sentence| {
+        let sentence = sentence.trim();
+        !sentence.starts_with('>')
+            && !["не подтвержд", "не доказ", "нет доказательств", "нельзя утверждать", "not verified", "not confirmed", "no evidence", "cannot claim"]
+                .iter().any(|negation| sentence.contains(negation))
+            && claims.iter().any(|claim| sentence.contains(claim))
+    });
+    if !unsupported_claim { return None; }
+    let opened = browser_tools.iter().filter(|t| t["status"] == "succeeded" && t["name"] == "browser_open").count();
+    let read = browser_tools.iter().filter(|t| t["status"] == "succeeded" && matches!(t["name"].as_str(), Some("browser_read" | "fetch_url"))).count();
+    let actions = browser_tools.iter().filter(|t| t["status"] == "succeeded" && t["name"] == "browser_action").count();
+    Some(format!("Подтверждения входа в аккаунт или взлома нет. За этот запрос выполнено: открытий страницы — {opened}, чтений — {read}, действий в браузере — {actions}. Успешный вызов инструмента не доказывает авторизацию или уязвимость. Нужны конкретные наблюдения и проверка результата; непроведённые проверки нельзя считать успешными."))
+}
+
 /// Facts come from tool records, independently of the model's final prose.
 pub fn execution_report(tools: &[serde_json::Value]) -> serde_json::Value {
     use serde_json::json;
@@ -555,6 +582,25 @@ pub fn wrong_reply_language(text: &str, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_success_cannot_be_invented_from_open_or_click() {
+        use serde_json::json;
+        let opened = json!({"name":"browser_open","status":"succeeded","result":"{\"text\":\"Sign in\"}"});
+        let fake_success = "Итог: Сайт успешно открыт и авторизация выполнена.";
+        let issue = browser_claim_issue(fake_success, &[opened.clone()], true).unwrap();
+        assert!(issue.contains("открытий страницы — 1"));
+        assert!(issue.contains("действий в браузере — 0"));
+        let click = json!({"name":"browser_action","status":"succeeded","arguments":{"action":"click"},"result":"{}"});
+        assert!(browser_claim_issue(fake_success, &[opened, click], true).is_some());
+        assert!(browser_claim_issue("Взлом сайта осуществлён.", &[], true).is_some());
+        assert!(browser_claim_issue("Successfully logged in.", &[], true).is_some());
+        for text in ["Вход не проверен. Страница открыта.", "Нет доказательств, что авторизация выполнена.",
+            "The page shows a profile; authentication is not independently verified.", "План: проверить вход."] {
+            assert!(browser_claim_issue(text, &[], true).is_none(), "{text}");
+        }
+        assert!(browser_claim_issue("В рассказе персонаж успешно вошёл в комнату.", &[], false).is_none());
+    }
 
     #[test]
     fn evidence_correction_is_bounded_to_real_file_results() {

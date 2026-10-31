@@ -292,7 +292,7 @@ pub fn security_test_urls(text: &str, previous: &[String], last_page: &str) -> V
     if testing && !targets.is_empty() {
         return targets.iter().map(ToString::to_string).collect();
     }
-    let continuing = ["продолжай", "продолжи", "проверь дальше", "continue", "keep testing", "next check"]
+    let continuing = ["продолжай", "продолжи", "проверь дальше", "ломай", "докажи", "покажи доказательства", "continue", "keep testing", "next check", "prove it", "show evidence"]
         .iter().any(|s| t.starts_with(s));
     if !previous.is_empty() && (testing || continuing) {
         if let Ok(page) = checked_url(last_page) {

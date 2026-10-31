@@ -745,6 +745,7 @@ pub async fn run(
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(settings.agent_timeout_seconds.clamp(60,3600));
             let turn_tools_start=answer.tools.len();
             let mut grounding_retry=false;
+            let mut browser_claim_retry=false;
             let mut completion_retry=false;
             let mut language_retry=false;
             let mut initial_search=scope.searching && scope.web_enabled;
@@ -766,6 +767,21 @@ pub async fn run(
                 }
                 if calls.is_empty() {
                     let text=response["content"].as_str().unwrap_or("");
+                    let browser_context=!web.last_page.is_empty() || (scope.web_only && !scope.urls.is_empty()) || chat.messages.iter().rev().take(12).any(|m|m.tools.iter().any(|t|crate::web_tools::is_web_tool(t["name"].as_str().unwrap_or(""))));
+                    if let Some(issue)=crate::agent::browser_claim_issue(text,&answer.tools[turn_tools_start..],browser_context) {
+                        if !browser_claim_retry && use_tools {
+                            browser_claim_retry=true;
+                            if let Some(d)=answer.diagnostics.as_mut(){d["browser_claim_retry"]=json!(true);d["unverified_browser_reply"]=json!(text);}
+                            history[0]["content"]=json!(format!("{}\nBrowser evidence correction: {issue} Your proposed final answer was not accepted. If the requested checks remain unfinished, execute relevant tools within the current scope. Otherwise report only observed page contents and actual actions, distinguish attempted checks from confirmed findings, and explicitly state missing proof. Do not repeat an open or a denied action. A prior assistant claim is not evidence of login. Do not assert categorical authentication or exploit success; describe specific independently checkable observations instead.",history[0]["content"].as_str().unwrap_or("")));
+                            emit(tx,json!({"type":"notice","message":"Проверяю заявление модели по журналу действий браузера…"})).await?;
+                            continue;
+                        }
+                        if let Some(d)=answer.diagnostics.as_mut(){d["browser_claim_warning"]=json!(true);d["unverified_browser_reply"]=json!(text);}
+                        answer.content=issue;
+                        emit(tx,json!({"type":"replace_content","text":answer.content})).await?;
+                        history.push(json!({"role":"assistant","content":answer.content}));
+                        break;
+                    }
                     if simple_reply && reply_language.as_ref().is_some_and(|code|crate::agent::wrong_reply_language(text,code)) {
                         let code=reply_language.as_deref().unwrap();
                         if !language_retry {
