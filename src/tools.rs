@@ -274,12 +274,48 @@ async fn approval(
     cancel: &CancellationToken,
     tool_id: &str,
 ) -> Result<()> {
+    approval_scoped(
+        app,
+        title,
+        details,
+        tx,
+        cancel,
+        tool_id,
+        crate::permissions::Scope::once(),
+    )
+    .await
+}
+async fn approval_scoped(
+    app: &Shared,
+    title: &str,
+    details: &str,
+    tx: &mpsc::Sender<Value>,
+    cancel: &CancellationToken,
+    tool_id: &str,
+    scope: crate::permissions::Scope,
+) -> Result<()> {
+    anyhow::ensure!(!cancel.is_cancelled(), "Остановлено пользователем");
+    let mode = app.settings.lock().await.permission_mode.clone();
+    if app.grants.lock().await.allows(&scope, &mode) {
+        engine::emit(
+            tx,
+            json!({"type":"permission_used","tool_id":tool_id,"scope":scope,"mode":mode}),
+        )
+        .await?;
+        return Ok(());
+    }
     let id = uuid::Uuid::new_v4().to_string();
     let (sender, receiver) = oneshot::channel();
-    app.approvals.lock().await.insert(id.clone(), sender);
+    app.approvals.lock().await.insert(
+        id.clone(),
+        crate::permissions::Pending {
+            sender,
+            scope: scope.clone(),
+        },
+    );
     if let Err(error) = engine::emit(
         tx,
-        json!({"type":"approval","id":id,"tool_id":tool_id,"title":title,"details":details}),
+        json!({"type":"approval","id":id,"tool_id":tool_id,"title":title,"details":details,"scope":scope,"reusable":scope.reusable()}),
     )
     .await
     {
@@ -336,7 +372,13 @@ async fn mutate(
         "delete_file" => "Удаление файла с резервной копией",
         _ => "Сохранить перевод",
     };
-    approval(app, title, &details, tx, cancel, tool_id).await?;
+    let workspace = app.settings.lock().await.workspace.clone();
+    let scope = crate::permissions::Scope::files(
+        Path::new(&workspace),
+        mutations.iter().map(|m| m.path.clone()).collect(),
+        ["move_file", "delete_file"].contains(&operation),
+    );
+    approval_scoped(app, title, &details, tx, cancel, tool_id, scope).await?;
     anyhow::ensure!(!cancel.is_cancelled(), "Остановлено пользователем");
     let settings = app.settings.lock().await.clone();
     let _guard = app.file_changes.lock().await;
@@ -727,16 +769,22 @@ pub async fn execute(
             let script = string(&args, "command")?;
             let directory = crate::projects::directory(app, args["directory"].as_str()).await?;
             let seconds = args["timeout_seconds"].as_u64().unwrap_or(0);
-            approval(
+            let limit = if seconds == 0 {
+                "Без ограничения времени".to_string()
+            } else {
+                format!("Срок: {seconds} с")
+            };
+            approval_scoped(
                 app,
                 "Выполнить команду",
                 &format!(
-                    "Папка: {}\nЛимит: {seconds} с\nПрава вашего пользователя, включая доступ вне папки.\n\n{script}",
+                    "Папка: {}\n{limit}\nПрава вашего пользователя, включая доступ вне папки.\n\n{script}",
                     directory.display()
                 ),
                 tx,
                 cancel,
                 tool_id,
+                crate::permissions::Scope::command(&directory,script),
             )
             .await?;
             let resolved = crate::projects::directory(app, args["directory"].as_str()).await?;

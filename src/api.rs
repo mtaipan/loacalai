@@ -15,7 +15,7 @@ use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, convert::Infallible, path::PathBuf, sync::Arc};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -47,6 +47,8 @@ impl IntoResponse for ApiError {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
     #[serde(default)]
     pub schema_version: u32,
     #[serde(default)]
@@ -89,6 +91,9 @@ pub struct Settings {
 }
 fn default_true() -> bool {
     true
+}
+fn default_permission_mode() -> String {
+    "manual".into()
 }
 fn default_actions() -> usize {
     0
@@ -168,7 +173,8 @@ pub struct App {
     pub token: String,
     pub settings: Mutex<Settings>,
     pub runs: Mutex<HashMap<String, Run>>,
-    pub approvals: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    pub approvals: Mutex<HashMap<String, crate::permissions::Pending>>,
+    pub grants: Mutex<crate::permissions::Grants>,
     pub storage: Mutex<()>,
     pub file_changes: Mutex<()>,
     pub startup: Mutex<()>,
@@ -189,6 +195,7 @@ impl App {
             std::fs::create_dir_all(data.join(folder))?;
         }
         let defaults = Settings {
+            permission_mode: default_permission_mode(),
             schema_version: 1,
             context: Default::default(),
             web: Default::default(),
@@ -232,6 +239,7 @@ impl App {
         let compute = crate::compute::Runtime::load(&data);
         Ok(Self {
             tasks: crate::task_store::Store::open(&data)?,
+            grants: Mutex::new(crate::permissions::Grants::load(&data)?),
             root,
             data,
             client: reqwest::Client::builder()
@@ -312,6 +320,8 @@ pub fn router(app: Shared) -> Router {
         .route("/api/runs/{id}", get(run_snapshot))
         .route("/api/runs/{id}/events", get(run_events))
         .route("/api/approve/{id}", post(approve))
+        .route("/api/permissions", get(permission_grants))
+        .route("/api/permissions/{id}/revoke", post(revoke_permission))
         .route("/api/stop/{id}", post(stop))
         .route("/api/media", post(media))
         .route("/api/models/pull", post(pull))
@@ -491,6 +501,10 @@ async fn settings(
     Json(mut value): Json<Settings>,
 ) -> ApiResult<Settings> {
     value.schema_version = 1;
+    require(
+        ["manual", "project", "full"].contains(&value.permission_mode.as_str()),
+        "Неизвестный режим прав",
+    )?;
     value.assistant.validate()?;
     value.context.validate()?;
     value.web.validate()?;
@@ -971,7 +985,13 @@ async fn send(
         let _ = tx.send(json!({"type":"start","run_id":id})).await;
         let started = std::time::Instant::now();
         let conversation = input.conversation.clone();
-        if let Err(error) = engine::run(worker.clone(), input, &tx, cancel.clone()).await {
+        if let Err(error) = crate::permissions::TASK
+            .scope(
+                id.clone(),
+                engine::run(worker.clone(), input, &tx, cancel.clone()),
+            )
+            .await
+        {
             let diagnostic = format!("{error:#}");
             if let Ok(mut chat) = worker.load(&conversation).await {
                 if chat.messages.last().is_some_and(|m| m.role == "user") {
@@ -998,6 +1018,7 @@ async fn send(
             let _ = tx.send(json!({"type":"error","message":diagnostic})).await;
         }
         worker.runs.lock().await.remove(&id);
+        worker.grants.lock().await.finish(&id);
         let _ = tx.send(json!({"type":"done","status":if cancel.is_cancelled(){"cancelled"}else{"completed"}})).await;
     });
     Ok(run_stream(app, run_id, 0))
@@ -1075,13 +1096,34 @@ async fn approve(
     Path(id): Path<String>,
     Json(value): Json<Value>,
 ) -> ApiResult<Value> {
-    let sender = app
-        .approvals
-        .lock()
-        .await
-        .remove(&id)
+    let mut pending = app.approvals.lock().await;
+    let item = pending
+        .get(&id)
         .ok_or_else(|| anyhow::anyhow!("Подтверждение уже закрыто"))?;
-    let _ = sender.send(value["allow"].as_bool().unwrap_or(false));
+    require(!item.sender.is_closed(), "Задача уже остановлена")?;
+    let allowed = value["allow"].as_bool().unwrap_or(false);
+    let duration = value["duration"].as_str().unwrap_or("once");
+    require(
+        ["once", "task", "project"].contains(&duration),
+        "Неизвестный срок разрешения",
+    )?;
+    if allowed && duration != "once" {
+        app.grants
+            .lock()
+            .await
+            .add(&app.data, item.scope.clone(), duration)?;
+    }
+    let sender = pending.remove(&id).unwrap().sender;
+    let _ = sender.send(allowed);
+    Ok(Json(json!({"ok":true})))
+}
+async fn permission_grants(State(app): State<Shared>) -> ApiResult<Value> {
+    Ok(Json(serde_json::to_value(
+        &app.grants.lock().await.entries,
+    )?))
+}
+async fn revoke_permission(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    app.grants.lock().await.revoke(&app.data, &id)?;
     Ok(Json(json!({"ok":true})))
 }
 async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {

@@ -26,6 +26,10 @@ class Fixture(BaseHTTPRequestHandler):
             return self.reply({'model_info': {'qwen.context_length': 32768}, 'thinking': {'values': [False]}})
         if self.path == '/api/chat':
             requests.append(body)
+            if 'PERMISSION_FIXTURE' in json.dumps(body):
+                count=sum(m.get('role')=='tool' for m in body.get('messages',[]))
+                if count<2:
+                    return self.reply({'done': True, 'message': {'role': 'assistant', 'content': '', 'tool_calls':[{'function':{'name':'write_file','arguments':{'path':f'grant-{count+1}.txt','content':f'verified-{count+1}'}}}]}})
             time.sleep(3)
             return self.reply({'done': True, 'done_reason': 'stop', 'message': {'role': 'assistant', 'content': 'DURABLE_RESULT'}})
         self.reply({'status': 'success'})
@@ -97,9 +101,27 @@ try:
         assert page.locator('#send').get_attribute('aria-label') == 'Остановить ответ'
         page.wait_for_function('()=>!state.busy', timeout=15000)
         assert 'DURABLE_RESULT' in page.locator('#conversation').inner_text()
+        page.locator('[data-action="new-chat"]').click()
+        page.locator('[data-mode="agent"]').click()
+        page.locator('#prompt').fill('PERMISSION_FIXTURE Create two files in the workspace')
+        page.locator('#send').click()
+        page.wait_for_selector('[data-grant-duration]')
+        scope=page.locator('[data-grant-duration]')
+        scope.select_option('task')
+        scope.focus()
+        page.evaluate('()=>{state.streamThinking="streaming update";scheduleStream();}')
+        page.wait_for_timeout(200)
+        assert scope.input_value()=='task'
+        assert scope.evaluate('(element)=>element===document.activeElement')
+        page.locator('[data-approve]').click()
+        page.wait_for_function('()=>!state.busy',timeout=15000)
+        assert (root/'data/workspace/grant-1.txt').read_text()=='verified-1'
+        assert (root/'data/workspace/grant-2.txt').read_text()=='verified-2'
+        assert not read('/api/permissions'), 'task grant must expire when run finishes'
         assert not errors, errors
         browser.close()
     print('PASS Edge reload reconnects, restores stop control and receives saved answer')
+    print('PASS scoped approval survives stream/focus, authorizes two files and expires after run')
 finally:
     try: call('/api/shutdown', {}).close()
     except Exception: pass

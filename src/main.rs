@@ -13,6 +13,7 @@ mod model_adapter;
 mod model_storage;
 mod models;
 mod process_group;
+mod permissions;
 mod projects;
 mod reranker;
 #[cfg(all(windows, feature = "desktop"))]
