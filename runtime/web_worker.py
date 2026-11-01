@@ -427,7 +427,12 @@ def main():
                     result = browser.run(name, args)
                 print(json.dumps(result, ensure_ascii=False), flush=True)
             except Exception as e:
-                print(json.dumps({'error': str(e)[:1400], 'error_code': getattr(e, 'code', 'web_error')}, ensure_ascii=False), flush=True)
+                error = str(e)
+                # Playwright diagnostics may echo the value passed to fill/select.
+                # Input values belong to execution, not to persisted error traces.
+                if name == 'browser_action' and isinstance(args.get('text'), str) and args['text']:
+                    error = error.replace(args['text'], '[ввод скрыт]')
+                print(json.dumps({'error': error[:1400], 'error_code': getattr(e, 'code', 'web_error')}, ensure_ascii=False), flush=True)
     finally:
         browser.close()
 

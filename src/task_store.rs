@@ -26,7 +26,7 @@ impl Store {
         self.access(move|conn|{
             let mut statement=conn.prepare("SELECT e.sequence,e.payload,e.run,r.conversation FROM events e JOIN runs r ON r.id=e.run WHERE sequence>?1 ORDER BY sequence LIMIT 256")?;
             let rows=statement.query_map([after],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?;
-            rows.map(|row|{let(sequence,payload,run,conversation)=row?;let mut value:Value=serde_json::from_str(&payload)?;value["sequence"]=json!(sequence);value["run_id"]=json!(run);value["conversation_id"]=json!(conversation);Ok(value)}).collect()
+            rows.map(|row|{let(sequence,payload,run,conversation)=row?;let mut value:Value=serde_json::from_str(&payload)?;crate::tools::public_event(&mut value);value["sequence"]=json!(sequence);value["run_id"]=json!(run);value["conversation_id"]=json!(conversation);Ok(value)}).collect()
         }).await
     }
     pub async fn dashboard(&self) -> Result<Value> {
@@ -40,7 +40,7 @@ impl Store {
                 let(id,conversation,status,input,created)=row?;
                 let mut state=Fold::default();
                 let mut events=tx.prepare("SELECT payload FROM events WHERE run=?1 AND sequence<=?2 ORDER BY sequence")?;
-                for event in events.query_map(params![id,cursor],|r|r.get::<_,String>(0))? {state.consume(&serde_json::from_str::<Value>(&event?)?);}
+                for event in events.query_map(params![id,cursor],|r|r.get::<_,String>(0))? {let mut event=serde_json::from_str::<Value>(&event?)?;crate::tools::public_event(&mut event);state.consume(&event);}
                 let input:Value=serde_json::from_str(&input)?;
                 runs.push(json!({"id":id,"conversation":conversation,"status":status,"input":input,"created":created,"state":state.value()}));
             }
@@ -166,7 +166,7 @@ impl Store {
         self.access(move |conn| {
             let mut statement=conn.prepare("SELECT sequence,payload FROM events WHERE run=?1 AND sequence>?2 ORDER BY sequence LIMIT 256")?;
             let rows=statement.query_map(params![id,after], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?)))?;
-            rows.map(|row| {let (sequence,payload)=row?;let mut value:Value=serde_json::from_str(&payload)?;value["sequence"]=json!(sequence);Ok(value)}).collect()
+            rows.map(|row| {let (sequence,payload)=row?;let mut value:Value=serde_json::from_str(&payload)?;crate::tools::public_event(&mut value);value["sequence"]=json!(sequence);Ok(value)}).collect()
         }).await
     }
     pub async fn get(&self, id: String) -> Result<Value> {

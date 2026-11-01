@@ -134,6 +134,14 @@ try:
  assert 'LOGIN_REJECTED_FIXTURE' in a['content'] and 'not demonstrated' in a['content'],a
  assert team_requests[0][0]=='specialist' and 'LOGIN_FORM_FIXTURE' in team_requests[0][1]['prompt'],team_requests
  print('PASS real browser open -> Foundation observes form -> controller fills test login/password and clicks with approvals -> observed rejection, not invented access')
+ assert all(t['arguments'].get('text')!='probe-secret' for t in a['tools']),a
+ import sqlite3
+ with sqlite3.connect(root/'data/tasks.sqlite3') as db:
+  assert not any('probe-secret' in row[0] for row in db.execute('SELECT payload FROM events')),'password leaked into durable events'
+  assert not any('probe-secret' in row[0] for row in db.execute('SELECT text FROM artifact_chunks')),'password leaked into archived observations'
+ assert not any('probe-secret' in path.read_text(encoding='utf-8') for path in (root/'data/chats').glob('*.json')),'password leaked into saved chat/history'
+ print('PASS private browser input executes but is absent from events, saved arguments/history and observation bodies')
+
  def upload_source(source):
   boundary='AuditAttachmentBoundary';body=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="files.rs"\r\nContent-Type: text/plain\r\n\r\n'.encode()+source.encode()+f'\r\n--{boundary}--\r\n'.encode())
   req=urllib.request.Request(base+'/api/upload',data=body,headers={'Content-Type':'multipart/form-data; boundary='+boundary,'X-Studio-Token':token})

@@ -54,6 +54,8 @@ impl Scope {
 pub struct Pending {
     pub sender: oneshot::Sender<bool>,
     pub scope: Scope,
+    /// Memory-only preview, never part of durable events or grants.
+    pub private_details: Option<String>,
 }
 /// Lock order for permission decisions: pending -> settings -> grants.
 /// Registration uses the same order, so a policy change cannot miss a new waiter.
@@ -167,9 +169,9 @@ mod tests {
         files.task = Some("run".into());
         let command = Scope::command(&project, "echo test");
         let (sender, mut file_waiter) = oneshot::channel();
-        app.approvals.lock().await.insert("file".into(), Pending {sender, scope:files.clone()});
+        app.approvals.lock().await.insert("file".into(), Pending {sender, scope:files.clone(), private_details:None});
         let (sender, mut command_waiter) = oneshot::channel();
-        app.approvals.lock().await.insert("command".into(), Pending {sender, scope:command.clone()});
+        app.approvals.lock().await.insert("command".into(), Pending {sender, scope:command.clone(), private_details:None});
         app.settings.lock().await.permission_mode="project".into();
         resolve_pending(&app).await;
         assert!(file_waiter.try_recv().unwrap());
@@ -178,7 +180,7 @@ mod tests {
         resolve_pending(&app).await;
         assert!(command_waiter.try_recv().unwrap());
         let (sender, mut destructive_waiter) = oneshot::channel();
-        app.approvals.lock().await.insert("delete".into(), Pending {sender, scope:Scope::once()});
+        app.approvals.lock().await.insert("delete".into(), Pending {sender, scope:Scope::once(), private_details:None});
         resolve_pending(&app).await;
         assert!(matches!(destructive_waiter.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
         app.settings.lock().await.permission_mode="full".into();

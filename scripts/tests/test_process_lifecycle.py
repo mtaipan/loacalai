@@ -53,7 +53,23 @@ def read(path,body=None):
 def turn(chat,text,allow_error=False):
     with call('/api/chat',{'conversation':chat['id'],'content':text,'mode':'agent','source':'en','target':'ru','web':'off'}) as response:
         for line in response:
-            if line.startswith(b'data:'):assert allow_error or json.loads(line[5:])['type']!='error',line
+
+            if line.startswith(b'data:'):
+                event=json.loads(line[5:]);assert allow_error or event['type']!='error',line
+                if event['type']=='approval':
+                    assert event['private_preview'] is True and 'hello' not in event['details'],event
+                    with call('/api/approve/'+event['id']+'/preview') as response:
+                        assert response.headers['Cache-Control']=='no-store'
+                        assert json.load(response)['text']=='hello\n'
+                    unauthorized=urllib.request.Request(base+'/api/approve/'+event['id']+'/preview')
+                    try:http.open(unauthorized)
+                    except urllib.error.HTTPError as error:assert error.code==403
+                    else:raise AssertionError('private preview must require the app token')
+                    read('/api/approve/'+event['id'],{'allow':True})
+                    try:call('/api/approve/'+event['id']+'/preview')
+                    except urllib.error.HTTPError as error:assert error.code==404
+                    else:raise AssertionError('closed approval must erase its memory-only preview')
+
     return read('/api/chats/'+chat['id'])
 try:
     for _ in range(100):
@@ -83,6 +99,7 @@ try:
         page.set_viewport_size({'width':320,'height':700});assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
         footer=page.locator('#process-dialog>.dialog-footer').bounding_box();assert footer['y']+footer['height']<=700,footer
         page.screenshot(path=str(root/'process-mobile.png'));page.locator('.process-close').click();assert not errors,errors;browser.close()
+    settings=read('/api/bootstrap')['settings'];settings['permission_mode']='manual';read('/api/settings',settings)
     chat=turn(chat,'CONTINUE_SESSION_FIXTURE send input to the existing process and inspect the output')
     assert 'ECHO:hello' in chat['messages'][-1]['content']
     foreign=turn(read('/api/chats',{}),'FOREIGN_SESSION_FIXTURE try to stop the process from another task')
@@ -92,6 +109,7 @@ try:
     report=read('/api/executions/'+execution);assert report['status']=='cancelled' and 'ECHO:hello' in report['stdout'] and report['logs_synced']
     with call('/api/executions/'+execution+'/logs/stdout') as response:raw=response.read()
     assert b'READY_PROCESS' in raw and b'ECHO:hello' in raw
+    settings=read('/api/bootstrap')['settings'];settings['permission_mode']='full';read('/api/settings',settings)
     failed=turn(read('/api/chats',{}),'FAIL_SESSION_FIXTURE start a process before a model failure',allow_error=True)
     failed_start=next(tool for tool in failed['messages'][-1]['tools'] if tool['name']=='start_process')
     failed_id=json.loads(failed_start['result'])['execution_id']

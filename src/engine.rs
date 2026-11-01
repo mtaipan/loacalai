@@ -1144,16 +1144,22 @@ pub async fn run(
                 // Planning text can contain premature claims of success. Do not
                 // display or retain it as verified facts before tools execute.
                 response["content"] = json!("");
+                // The raw calls below are private execution inputs. Sanitize the
+                // whole batch before storing it, including calls never executed.
+                for call in response["tool_calls"].as_array_mut().into_iter().flatten(){
+                    let name=call["function"]["name"].as_str().unwrap_or("").to_string();
+                    call["function"]["arguments"]=tools::public_arguments(&name,&call["function"]["arguments"]);
+                }
                 let assistant_index=history.len();
                 history.push(response);
                 for (index, call) in calls.iter().enumerate() {
                     let name=call["function"]["name"].as_str().unwrap_or("");
                     let raw_args=call["function"]["arguments"].clone();
                     let (mut args,invalid)=match tools::arguments(name,raw_args.clone()){Ok(value)=>(value,None),Err(error)=>(raw_args,Some(error))};
-                    history[assistant_index]["tool_calls"][index]["function"]["arguments"]=args.clone();
+                    history[assistant_index]["tool_calls"][index]["function"]["arguments"]=tools::public_arguments(name,&args);
                     let id=uuid::Uuid::new_v4().to_string();
                     let action_started=std::time::Instant::now();
-                    emit(tx,json!({"type":"tool_start","id":id,"name":name,"arguments":args,"status":"running"})).await?;
+                    emit(tx,json!({"type":"tool_start","id":id,"name":name,"arguments":tools::public_arguments(name,&args),"status":"running"})).await?;
                     if team && name=="security_analyze" {emit(tx,json!({"type":"notice","message":"Foundation-Sec анализирует переданные материалы…"})).await?;}
                     let allowed = if deadline.is_some_and(|at|tokio::time::Instant::now() >= at) { Err("Истёк заданный срок задачи. Новые действия остановлены.") } else { budget.reserve(name,&args) };
                     let result = match allowed {
@@ -1189,7 +1195,7 @@ pub async fn run(
                     let status = if matches!(status,"repeated"|"limit") {"skipped"} else {status};
                     let text = if status=="skipped" { allowed.unwrap_err().to_string() } else {text};
                     if status=="succeeded" && matches!(name,"write_file"|"edit_file"|"move_file"|"copy_file"|"delete_file"|"translate_file") && serde_json::from_str::<Value>(&text).is_ok_and(|v|v["changed"]==true) { budget.files_changed(); }
-                    let record=json!({"id":id,"name":name,"arguments":args,"status":status,"result":text,"exit_code":exit_code,"duration_ms":action_started.elapsed().as_millis().min(u64::MAX as u128) as u64});
+                    let record=json!({"id":id,"name":name,"arguments":tools::public_arguments(name,&args),"status":status,"result":text,"exit_code":exit_code,"duration_ms":action_started.elapsed().as_millis().min(u64::MAX as u128) as u64});
                     let run=crate::permissions::TASK.try_with(Clone::clone).context("Нет источника журнала инструмента")?;
                     let record=crate::artifacts::archive_record(&app,&run,record).await?;
                     answer.tools.push(record.clone());
@@ -1198,7 +1204,7 @@ pub async fn run(
                     if stale_ref {
                         for pending in calls.iter().skip(index+1){
                             let pending_name=pending["function"]["name"].as_str().unwrap_or("");
-                            let skipped=json!({"id":uuid::Uuid::new_v4().to_string(),"name":pending_name,"arguments":pending["function"]["arguments"],"status":"skipped","result":"Не выполнялось: страница изменилась, требуется новое чтение."});
+                            let skipped=json!({"id":uuid::Uuid::new_v4().to_string(),"name":pending_name,"arguments":tools::public_arguments(pending_name,&pending["function"]["arguments"]),"status":"skipped","result":"Не выполнялось: страница изменилась, требуется новое чтение."});
                             answer.tools.push(skipped.clone());emit(tx,json!({"type":"tool_result","tool":skipped})).await?;
                             history.push(json!({"role":"tool","tool_name":pending_name,"content":"Skipped: stale page refs. Read the current page and reassess; do not replay the old batch."}));
                         }
@@ -1212,7 +1218,7 @@ pub async fn run(
                         // to reinterpret the refusal as an executed operation.
                         for pending in calls.iter().skip(index+1) {
                             let pending_name=pending["function"]["name"].as_str().unwrap_or("");
-                            let skipped=json!({"id":uuid::Uuid::new_v4().to_string(),"name":pending_name,"arguments":pending["function"]["arguments"],"status":"skipped","result":if status=="needs_input"{"Не выполнялось: для заполнения формы нужны данные пользователя."}else{"Не выполнялось: цепочка остановлена после отказа или отмены."}});
+                            let skipped=json!({"id":uuid::Uuid::new_v4().to_string(),"name":pending_name,"arguments":tools::public_arguments(pending_name,&pending["function"]["arguments"]),"status":"skipped","result":if status=="needs_input"{"Не выполнялось: для заполнения формы нужны данные пользователя."}else{"Не выполнялось: цепочка остановлена после отказа или отмены."}});
                             answer.tools.push(skipped.clone());
                             emit(tx,json!({"type":"tool_result","tool":skipped})).await?;
                             history.push(json!({"role":"tool","tool_name":pending_name,"content":json!({"status":"skipped","result":"Не выполнялось"}).to_string()}));

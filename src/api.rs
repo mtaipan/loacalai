@@ -338,9 +338,10 @@ impl App {
         if self.tasks.is_deleted(id.into()).await? {
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Чат удалён").into());
         }
-        Ok(serde_json::from_slice(
+        let mut chat=serde_json::from_slice(
             &tokio::fs::read(self.chat_path(id)?).await?,
-        )?)
+        )?;
+        crate::tools::public_chat(&mut chat);Ok(chat)
     }
     pub async fn save(&self, chat: &Conversation) -> anyhow::Result<()> {
         let _guard = self.storage.lock().await;
@@ -400,6 +401,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/tasks/{id}", get(task_state))
         .route("/api/tasks/{id}/requests/{sequence}", get(task_request))
         .route("/api/approve/{id}", post(approve))
+        .route("/api/approve/{id}/preview", get(approval_preview))
         .route("/api/permissions", get(permission_grants))
         .route("/api/permissions/{id}/revoke", post(revoke_permission))
         .route("/api/stop/{id}", post(stop))
@@ -541,7 +543,8 @@ async fn guard(State(app): State<Shared>, req: Request<Body>, next: Next) -> Res
             return StatusCode::FORBIDDEN.into_response();
         }
     }
-    if req.method() != axum::http::Method::GET && req.method() != axum::http::Method::HEAD {
+    let private_preview=req.uri().path().starts_with("/api/approve/")&&req.uri().path().ends_with("/preview");
+    if private_preview || (req.method() != axum::http::Method::GET && req.method() != axum::http::Method::HEAD) {
         if req
             .headers()
             .get("x-studio-token")
@@ -552,6 +555,7 @@ async fn guard(State(app): State<Shared>, req: Request<Body>, next: Next) -> Res
         }
     }
     let mut response = next.run(req).await;
+    if private_preview{response.headers_mut().insert("cache-control","no-store".parse().unwrap());}
     response
         .headers_mut()
         .insert("x-content-type-options", "nosniff".parse().unwrap());
@@ -1316,6 +1320,11 @@ async fn approve(
         crate::permissions::resolve_pending(&app).await;
     }
     Ok(Json(json!({"ok":true})))
+}
+async fn approval_preview(State(app):State<Shared>,Path(id):Path<String>)->ApiResult<Value>{
+    let pending=app.approvals.lock().await;
+    let item=pending.get(&id).filter(|item|!item.sender.is_closed()).ok_or(crate::task_store::MissingResource("Подтверждение уже закрыто"))?;
+    Ok(Json(json!({"text":item.private_details.as_deref().ok_or(crate::task_store::MissingResource("Предпросмотр недоступен"))?})))
 }
 async fn permission_grants(State(app): State<Shared>) -> ApiResult<Value> {
     Ok(Json(serde_json::to_value(

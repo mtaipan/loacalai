@@ -23,3 +23,14 @@ async function showArtifact(id){
   }
   find('.artifact-previous').onclick=()=>{offset=Math.max(0,offset-8000);render();};find('.artifact-next').onclick=()=>{offset=page?.next_offset||offset;render();};dialog.showModal();await render();
 }
+
+async function showApprovalPreview(id){
+  const dialog=document.createElement('dialog');dialog.className='workspace-dialog';dialog.setAttribute('aria-label','Ввод в процесс');
+  dialog.innerHTML='<h2>Ввод в процесс</h2><div class="dialog-body"><p class="form-help">Точный текст, включая переносы строк. Доступен до принятия решения.</p><pre class="artifact-content" tabindex="0"></pre><p class="form-help" role="status">Чтение…</p></div><div class="dialog-footer"><button class="button">Закрыть</button></div>';
+  document.body.append(dialog);const controller=new AbortController();let timer;
+  const erase=()=>{dialog.querySelector('pre').textContent='';dialog.close();};
+  dialog.onclose=()=>{controller.abort();clearInterval(timer);dialog.remove();};dialog.querySelector('button').onclick=erase;dialog.showModal();
+  try{const value=await api('/api/approve/'+id+'/preview',{signal:controller.signal});if(!dialog.open)return;dialog.querySelector('pre').textContent=value.text;dialog.querySelector('[role="status"]').textContent='';
+    timer=setInterval(()=>{if(![...viewSessions.values()].some(session=>session.approvals.some(item=>item.id===id)))erase();},250);
+  }catch(error){if(error.name!=='AbortError'&&dialog.open)dialog.querySelector('[role="status"]').textContent=error.message;}
+}

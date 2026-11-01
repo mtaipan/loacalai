@@ -294,6 +294,12 @@ async fn approval_scoped(
     tool_id: &str,
     scope: crate::permissions::Scope,
 ) -> Result<()> {
+    approval_details(app,title,details,None,tx,cancel,tool_id,scope).await
+}
+async fn approval_details(
+    app:&Shared,title:&str,details:&str,private_details:Option<&str>,
+    tx:&mpsc::Sender<Value>,cancel:&CancellationToken,tool_id:&str,scope:crate::permissions::Scope,
+) -> Result<()> {
     anyhow::ensure!(!cancel.is_cancelled(), "Остановлено пользователем");
     let mut pending = app.approvals.lock().await;
     let mode = app.settings.lock().await.permission_mode.clone();
@@ -313,12 +319,13 @@ async fn approval_scoped(
         crate::permissions::Pending {
             sender,
             scope: scope.clone(),
+            private_details:private_details.map(str::to_owned),
         },
     );
     drop(pending);
     if let Err(error) = engine::emit(
         tx,
-        json!({"type":"approval","id":id,"tool_id":tool_id,"title":title,"details":details,"scope":scope,"reusable":scope.reusable()}),
+        json!({"type":"approval","id":id,"tool_id":tool_id,"title":title,"details":details,"private_preview":private_details.is_some(),"scope":scope,"reusable":scope.reusable()}),
     )
     .await
     {
@@ -404,6 +411,46 @@ pub fn arguments(name:&str,mut args:Value)->Result<Value>{
     crate::tool_schema::validate(name,&args)?;
     Ok(args)
 }
+/// Only execution receives input values. Unknown/malformed browser actions fail
+/// closed: a stale page or schema error must not turn a secret into trace data.
+pub fn public_arguments(name:&str,args:&Value)->Value {
+    if !matches!(name,"browser_action"|"write_stdin"){return args.clone();}
+    let parsed=if let Some(text)=args.as_str(){serde_json::from_str(text).ok()}else{Some(args.clone())};
+    let Some(mut value)=parsed.filter(Value::is_object) else{return json!({"input_redacted":true});};
+    // Keep only schema fields. Invalid unknown fields can contain input too.
+    let object=value.as_object_mut().unwrap();
+    object.retain(|key,_|if name=="write_stdin"{key=="execution_id"}else{["action","ref","amount","tab"].contains(&key.as_str())});
+    for field in object.values_mut(){if !field.is_string()&&!field.is_number(){*field=json!("[скрыто]");}}
+    if args.get("text").is_some()||args.is_string(){object.insert("text".into(),json!("[ввод скрыт]"));}
+    value
+}
+pub fn public_record(record:&mut Value){
+    let name=record["name"].as_str().unwrap_or("").to_string();
+    if matches!(name.as_str(),"browser_action"|"write_stdin"){
+        record["arguments"]=public_arguments(&name,&record["arguments"]);
+        record.as_object_mut().unwrap().remove("arguments_artifact");
+    }
+}
+pub fn public_history(history:&mut [Value]){
+    for message in history.iter_mut().filter(|message|message["role"]=="assistant"){
+        for call in message["tool_calls"].as_array_mut().into_iter().flatten(){
+            let name=call["function"]["name"].as_str().unwrap_or("").to_string();
+            call["function"]["arguments"]=public_arguments(&name,&call["function"]["arguments"]);
+        }
+    }
+}
+pub fn public_chat(chat:&mut crate::api::Conversation){
+    for message in &mut chat.messages{for tool in &mut message.tools{public_record(tool);}}
+    public_history(&mut chat.history);
+}
+pub fn public_event(event:&mut Value){
+    match event["type"].as_str().unwrap_or(""){
+        "tool_start"=>public_record(event),
+        "tool_result"=>public_record(&mut event["tool"]),
+        "saved"=>if let Ok(mut chat)=serde_json::from_value::<crate::api::Conversation>(event["conversation"].clone()){public_chat(&mut chat);event["conversation"]=serde_json::to_value(chat).unwrap();},
+        _=>{}
+    }
+}
 pub async fn execute(
     app: &Shared,
     name: &str,
@@ -475,7 +522,7 @@ pub async fn execute(
         },
         "write_stdin"=>{
             let id=string(&args,"execution_id")?;let text=string(&args,"text")?;crate::processes::ensure_owner(app,id).await?;
-            approval(app,"Ввод в процесс",&format!("Процесс: {id}\n\n{text}"),tx,cancel,tool_id).await?;
+            approval_details(app,"Ввод в процесс",&format!("Процесс: {id}\nОбъём ввода: {} байт. Содержимое доступно для просмотра до решения и не сохраняется в журнале параметров.",text.len()),Some(text),tx,cancel,tool_id,crate::permissions::Scope::once()).await?;
             crate::processes::input(app,id,text,cancel).await?;
             Ok(json!({"execution_id":id,"bytes_written":text.len(),"note":"Ввод отправлен; результат нужно проверить через poll_process."}).to_string())
         },
@@ -506,7 +553,7 @@ pub async fn execute(
                     "select" => "Выбрать значение",
                     _ => "Нажать клавишу",
                 };
-                let entered = if element["type"] == "password" {
+                let entered = if matches!(args["action"].as_str(),Some("fill"|"select")) {
                     "••••••••"
                 } else {
                     args["text"]
@@ -894,6 +941,17 @@ pub fn definitions() -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn private_inputs_never_enter_trace_arguments(){
+        for name in ["browser_action","write_stdin"]{
+            for args in [json!({"action":"fill","ref":"r1","execution_id":"id","text":"private-secret"}),json!("{\"action\":\"fill\",\"text\":\"private-secret\"}"),json!("malformed private-secret"),json!({"text":{"nested":"private-secret"}})]{
+                assert!(!public_arguments(name,&args).to_string().contains("private-secret"));
+            }
+        }
+        let mut history=vec![json!({"role":"user","content":"private-secret"}),json!({"role":"assistant","tool_calls":[{"function":{"name":"browser_action","arguments":{"action":"fill","text":"private-secret"}}}]})];
+        public_history(&mut history);assert_eq!(history[0]["content"],"private-secret");assert!(!history[1].to_string().contains("private-secret"));
+        let mut event=json!({"type":"tool_result","tool":{"name":"write_stdin","arguments":{"text":"private-secret"},"arguments_artifact":{"id":"old"}}});public_event(&mut event);assert!(!event.to_string().contains("private-secret"));assert!(event["tool"].get("arguments_artifact").is_none());
+    }
     use super::*;
     #[tokio::test(start_paused = true)]
     async fn confirmation_waits_without_deadline_and_cancellation_cleans_it_up() {
