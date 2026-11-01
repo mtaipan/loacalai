@@ -77,10 +77,20 @@ async function initializeWorkspace(){
     await handleRunEvent(event,false,session,id);
   },{persistent:true,cursor:snapshot.cursor}).catch(error=>{workspaceStreamStarted=false;toast('Соединение с задачами потеряно: '+error.message,true);});
 }
-async function finishConversationRun(session,id){
+async function finishConversationRun(session,id,run=session.run){
+  // Keep admission blocked until the final view loads: a late fetch must not
+  // clear the stream of the next run in this conversation.
+  if(!run||session.run!==run)return;
+  let finished= session.chat;
+  if(visibleConversation()===id)try{finished=await api('/api/chats/'+id);}catch(error){
+    toast('Не удалось загрузить сохранённую историю. Показана полученная часть ответа: '+error.message,true);
+    const chat=session.chat||state.chat;
+    if(chat?.id===id)finished={...chat,messages:[...chat.messages,{id:run+'-local',role:'assistant',content:session.streamText,tools:session.streamTools,created:new Date().toISOString(),diagnostics:{recovery_pending:true}}]};
+  }
+  if(session.run!==run)return;
+  session.chat=finished;
   session.busy=false;session.run=null;session.submitting=false;session.approvals=[];
-  if(!session.chat)try{session.chat=await api('/api/chats/'+id);}catch(error){toast(error.message,true);}
-  if(visibleConversation()===id){clearTimeout(renderTimer);renderTimer=null;paintStream();if(session.chat)state.chat=session.chat;renderCompletedConversation();updateSend();}
+  if(visibleConversation()===id){clearTimeout(renderTimer);renderTimer=null;paintStream();if(session.chat){state.chat=session.chat;document.getElementById('chat-title').textContent=state.chat.title;}renderCompletedConversation();updateSend();}
   session.streamText='';session.streamThinking='';session.streamTools=[];session.chat=null;
   if(visibleConversation()!==id)prunePreviousSession(id);
   stopResponseTimer();await refreshChats();
@@ -139,10 +149,10 @@ async function submitMessage(retry=false){
       const accepted=await api('/api/runs',{method:'POST',body:payload});
       if(!retry)clearAcceptedDraft(session,id,{...payload,submittedDraft:raw});else{session.submission=null;persistDraft(id,session);}
       if(session.cancelRequested)await api('/api/stop/'+payload.request_id,{method:'POST',body:{}});
-      if(!['running','queued','awaiting_approval','stopping'].includes(accepted.status)&&session.busy){session.chat=await api('/api/chats/'+id);await finishConversationRun(session,id);}
+      if(!['running','queued','awaiting_approval','stopping'].includes(accepted.status)&&session.run===payload.request_id){session.ignoreThrough=Math.max(session.ignoreThrough||0,accepted.last_sequence||0);await finishConversationRun(session,id,payload.request_id);}
     }catch(error){
       let accepted=false;
-      if(!error.status)try{const run=await api('/api/runs/'+payload.request_id);accepted=true;if(!['running','queued','awaiting_approval','stopping'].includes(run.status))await finishConversationRun(session,id);}catch{}
+      if(!error.status)try{const run=await api('/api/runs/'+payload.request_id);accepted=true;if(!['running','queued','awaiting_approval','stopping'].includes(run.status)){session.ignoreThrough=Math.max(session.ignoreThrough||0,run.last_sequence||0);await finishConversationRun(session,id,payload.request_id);}}catch{}
       if(!accepted){session.busy=false;session.run=null;try{session.chat=await api('/api/chats/'+id);}catch{}if(visibleConversation()===id){state.chat=session.chat||state.chat;renderMessages();}await refreshChats();}
       toast(error.message,true);
     }

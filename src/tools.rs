@@ -224,7 +224,7 @@ pub async fn capture(
         .stdin(Stdio::null())
         .kill_on_drop(true);
     let mut group = crate::process_group::Group::prepare(&mut command)?;
-    let deadline = crate::lifecycle::deadline(seconds);
+    let deadline = crate::lifecycle::deadline(seconds)?;
     let mut child = command.spawn()?;
     if let Err(error) = group.attach(&child) {
         group.terminate();
@@ -410,6 +410,7 @@ pub async fn execute(
     if let Some(text) = args.as_str() {
         args = serde_json::from_str(text)?;
     }
+    crate::tool_schema::validate(name,&args)?;
     let root = PathBuf::from(app.settings.lock().await.workspace.clone());
     match name {
         "inspect_project" => {
@@ -447,8 +448,26 @@ pub async fn execute(
                 anyhow::ensure!(sequence>0,"Номер запроса должен быть положительным");
                 Ok(app.tasks.task_request(id,sequence,usize::try_from(args["offset"].as_u64().unwrap_or(0))?).await?.to_string())
             } else {
-                Ok(app.tasks.task(id,args["after"].as_i64().unwrap_or(0)).await?.to_string())
+                let mut state=app.tasks.task(id.clone(),args["after"].as_i64().unwrap_or(0)).await?;
+                state["active_processes"]=json!(crate::processes::for_task(app,&id).await?);
+                Ok(state.to_string())
             }
+        },
+        "poll_process" => {
+            let id=string(&args,"execution_id")?;crate::processes::ensure_owner(app,id).await?;
+            let mut report=crate::processes::poll(app,id,args["wait_ms"].as_u64().unwrap_or(1000),cancel).await?;
+            for stream in ["stdout","stderr"] {let offset=args[format!("{stream}_offset")].as_u64().unwrap_or(0);let page=crate::processes::log(app,id,stream,offset).await?;report[stream]=page["text"].clone();report[format!("{stream}_page")]=page;}
+            Ok(report.to_string())
+        },
+        "write_stdin"=>{
+            let id=string(&args,"execution_id")?;let text=string(&args,"text")?;crate::processes::ensure_owner(app,id).await?;
+            approval(app,"Ввод в процесс",&format!("Процесс: {id}\n\n{text}"),tx,cancel,tool_id).await?;
+            crate::processes::input(app,id,text,cancel).await?;
+            Ok(json!({"execution_id":id,"bytes_written":text.len(),"note":"Ввод отправлен; результат нужно проверить через poll_process."}).to_string())
+        },
+        "stop_process"=>{
+            let id=string(&args,"execution_id")?;crate::processes::ensure_owner(app,id).await?;crate::processes::stop(app,id).await?;
+            Ok(crate::processes::wait(app,id).await?.to_string())
         },
         "get_system_paths" => Ok(crate::system_paths::describe().to_string()),
         "web_search" | "fetch_url" | "browser_open" | "browser_read" | "browser_action" => {
@@ -785,7 +804,7 @@ pub async fn execute(
             .await?
             .to_string())
         }
-        "run_command" => {
+        "run_command" | "start_process" => {
             let script = string(&args, "command")?;
             let directory = crate::projects::directory(app, args["directory"].as_str()).await?;
             let seconds = args["timeout_seconds"].as_u64().unwrap_or(0);
@@ -796,7 +815,7 @@ pub async fn execute(
             };
             approval_scoped(
                 app,
-                "Выполнить команду",
+                if name=="start_process" {"Запустить управляемый процесс"} else {"Выполнить команду"},
                 &format!(
                     "Папка: {}\n{limit}\nПрава вашего пользователя, включая доступ вне папки.\n\n{script}",
                     directory.display()
@@ -812,7 +831,7 @@ pub async fn execute(
                 resolved == directory,
                 "Папка изменилась после подтверждения"
             );
-            crate::executions::run(app, script, &directory, seconds, cancel).await
+            if name=="start_process" {Ok(crate::processes::start(app,script,&directory,seconds,cancel,true).await?.to_string())}else{crate::executions::run(app, script, &directory, seconds, cancel).await}
         }
         _ => anyhow::bail!("Неизвестный инструмент: {name}"),
     }
@@ -823,6 +842,10 @@ pub fn definitions() -> Value {
     }
     let s = json!({"type":"string"});
     json!([
+        f("start_process","Start an approved managed foreground process, such as a dev server or stdin-enabled CLI (not a PTY; TTY-only programs are unsupported). Returns execution_id immediately, without declaring the application ready. Use poll_process to read logs and verify readiness; stdin needs a separate confirmation. The owned process survives a successful run in this task, but stops on its initiating run cancellation or application shutdown. Background descendants do not detach from the owner. No deadline unless the user requests it.",json!({"command":s,"directory":s,"timeout_seconds":{"type":"integer","minimum":0}}),&["command"]),
+        f("poll_process","Read the state and paged stdout/stderr of this task's process. Use the returned per-stream next_offset for subsequent reads; full raw logs remain on disk. wait_ms waits for a state change or returns a partial snapshot. Running and exit_code=0 are not proof of project correctness.",json!({"execution_id":s,"wait_ms":{"type":"integer","minimum":0},"stdout_offset":{"type":"integer","minimum":0},"stderr_offset":{"type":"integer","minimum":0}}),&["execution_id"]),
+        f("write_stdin","Write exact text to a managed process in this task, with confirmation. Include an actual newline when needed. Does not infer success of the operation; read subsequent output with poll_process.",json!({"execution_id":s,"text":s}),&["execution_id","text"]),
+        f("stop_process","Stop this task's managed process and its owned descendants. Preserve logs and wait for process cleanup. Does not undo completed side effects.",json!({"execution_id":s}),&["execution_id"]),
         f("read_task","Read the persistent current task goal, user requests, current plan and run states. Plans are agent claims, not verified completion. Requests have stable sequence IDs; use request and offset for full text, after for the next request-index page. Reconcile interrupted run effects before repeating mutations.",json!({"request":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"after":{"type":"integer","minimum":0}}),&[]),
         f("security_analyze","Ask the locally installed Foundation-Sec specialist to analyze supplied evidence, such as code, logs, or actual page/tool results. Pass the relevant text and the user's question. Does not run a live exploit or verify findings. No automatic model download.",json!({"question":s,"evidence":s}),&["question","evidence"]),
         f("get_system_paths","Get actual OS user Desktop, Documents, Downloads and home paths. These are not the workspace or a drive root. Resolve these instead of guessing. @desktop/file.txt is a supported path alias.",json!({}),&[]),

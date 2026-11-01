@@ -220,6 +220,8 @@ pub struct Run {
     pub conversation: String,
 }
 pub struct App {
+    pub processes: Mutex<HashMap<String,crate::processes::Active>>,
+    pub process_recovery_errors:Vec<String>,
     pub settings_write: Mutex<()>,
     pub resources: crate::resources::Broker,
     pub tasks: crate::task_store::Store,
@@ -296,7 +298,10 @@ impl App {
         let compute = crate::compute::Runtime::load(&data);
         let tasks = crate::task_store::Store::open(&data)?;
         tasks.recover_deletions(&data)?;
+        let process_recovery_errors=crate::processes::recover(&data)?;
         Ok(Self {
+            processes:Mutex::new(HashMap::new()),
+            process_recovery_errors,
             settings_write: Mutex::new(()),
             resources: Default::default(),
             tasks,
@@ -378,6 +383,9 @@ pub fn router(app: Shared) -> Router {
         .route("/api/project/inspect", post(inspect_project))
         .route("/api/project/git", post(project_git))
         .route("/api/executions/{id}", get(execution))
+        .route("/api/executions/{id}/logs/{stream}", get(execution_log))
+        .route("/api/executions/{id}/stop", post(stop_execution))
+        .route("/api/executions/{id}/input", post(process_input))
         .route("/api/changes", get(changes))
         .route("/api/changes/{id}/restore", post(restore_change))
         .route("/api/chat", post(send))
@@ -563,7 +571,7 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
     let models = crate::model_storage::tags(&app).await;
     let compute = crate::compute::summary(&app).await;
     Json(
-        json!({"compute":compute,"online":models["online"],"model_locations":models["locations"],"storage_errors":models["errors"],"models":models["models"],"python":tools::python(&app).map(|p|p.to_string_lossy().to_string()),"models_path":app.data.join("models").to_string_lossy(),"speech_ready":tools::speech_model(&app).join("model.bin").exists(),"workspace":app.settings.lock().await.workspace,"hotkey":hotkey,"active_tasks":app.runs.lock().await.len(),"models_busy":app.model_lifecycle.try_write().is_err(),"quick_busy":matches!(app.quick.lock().await["status"].as_str(),Some("translating"|"capturing"))}),
+        json!({"process_recovery_errors":app.process_recovery_errors,"compute":compute,"online":models["online"],"model_locations":models["locations"],"storage_errors":models["errors"],"models":models["models"],"python":tools::python(&app).map(|p|p.to_string_lossy().to_string()),"models_path":app.data.join("models").to_string_lossy(),"speech_ready":tools::speech_model(&app).join("model.bin").exists(),"workspace":app.settings.lock().await.workspace,"hotkey":hotkey,"active_tasks":app.runs.lock().await.len(),"models_busy":app.model_lifecycle.try_write().is_err(),"quick_busy":matches!(app.quick.lock().await["status"].as_str(),Some("translating"|"capturing"))}),
     )
 }
 async fn settings(
@@ -584,6 +592,7 @@ async fn settings(
         "Неизвестный режим прав",
     )?;
     value.assistant.validate()?;
+    crate::lifecycle::deadline(value.agent_timeout_seconds)?;
     value.context.validate()?;
     value.web.validate()?;
     crate::models::validate_settings(&value)?;
@@ -784,6 +793,7 @@ async fn delete_chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
         !runs.values().any(|r| r.conversation == id),
         "Дождитесь завершения ответа или остановите его",
     )?;
+    require(!crate::processes::has_live_conversation(&app,&id).await,"Сначала остановите управляемые процессы в разделе задачи")?;
     if let Some(session) = app.web_sessions.lock().await.remove(&id) {
         session.lock().await.close().await;
     }
@@ -943,11 +953,21 @@ async fn project_git(State(app): State<Shared>, Json(value): Json<Value>) -> Api
         .await?,
     ))
 }
-async fn execution(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
-    Uuid::parse_str(&id)?;
-    Ok(Json(serde_json::from_slice(
-        &tokio::fs::read(app.data.join("executions").join(format!("{id}.json"))).await?,
-    )?))
+async fn execution(State(app): State<Shared>, Path(id): Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>) -> ApiResult<Value> {
+    if let Some(stream)=q.get("stream") {let offset=q.get("offset").map(|v|v.parse::<u64>()).transpose()?.unwrap_or(0);return Ok(Json(crate::processes::log(&app,&id,stream,offset).await?));}
+    Ok(Json(crate::processes::view(&app,&id).await?))
+}
+async fn stop_execution(State(app):State<Shared>,Path(id):Path<String>)->ApiResult<Value>{crate::processes::stop(&app,&id).await?;Ok(Json(json!({"stop_requested":true})))}
+async fn process_input(State(app):State<Shared>,Path(id):Path<String>,Json(value):Json<Value>)->ApiResult<Value>{
+    let text=value["text"].as_str().ok_or_else(||anyhow::anyhow!("Не задан текст для stdin"))?;crate::processes::input(&app,&id,text,&app.shutdown.child_token()).await?;Ok(Json(json!({"bytes_written":text.len()})))
+}
+async fn execution_log(State(app):State<Shared>,Path((id,stream)):Path<(String,String)>)->Result<Response,ApiError>{
+    use tokio::io::AsyncReadExt;
+    let path=crate::processes::log_path(&app,&id,&stream)?;let file=tokio::fs::File::open(path).await?;let length=file.metadata().await?.len();let mut file=file.take(length);
+    let bytes=async_stream::stream!{let mut buffer=vec![0u8;65536];loop{match file.read(&mut buffer).await {Ok(0)=>break,Ok(count)=>yield Ok::<_,std::io::Error>(buffer[..count].to_vec()),Err(error)=>{yield Err(error);break;}}}};
+    let mut headers=HeaderMap::new();headers.insert("content-type","application/octet-stream".parse()?);headers.insert("content-disposition",format!("attachment; filename=\"execution-{id}-{stream}.log\"").parse()?);
+    headers.insert("content-length",length.to_string().parse()?);
+    Ok((headers,Body::from_stream(bytes)).into_response())
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChatInput {
@@ -1014,7 +1034,7 @@ async fn create_run(State(app): State<Shared>, Json(input): Json<ChatInput>) -> 
     let id = start_run(app.clone(), input).await?;
     let run = app.tasks.get(id.clone()).await?;
     Ok(Json(
-        json!({"accepted":true,"run_id":id,"conversation":conversation,"status":run["status"]}),
+        json!({"accepted":true,"run_id":id,"conversation":conversation,"status":run["status"],"last_sequence":run["last_sequence"]}),
     ))
 }
 async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
@@ -1047,6 +1067,12 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     Uuid::parse_str(&run_id)?;
+    if app.tasks.get(run_id.clone()).await.is_err() {
+        for id in &input.attachments {
+            let file=attachment(&app,id).await?;
+            require(tokio::fs::metadata(&file.path).await?.is_file(),"Вложение больше не доступно")?;
+        }
+    }
     {
         let mut runs = app.runs.lock().await;
         app.load(&input.conversation).await?;
@@ -1116,6 +1142,7 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
             .await;
         let started = std::time::Instant::now();
         let conversation = input.conversation.clone();
+        let mut final_status="completed";
         if let Err(error) = crate::permissions::TASK
             .scope(
                 id.clone(),
@@ -1123,6 +1150,10 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
             )
             .await
         {
+            final_status=if cancel.is_cancelled(){"cancelled"}else{"failed"};
+            // A failed attempt must not leave its managed processes mutating files.
+            cancel.cancel();
+            crate::processes::cancel_run(&worker,&id).await;
             let diagnostic = format!("{error:#}");
             if let Ok(mut chat) = worker.load(&conversation).await {
                 if chat.messages.last().is_some_and(|m| m.role == "user") {
@@ -1142,17 +1173,18 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
                     });
                     chat.updated = now();
                     let _ = worker.save(&chat).await;
-                    let _ = tx.send(json!({"type":"saved","conversation":chat})).await;
+                    let _ = tx.send(json!({"type":"saved","conversation_id":chat.id,"updated":chat.updated,"message_count":chat.messages.len(),"ref_only":true})).await;
                 }
             }
             eprintln!("Chat {conversation}: {diagnostic}");
             let _ = tx
                 .send(
-                    json!({"type":"error","message":diagnostic,"cancelled":cancel.is_cancelled()}),
+                    json!({"type":"error","message":diagnostic,"cancelled":final_status=="cancelled"}),
                 )
                 .await;
         }
-        let _ = tx.send(json!({"type":"done","status":if cancel.is_cancelled(){"cancelled"}else{"completed"}})).await;
+        if cancel.is_cancelled() {crate::processes::cancel_run(&worker,&id).await;if final_status=="completed" {final_status="cancelled";}}
+        let _ = tx.send(json!({"type":"done","status":final_status})).await;
     });
     Ok(run_id)
 }
@@ -1287,7 +1319,7 @@ async fn conversation_tasks(State(app):State<Shared>,Path(id):Path<String>)->Api
 async fn task_state(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
     let after=q.get("after").map(|v|v.parse::<i64>()).transpose()?.unwrap_or(0);
     require(after>=0,"Курсор должен быть неотрицательным")?;
-    Ok(Json(app.tasks.task(id,after).await?))
+    let mut task=app.tasks.task(id.clone(),after).await?;task["active_processes"]=json!(crate::processes::for_task(&app,&id).await?);Ok(Json(task))
 }
 async fn task_request(State(app):State<Shared>,Path((id,sequence)):Path<(String,i64)>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
     let offset=q.get("offset").map(|v|v.parse::<usize>()).transpose()?.unwrap_or(0);

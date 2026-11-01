@@ -30,6 +30,7 @@ async function showTaskState(){
       const project=document.createElement('p');project.className='form-help';project.textContent='Рабочая папка: '+(task.project||'Не указана');content.append(project);
       const resume=document.createElement('button');resume.className='button';resume.textContent='Выбрать для продолжения';resume.onclick=()=>{currentSession().selectedTask=task.id;currentSession().nextTask=false;captureDraft();renderTaskIntent();dialog.close();document.getElementById('prompt').focus();};content.append(resume);
       const note=document.createElement('p');note.className='form-help';note.textContent='Отметки плана выставляет агент. Завершённый ответ не подтверждает готовность всей задачи.';content.append(note);
+      for(const process of task.active_processes||[]){const button=document.createElement('button');button.className='button';button.textContent='Процесс: '+process.command_preview;button.onclick=()=>showProcess(process.execution_id);content.append(button);}
       if(task.plan){const list=document.createElement('ol');for(const step of task.plan.steps){const item=document.createElement('li');item.textContent=({pending:'Ожидает',in_progress:'В работе',completed:'Отмечено агентом как выполненное'}[step.status]||step.status)+': '+step.title;list.append(item);}content.append(list);}
       const requests=document.createElement('div');content.append(requests);
       function appendRequests(page){

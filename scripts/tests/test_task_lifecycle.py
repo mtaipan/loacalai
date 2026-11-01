@@ -114,6 +114,10 @@ try:
     response.close()  # Subscriber disappears while inference is still running.
     replay = events(f'/api/runs/{rid}/events?after={first["sequence"]}')
     assert replay[-1]['type'] == 'done', replay
+    saved_event=next(e for e in replay if e['type']=='saved')
+    assert saved_event['ref_only'] and 'conversation' not in saved_event
+    assert len(json.dumps(saved_event))<512
+
     assert any(e.get('text') == 'DURABLE_RESULT' for e in replay)
     assert len(requests) == 1
     events('/api/chat', body)  # Same request must only replay the saved result.
@@ -122,6 +126,11 @@ try:
     assert read('/api/runs/'+rid)['status'] == 'completed'
     assert read('/api/runs',body)['status']=='completed'
     assert len(requests)==1
+    invalid_id=str(uuid.uuid4());invalid={**body,'request_id':invalid_id,'attachments':[str(uuid.uuid4())]}
+    try:read('/api/runs',invalid)
+    except urllib.error.HTTPError as error:assert error.code==404
+    else:raise AssertionError('Missing attachment must fail before admission')
+    assert not any(run['id']==invalid_id for run in read('/api/runs'))
     print('PASS disconnect, ordered replay, idempotent submission and persisted result')
 
     from playwright.sync_api import sync_playwright

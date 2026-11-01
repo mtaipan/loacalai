@@ -1,10 +1,11 @@
 //! Optional user deadlines. Zero means unlimited; an operation timeout is not a task lifetime.
-use anyhow::Result;
+use anyhow::{Context,Result};
 use std::{future::Future, time::Duration};
 use tokio::time::Instant;
 
-pub fn deadline(seconds: u64) -> Option<Instant> {
-    (seconds != 0).then(|| Instant::now() + Duration::from_secs(seconds))
+pub fn deadline(seconds: u64) -> Result<Option<Instant>> {
+    if seconds==0 {return Ok(None);}
+    Ok(Some(Instant::now().checked_add(Duration::from_secs(seconds)).context("Срок не представим системными часами")?))
 }
 pub async fn wait(deadline: Option<Instant>) {
     match deadline {
@@ -30,11 +31,12 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_secs(7201)).await;
             Ok(7)
         };
-        assert_eq!(super::bounded(super::deadline(0), work).await.unwrap(), 7);
+        assert_eq!(super::bounded(super::deadline(0).unwrap(), work).await.unwrap(), 7);
         let work = async {
             tokio::time::sleep(std::time::Duration::from_secs(20)).await;
             Ok(7)
         };
-        assert!(super::bounded(super::deadline(10), work).await.is_err());
+        assert!(super::bounded(super::deadline(10).unwrap(), work).await.is_err());
+        assert!(super::deadline(u64::MAX).is_err());
     }
 }

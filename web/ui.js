@@ -1,7 +1,7 @@
 'use strict';
 let settingsDirty=false,settingsLoaded=false,settingsSaving=false,settingsRevision=0,settingsEditVersion=0;
 let settingsCategory='general';
-const toolLabels={read_task:'Цель и состояние задачи',update_plan:'План задачи',web_search:'Поиск в интернете',fetch_url:'Чтение страницы',browser_open:'Открытие страницы',browser_read:'Просмотр страницы',browser_action:'Действие на сайте',inspect_project:'Обзор проекта',git_info:'Состояние Git',list_files:'Список файлов',read_file:'Чтение файла',find_files:'Поиск файлов',search_files:'Поиск по содержимому',write_file:'Запись файла',edit_file:'Изменение файла',copy_file:'Копирование файла',move_file:'Перемещение файла',delete_file:'Удаление файла',translate_text:'Перевод текста',translate_file:'Перевод файла',read_document:'Чтение документа',read_image:'Распознавание текста на изображении',transcribe_audio:'Распознавание речи',record_microphone:'Запись микрофона',run_command:'Команда',security_analyze:'Анализ Foundation-Sec',get_system_paths:'Папки пользователя'};
+const toolLabels={start_process:'Запуск процесса',poll_process:'Вывод процесса',write_stdin:'Ввод в процесс',stop_process:'Остановка процесса',read_task:'Цель и состояние задачи',update_plan:'План задачи',web_search:'Поиск в интернете',fetch_url:'Чтение страницы',browser_open:'Открытие страницы',browser_read:'Просмотр страницы',browser_action:'Действие на сайте',inspect_project:'Обзор проекта',git_info:'Состояние Git',list_files:'Список файлов',read_file:'Чтение файла',find_files:'Поиск файлов',search_files:'Поиск по содержимому',write_file:'Запись файла',edit_file:'Изменение файла',copy_file:'Копирование файла',move_file:'Перемещение файла',delete_file:'Удаление файла',translate_text:'Перевод текста',translate_file:'Перевод файла',read_document:'Чтение документа',read_image:'Распознавание текста на изображении',transcribe_audio:'Распознавание речи',record_microphone:'Запись микрофона',run_command:'Команда',security_analyze:'Анализ Foundation-Sec',get_system_paths:'Папки пользователя'};
 function toolTitle(name){return toolLabels[name]||name;}
 let settingsFormCache=null;
 let uiEvents=new AbortController();
@@ -9,6 +9,7 @@ function uiListen(target,type,handler,options={}){target.addEventListener(type,h
 function resetUI(){
   if(settingsDirty&&document.getElementById('settings-dialog'))settingsFormCache=[...document.querySelectorAll('#settings-dialog input[id],#settings-dialog select[id],#settings-dialog textarea[id]')].map(input=>({id:input.id,value:input.value,checked:input.checked,options:input.tagName==='SELECT'?[...input.options].map(option=>({value:option.value,text:option.text,disabled:option.disabled})):null}));
   else{settingsFormCache=null;settingsLoaded=false;}
+  document.querySelectorAll('.workspace-dialog').forEach(dialog=>{dialog.close();dialog.remove();});
   uiEvents.abort();uiEvents=new AbortController();document.getElementById('sidebar-backdrop')?.remove();clearInterval(state.statusTimer);clearInterval(responseTimer);clearTimeout(renderTimer);renderTimer=null;closeModelMenu();
 }
 function showSettingsCategory(id){

@@ -13,6 +13,7 @@ mod model_adapter;
 mod model_storage;
 mod models;
 mod process_group;
+mod processes;
 mod permissions;
 mod projects;
 mod reranker;
@@ -29,6 +30,7 @@ mod task_store;
 mod task_state;
 mod thinking;
 mod tools;
+mod tool_schema;
 mod web_tools;
 
 use anyhow::Result;

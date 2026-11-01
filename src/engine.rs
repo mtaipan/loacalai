@@ -968,7 +968,7 @@ pub async fn run(
             let think=crate::thinking::resolve(&input.thinking,&crate::thinking::show_cancellable(&app,&selected,&cancel).await?)?;
             let instruction=crate::agent::review_instruction(&input.content).unwrap();
             let operation=review_attachment(&app,&selected,&instruction,&context,&think,tx,&cancel);
-            let (text,parts,inferences)=crate::lifecycle::bounded(crate::lifecycle::deadline(settings.agent_timeout_seconds),operation).await?;
+            let (text,parts,inferences)=crate::lifecycle::bounded(crate::lifecycle::deadline(settings.agent_timeout_seconds)?,operation).await?;
             answer.content=if parts>1 {format!("Вложение разобрано на {parts} частей; итог собран по заметкам к ним. Связи между частями требуют дополнительной проверки.\n\n{text}")} else {text};
             answer.diagnostics=Some(json!({"model":selected,"tools_enabled":false,"attachment_review":true,"source_parts":parts,"context_config":settings.context,"inferences":inferences,"summary_based":parts>1}));
             emit(tx,json!({"type":"token","text":answer.content})).await?;
@@ -1034,7 +1034,7 @@ pub async fn run(
             }
             history.push(json!({"role":"user","content":context}));
             let mut budget = crate::agent::Budget::new(settings.agent_max_actions);
-            let deadline = crate::lifecycle::deadline(settings.agent_timeout_seconds);
+            let deadline = crate::lifecycle::deadline(settings.agent_timeout_seconds)?;
             let turn_tools_start=answer.tools.len();
             let mut grounding_retry=false;
             let mut browser_claim_retry=false;
@@ -1255,7 +1255,7 @@ pub async fn run(
     chat.messages.push(answer);
     chat.updated = now();
     app.save(&chat).await?;
-    emit(tx, json!({"type":"saved","conversation":chat})).await?;
+    emit(tx, json!({"type":"saved","conversation_id":chat.id,"updated":chat.updated,"message_count":chat.messages.len(),"ref_only":true})).await?;
     result
 }
 pub async fn pull_models(app: &Shared, models: &[String], tx: &mpsc::Sender<Value>) -> Result<()> {

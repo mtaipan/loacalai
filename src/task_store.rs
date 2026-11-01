@@ -165,7 +165,8 @@ impl Store {
     pub async fn get(&self, id: String) -> Result<Value> {
         self.access(move |conn| {
             let (conversation,status,input): (String,String,String) = conn.query_row("SELECT conversation,status,input FROM runs WHERE id=?1", [&id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(MissingRun)?;
-            Ok(json!({"id":id,"conversation":conversation,"status":status,"input":serde_json::from_str::<Value>(&input)?}))
+            let sequence:i64=conn.query_row("SELECT COALESCE(MAX(sequence),0) FROM events WHERE run=?1",[&id],|r|r.get(0))?;
+            Ok(json!({"id":id,"conversation":conversation,"status":status,"input":serde_json::from_str::<Value>(&input)?,"last_sequence":sequence}))
         }).await
     }
     pub async fn list(&self) -> Result<Value> {
