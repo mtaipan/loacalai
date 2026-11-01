@@ -47,11 +47,12 @@ impl Store {
         let conn = Connection::open(data.join("tasks.sqlite3"))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 1,
+            version <= 2,
             "База задач создана более новой версией приложения; исходный файл сохранён"
         );
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
+        conn.pragma_update(None, "foreign_keys", true)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS runs (
             id TEXT PRIMARY KEY, conversation TEXT NOT NULL, input TEXT NOT NULL,
@@ -60,7 +61,8 @@ impl Store {
             sequence INTEGER PRIMARY KEY AUTOINCREMENT, run TEXT NOT NULL,
             payload TEXT NOT NULL, FOREIGN KEY(run) REFERENCES runs(id));
             CREATE INDEX IF NOT EXISTS events_run ON events(run,sequence);
-            PRAGMA user_version=1;",
+            CREATE TABLE IF NOT EXISTS deleted_conversations (id TEXT PRIMARY KEY);
+            PRAGMA user_version=2;",
         )?;
         // A crash leaves effects with unknown outcome. Never replay mutations automatically.
         conn.execute(
@@ -68,6 +70,32 @@ impl Store {
             [crate::api::now()],
         )?;
         Ok(Self(Arc::new(Mutex::new(conn))))
+    }
+    pub async fn is_deleted(&self, id: String) -> Result<bool> {
+        self.access(move |conn| Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM deleted_conversations WHERE id=?1)", [id], |r|r.get(0))?)).await
+    }
+    /// A persistent tombstone closes the JSON/SQLite crash window. It contains only an ID.
+    pub async fn delete_conversation(&self, id: String) -> Result<()> {
+        self.access(move |conn| {
+            let tx=conn.transaction()?;
+            tx.execute("INSERT OR IGNORE INTO deleted_conversations VALUES (?1)", [&id])?;
+            tx.execute("DELETE FROM events WHERE run IN (SELECT id FROM runs WHERE conversation=?1)", [&id])?;
+            tx.execute("DELETE FROM runs WHERE conversation=?1", [&id])?;
+            tx.commit()?;
+            Ok(())
+        }).await
+    }
+    pub fn recover_deletions(&self, data: &Path) -> Result<()> {
+        let conn=self.0.lock().map_err(|_|anyhow::anyhow!("Task store lock poisoned"))?;
+        let mut query=conn.prepare("SELECT id FROM deleted_conversations")?;
+        for id in query.query_map([],|r|r.get::<_,String>(0))? {
+            let id=id?;
+            uuid::Uuid::parse_str(&id)?;
+            match std::fs::remove_file(data.join("chats").join(format!("{id}.json"))) {
+                Ok(())=>{}, Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{}, Err(e)=>return Err(e.into())
+            }
+        }
+        Ok(())
     }
     async fn access<T: Send + 'static>(
         &self,
@@ -85,6 +113,7 @@ impl Store {
     pub async fn begin(&self, id: String, conversation: String, input: Value) -> Result<bool> {
         self.access(move |conn| {
             let tx = conn.transaction()?;
+            anyhow::ensure!(!tx.query_row("SELECT EXISTS(SELECT 1 FROM deleted_conversations WHERE id=?1)", [&conversation], |r|r.get::<_,bool>(0))?, "Чат удалён");
             let old: Option<String> = tx
                 .query_row("SELECT input FROM runs WHERE id=?1", [&id], |r| r.get(0))
                 .optional()?;
@@ -170,6 +199,32 @@ impl Fold {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn deletion_removes_journal_and_recovers_the_json_crash_window() {
+        let dir=std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(dir.join("chats")).unwrap();
+        let chat=uuid::Uuid::new_v4().to_string();
+        let store=Store::open(&dir).unwrap();
+        store.begin("r".into(),chat.clone(),json!({"text":"private"})).await.unwrap();
+        store.append("r".into(),json!({"type":"token","text":"private"})).await.unwrap();
+        store.begin("other".into(),"other-chat".into(),json!({"text":"keep"})).await.unwrap();
+        let path=dir.join("chats").join(format!("{chat}.json"));
+        std::fs::write(&path,b"legacy JSON remaining at crash").unwrap();
+        store.delete_conversation(chat.clone()).await.unwrap();
+        assert!(store.get("r".into()).await.is_err());
+        assert!(store.events("r".into(),0).await.unwrap().is_empty());
+        assert!(store.begin("retry".into(),chat.clone(),json!({})).await.is_err());
+        assert!(store.append("r".into(),json!({"type":"token"})).await.is_err());
+        drop(store);
+        let store=Store::open(&dir).unwrap();
+        store.recover_deletions(&dir).unwrap();
+        assert!(!path.exists());
+        assert!(store.is_deleted(chat).await.unwrap());
+        assert!(store.get("other".into()).await.is_ok());
+        assert_eq!(store.workspace_events(0).await.unwrap().len(),0);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[tokio::test]
     async fn replay_is_ordered_idempotent_and_crash_requires_review() {
         let dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());

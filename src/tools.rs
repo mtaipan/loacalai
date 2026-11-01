@@ -295,8 +295,10 @@ async fn approval_scoped(
     scope: crate::permissions::Scope,
 ) -> Result<()> {
     anyhow::ensure!(!cancel.is_cancelled(), "Остановлено пользователем");
+    let mut pending = app.approvals.lock().await;
     let mode = app.settings.lock().await.permission_mode.clone();
     if app.grants.lock().await.allows(&scope, &mode) {
+        drop(pending);
         engine::emit(
             tx,
             json!({"type":"permission_used","tool_id":tool_id,"scope":scope,"mode":mode}),
@@ -306,13 +308,14 @@ async fn approval_scoped(
     }
     let id = uuid::Uuid::new_v4().to_string();
     let (sender, receiver) = oneshot::channel();
-    app.approvals.lock().await.insert(
+    pending.insert(
         id.clone(),
         crate::permissions::Pending {
             sender,
             scope: scope.clone(),
         },
     );
+    drop(pending);
     if let Err(error) = engine::emit(
         tx,
         json!({"type":"approval","id":id,"tool_id":tool_id,"title":title,"details":details,"scope":scope,"reusable":scope.reusable()}),

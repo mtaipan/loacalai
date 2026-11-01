@@ -1,7 +1,7 @@
 """Real HTTP and Edge against disposable data and fake, delayed inference."""
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import json, os, socket, subprocess, threading, time, uuid, urllib.request
+import json, os, socket, subprocess, threading, time, uuid, urllib.request, urllib.error
 
 project = Path(__file__).resolve().parents[2]
 root = project / 'build-tools' / ('task-test-' + uuid.uuid4().hex[:8])
@@ -270,6 +270,19 @@ try:
     assert cleanup_seen.is_set()
     assert peak==1, f'overlapping inference: {peak}'
     print('PASS cancellation requests model unload and the next inference waits for cleanup')
+    for _ in range(100):
+        if read('/api/status')['active_tasks']==0:break
+        time.sleep(.02)
+    request=urllib.request.Request(base+'/api/chats/'+second['id'],method='DELETE',headers={'X-Studio-Token':token})
+    with http.open(request,timeout=20) as response:assert response.status==200
+    assert not any(run['conversation']==second['id'] for run in read('/api/runs'))
+    for path in ['/api/chats/'+second['id'],'/api/runs/'+body['request_id']]:
+        try:read(path)
+        except urllib.error.HTTPError as error:assert error.code==404
+        else:raise AssertionError('Deleted chat/run remains accessible: '+path)
+    assert not (root/'data/chats'/f"{second['id']}.json").exists()
+    print('PASS deleting a conversation removes its JSON, run inputs and event journal')
+
 finally:
     try: call('/api/shutdown', {}).close()
     except Exception: pass

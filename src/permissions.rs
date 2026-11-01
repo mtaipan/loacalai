@@ -55,6 +55,19 @@ pub struct Pending {
     pub sender: oneshot::Sender<bool>,
     pub scope: Scope,
 }
+/// Lock order for permission decisions: pending -> settings -> grants.
+/// Registration uses the same order, so a policy change cannot miss a new waiter.
+pub async fn resolve_pending(app: &crate::api::Shared) {
+    let mut pending = app.approvals.lock().await;
+    let mode = app.settings.lock().await.permission_mode.clone();
+    let grants = app.grants.lock().await;
+    let ids: Vec<_> = pending.iter()
+        .filter(|(_, item)| item.sender.is_closed() || grants.allows(&item.scope, &mode))
+        .map(|(id, _)| id.clone()).collect();
+    for id in ids {
+        if let Some(item) = pending.remove(&id) { let _ = item.sender.send(true); }
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Grant {
     pub id: String,
@@ -143,6 +156,38 @@ impl Grants {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    #[tokio::test]
+    async fn policy_and_grant_changes_resolve_only_matching_live_waiters() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let app = Arc::new(crate::api::App::new(root.clone()).unwrap());
+        let project = root.join("data/workspace");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut files = Scope::files(&project, vec![project.join("a.txt")], false);
+        files.task = Some("run".into());
+        let command = Scope::command(&project, "echo test");
+        let (sender, mut file_waiter) = oneshot::channel();
+        app.approvals.lock().await.insert("file".into(), Pending {sender, scope:files.clone()});
+        let (sender, mut command_waiter) = oneshot::channel();
+        app.approvals.lock().await.insert("command".into(), Pending {sender, scope:command.clone()});
+        app.settings.lock().await.permission_mode="project".into();
+        resolve_pending(&app).await;
+        assert!(file_waiter.try_recv().unwrap());
+        assert!(matches!(command_waiter.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        app.grants.lock().await.add(&app.data, command.clone(), "project").unwrap();
+        resolve_pending(&app).await;
+        assert!(command_waiter.try_recv().unwrap());
+        let (sender, mut destructive_waiter) = oneshot::channel();
+        app.approvals.lock().await.insert("delete".into(), Pending {sender, scope:Scope::once()});
+        resolve_pending(&app).await;
+        assert!(matches!(destructive_waiter.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        app.settings.lock().await.permission_mode="full".into();
+        resolve_pending(&app).await;
+        assert!(destructive_waiter.try_recv().unwrap());
+        assert!(app.approvals.lock().await.is_empty());
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn grants_match_project_task_and_exact_command_without_granting_outside_files() {
         let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());

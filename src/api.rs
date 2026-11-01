@@ -292,10 +292,12 @@ impl App {
         settings.compute.normalize(settings.cpu_only);
         settings.cpu_only = settings.compute.backend == "cpu";
         let compute = crate::compute::Runtime::load(&data);
+        let tasks = crate::task_store::Store::open(&data)?;
+        tasks.recover_deletions(&data)?;
         Ok(Self {
             settings_write: Mutex::new(()),
             resources: Default::default(),
-            tasks: crate::task_store::Store::open(&data)?,
+            tasks,
             grants: Mutex::new(crate::permissions::Grants::load(&data)?),
             root,
             data,
@@ -326,12 +328,16 @@ impl App {
         Ok(self.data.join("chats").join(format!("{id}.json")))
     }
     pub async fn load(&self, id: &str) -> anyhow::Result<Conversation> {
+        if self.tasks.is_deleted(id.into()).await? {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Чат удалён").into());
+        }
         Ok(serde_json::from_slice(
             &tokio::fs::read(self.chat_path(id)?).await?,
         )?)
     }
     pub async fn save(&self, chat: &Conversation) -> anyhow::Result<()> {
         let _guard = self.storage.lock().await;
+        anyhow::ensure!(!self.tasks.is_deleted(chat.id.clone()).await?, "Чат удалён");
         let path = self.chat_path(&chat.id)?;
         let bytes = serde_json::to_vec_pretty(chat)?;
         tokio::task::spawn_blocking(move || crate::changes::replace(&path, &bytes)).await??;
@@ -647,6 +653,7 @@ async fn settings(
         &serde_json::to_vec_pretty(&value)?,
     )?;
     *app.settings.lock().await = value.clone();
+    crate::permissions::resolve_pending(&app).await;
     Ok(Json(value))
 }
 async fn compute_info(State(app): State<Shared>) -> Json<Value> {
@@ -719,6 +726,7 @@ async fn chats(State(app): State<Shared>) -> ApiResult<Value> {
         if entry.path().extension().is_some_and(|e| e == "json") {
             if let Ok(bytes) = tokio::fs::read(entry.path()).await {
                 if let Ok(chat) = serde_json::from_slice::<Conversation>(&bytes) {
+                    if app.tasks.is_deleted(chat.id.clone()).await? {continue;}
                     items.push(json!({"id":chat.id,"title":chat.title,"updated":chat.updated,"mode":chat.mode,"count":chat.messages.len()}));
                 }
             }
@@ -773,7 +781,12 @@ async fn delete_chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
     if let Some(session) = app.web_sessions.lock().await.remove(&id) {
         session.lock().await.close().await;
     }
-    tokio::fs::remove_file(app.chat_path(&id)?).await?;
+    let path=app.chat_path(&id)?;
+    let _storage=app.storage.lock().await;
+    // Verify existence before accepting deletion, then make its intent durable first.
+    tokio::fs::metadata(&path).await?;
+    app.tasks.delete_conversation(id).await?;
+    tokio::fs::remove_file(path).await?;
     Ok(Json(json!({"ok":true})))
 }
 async fn upload(State(app): State<Shared>, mut form: Multipart) -> ApiResult<Attachment> {
@@ -1065,15 +1078,26 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
     let journal_id = run_id.clone();
     // The receiver lives independently of any HTTP connection.
     tokio::spawn(async move {
+        let mut writable=true;
+        let mut terminal=false;
         while let Some(event) = rx.recv().await {
+            if !writable {continue;}
+            terminal |= event["type"]=="done";
             if let Err(error) = journal.tasks.append(journal_id.clone(), event).await {
                 eprintln!("Cannot persist task {journal_id}: {error:#}");
                 if let Some(run) = journal.runs.lock().await.get(&journal_id) {
                     run.cancel.cancel();
                 }
-                break;
+                // Drain until the producer has stopped; deletion and resource changes
+                // must not observe a finished run while its worker can still act.
+                writable=false;
             }
         }
+        if writable && !terminal {
+            let _=journal.tasks.append(journal_id.clone(), json!({"type":"done","status":"interrupted"})).await;
+        }
+        journal.runs.lock().await.remove(&journal_id);
+        journal.grants.lock().await.finish(&journal_id);
     });
     let worker = app.clone();
     let id = run_id.clone();
@@ -1120,8 +1144,6 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
                 )
                 .await;
         }
-        worker.runs.lock().await.remove(&id);
-        worker.grants.lock().await.finish(&id);
         let _ = tx.send(json!({"type":"done","status":if cancel.is_cancelled(){"cancelled"}else{"completed"}})).await;
     });
     Ok(run_id)
@@ -1239,6 +1261,10 @@ async fn approve(
     }
     let sender = pending.remove(&id).unwrap().sender;
     let _ = sender.send(allowed);
+    drop(pending);
+    if allowed && duration != "once" {
+        crate::permissions::resolve_pending(&app).await;
+    }
     Ok(Json(json!({"ok":true})))
 }
 async fn permission_grants(State(app): State<Shared>) -> ApiResult<Value> {
