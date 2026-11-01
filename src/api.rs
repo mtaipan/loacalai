@@ -126,6 +126,8 @@ pub struct Attachment {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
@@ -974,6 +976,7 @@ async fn send(
             if let Ok(mut chat) = worker.load(&conversation).await {
                 if chat.messages.last().is_some_and(|m| m.role == "user") {
                     chat.messages.push(Message {
+                        material: None,
                         diagnostics: None,
                         duration_ms: Some(
                             started.elapsed().as_millis().min(u64::MAX as u128) as u64

@@ -55,9 +55,9 @@ def call(path, body=None):
     return http.open(urllib.request.Request(base+path,data=json.dumps(body).encode() if body is not None else None,headers={'Content-Type':'application/json','X-Studio-Token':token}),timeout=30)
 def read(path, body=None):
     with call(path,body) as response:return json.load(response)
-def turn(text,mode='agent',thinking='off',chat=None,allow_error=False):
+def turn(text,mode='agent',thinking='off',chat=None,allow_error=False,web='off',attachments=None,retry=False):
     chat=chat or read('/api/chats',{})
-    with call('/api/chat',{'conversation':chat['id'],'content':text,'mode':mode,'source':'en','target':'ru','web':'off','thinking':thinking}) as response:
+    with call('/api/chat',{'conversation':chat['id'],'content':text,'mode':mode,'source':'en','target':'ru','web':web,'thinking':thinking,'attachments':attachments or [],'retry':retry}) as response:
         for line in response:
             if line.startswith(b'data:'):
                 event=json.loads(line[5:]); assert event['type']!='approval',event
@@ -69,6 +69,30 @@ try:
         try:token=read('/api/bootstrap')['token']; break
         except Exception:time.sleep(.1)
     else:raise RuntimeError('Studio startup failed')
+    config=read('/api/bootstrap')['settings']
+    config['assistant']['chat_instructions']='CHAT_PERSONA_FIXTURE'
+    config['assistant']['agent_instructions']='AGENT_PERSONA_FIXTURE'
+    config['assistant']['chat_temperature']=.63
+    config['assistant']['agent_temperature']=.17
+    read('/api/settings',config)
+    history=turn('Remember CONTEXT_URL_MARKER','chat')
+    turn('Explain http://example.com/article','chat',chat=history,web='auto')
+    body=requests[-1]
+    assert any('CONTEXT_URL_MARKER' in m.get('content','') for m in body['messages']),body
+    assert 'CHAT_PERSONA_FIXTURE' in body['messages'][0]['content']
+    assert 'AGENT_PERSONA_FIXTURE' not in body['messages'][0]['content']
+    assert body['options']['temperature']==.63,body
+    turn('Explain the bug and fix it','agent')
+    assert requests[-1]['tools'] and requests[-1]['options']['temperature']==.17
+    boundary='test-'+uuid.uuid4().hex
+    data=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="context.txt"\r\nContent-Type: text/plain\r\n\r\nATTACHMENT_MATERIAL_FIXTURE\r\n--{boundary}--\r\n').encode()
+    req=urllib.request.Request(base+'/api/upload',data=data,headers={'X-Studio-Token':token,'Content-Type':'multipart/form-data; boundary='+boundary})
+    with http.open(req) as response: item=json.load(response)
+    history=turn('Explain the attached material','chat',attachments=[item['id']])
+    history=turn('Explain it again','chat',chat=history)
+    turn('Explain it again','chat',chat=history,retry=True)
+    assert any('ATTACHMENT_MATERIAL_FIXTURE' in m.get('content','') for m in requests[-1]['messages'])
+    print('PASS URL history, chat search persona/sampling, mixed action intent and material reconstruction on retry')
     task=(project/'scripts/tests/fixtures/banking-task.md').read_text(encoding='utf-8')
     for mode in ['chat','agent','team']:
         requests.clear(); chat=turn(task,mode)

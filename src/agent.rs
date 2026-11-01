@@ -336,6 +336,30 @@ pub fn review_instruction(text: &str) -> Option<String> {
     } else {
         vec![text]
     };
+    // Mixed instructions may be split across both edges of a pasted source.
+    // Source identifiers such as fn fix() are not imperative requests.
+    if candidates.iter().any(|line| {
+        let line = line.trim().to_lowercase();
+        !line.contains(['{', '}', ';'])
+            && line.split(|c: char| !c.is_alphanumeric()).any(|word| {
+                [
+                    "исправь",
+                    "измени",
+                    "перепиши",
+                    "сохрани",
+                    "запусти",
+                    "выполни",
+                    "fix",
+                    "modify",
+                    "rewrite",
+                    "save",
+                    "execute",
+                ]
+                .contains(&word)
+            })
+    }) {
+        return None;
+    }
     candidates
         .into_iter()
         .map(str::trim)
@@ -558,24 +582,6 @@ pub fn plan(args: &serde_json::Value) -> anyhow::Result<String> {
 // Other requests still use the agent and per-action confirmation.
 pub fn reply_only(text: &str) -> bool {
     let t = text.trim().to_lowercase();
-    if [
-        "как создать",
-        "как мне ",
-        "как можно ",
-        "how to ",
-        "how do i ",
-        "explain ",
-        "объясни ",
-        "расскажи как ",
-    ]
-    .iter()
-    .any(|p| t.starts_with(p))
-        && !["сделай", "выполни", "do it", "execute it"]
-            .iter()
-            .any(|p| t.contains(p))
-    {
-        return true;
-    }
     let has_new_task = [
         "создай",
         "сохрани",
@@ -607,6 +613,24 @@ pub fn reply_only(text: &str) -> bool {
     });
     if has_new_task {
         return false;
+    }
+    if [
+        "как создать",
+        "как мне ",
+        "как можно ",
+        "how to ",
+        "how do i ",
+        "explain ",
+        "объясни ",
+        "расскажи как ",
+    ]
+    .iter()
+    .any(|p| t.starts_with(p))
+        && !["сделай", "выполни", "do it", "execute it"]
+            .iter()
+            .any(|p| t.contains(p))
+    {
+        return true;
     }
     if (t.contains("в чат") || t.contains("in chat"))
         && ["код", "программ", "code", "program"]
@@ -722,6 +746,14 @@ mod tests {
             "fn run() {}\nfn save() {}\nfn fix() {}\nоцени код и исправь ошибки"
         )
         .is_none());
+        assert!(
+            review_instruction("оцени код\nfn main() {}\n// body\nисправь найденные ошибки")
+                .is_none()
+        );
+        assert!(
+            review_instruction("исправь найденные ошибки\nfn main() {}\n// body\nоцени код")
+                .is_none()
+        );
         let text = "fn main() {}\n// привет 🦀\n".repeat(2000);
         let pages = review_pages(&text, 5000);
         assert_eq!(pages.concat(), text);
@@ -788,6 +820,8 @@ mod tests {
             "nice, create file a.txt",
             "найс, прочитай makar.txt",
             "thanks, run the tests",
+            "Объясни ошибку и исправь её",
+            "Explain the bug and fix it",
         ] {
             assert!(!reply_only(text), "{text}");
         }
