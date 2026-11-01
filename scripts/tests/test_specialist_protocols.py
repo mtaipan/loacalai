@@ -87,7 +87,7 @@ def call(path,body=None):
 def read(path,body=None):
  with call(path,body) as r:return json.load(r)
 def run(model,text,web,mode='agent',allow_error=False,attachments=None):
- settings=read('/api/bootstrap')['settings'];settings['agent_model']=settings['chat_model']=model;read('/api/settings',settings)
+ settings=read('/api/bootstrap')['settings'];settings['agent_model']=settings['chat_model']=model;settings=read('/api/settings',settings)
  if mode=='team':settings['team_model']=model;read('/api/settings',settings)
  chat=read('/api/chats',{})
  with call('/api/chat',{'conversation':chat['id'],'content':text,'mode':mode,'source':'en','target':'ru','web':web,'thinking':'off','attachments':attachments or []}) as r:

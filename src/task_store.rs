@@ -1,5 +1,5 @@
 //! Durable runs and ordered events. The UI is a subscriber, never the owner of a run.
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::{
@@ -9,7 +9,40 @@ use std::{
 
 #[derive(Clone)]
 pub struct Store(Arc<Mutex<Connection>>);
+#[derive(Debug)]
+pub struct MissingRun;
+impl std::fmt::Display for MissingRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Задача не найдена")
+    }
+}
+impl std::error::Error for MissingRun {}
 impl Store {
+    pub async fn workspace_events(&self, after: i64) -> Result<Vec<Value>> {
+        self.access(move|conn|{
+            let mut statement=conn.prepare("SELECT e.sequence,e.payload,e.run,r.conversation FROM events e JOIN runs r ON r.id=e.run WHERE sequence>?1 ORDER BY sequence LIMIT 256")?;
+            let rows=statement.query_map([after],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?;
+            rows.map(|row|{let(sequence,payload,run,conversation)=row?;let mut value:Value=serde_json::from_str(&payload)?;value["sequence"]=json!(sequence);value["run_id"]=json!(run);value["conversation_id"]=json!(conversation);Ok(value)}).collect()
+        }).await
+    }
+    pub async fn dashboard(&self) -> Result<Value> {
+        self.access(|conn|{
+            let tx=conn.transaction()?;
+            let cursor:i64=tx.query_row("SELECT COALESCE(MAX(sequence),0) FROM events",[],|r|r.get(0))?;
+            let mut query=tx.prepare("SELECT id,conversation,status,input,created FROM runs WHERE status IN ('running','queued','awaiting_approval','stopping') ORDER BY created")?;
+            let rows=query.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?)))?;
+            let mut runs=vec![];
+            for row in rows {
+                let(id,conversation,status,input,created)=row?;
+                let mut state=Fold::default();
+                let mut events=tx.prepare("SELECT payload FROM events WHERE run=?1 AND sequence<=?2 ORDER BY sequence")?;
+                for event in events.query_map(params![id,cursor],|r|r.get::<_,String>(0))? {state.consume(&serde_json::from_str::<Value>(&event?)?);}
+                let input:Value=serde_json::from_str(&input)?;
+                runs.push(json!({"id":id,"conversation":conversation,"status":status,"input":input,"created":created,"state":state.value()}));
+            }
+            Ok(json!({"cursor":cursor,"runs":runs}))
+        }).await
+    }
     pub fn open(data: &Path) -> Result<Self> {
         let conn = Connection::open(data.join("tasks.sqlite3"))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -31,7 +64,7 @@ impl Store {
         )?;
         // A crash leaves effects with unknown outcome. Never replay mutations automatically.
         conn.execute(
-            "UPDATE runs SET status='interrupted', updated=?1 WHERE status IN ('running','queued')",
+            "UPDATE runs SET status='interrupted', updated=?1 WHERE status IN ('running','queued','awaiting_approval','stopping')",
             [crate::api::now()],
         )?;
         Ok(Self(Arc::new(Mutex::new(conn))))
@@ -75,7 +108,7 @@ impl Store {
         self.access(move |conn| {
             let tx = conn.transaction()?;
             tx.execute("INSERT INTO events(run,payload) VALUES (?1,?2)", params![id,event.to_string()])?;
-            let status = if event["type"]=="done" {Some(event["status"].as_str().unwrap_or("completed"))} else if event["type"]=="error" {Some("failed")} else {None};
+            let status = if event["type"]=="done" {Some(event["status"].as_str().unwrap_or("completed"))} else if event["type"]=="error" {Some(if event["cancelled"]==true {"cancelled"} else {"failed"})} else if event["type"]=="approval" {Some("awaiting_approval")} else if event["type"]=="approval_closed" {Some("running")} else {None};
             if let Some(status) = status {
                 tx.execute("UPDATE runs SET status=CASE WHEN status='failed' THEN status ELSE ?1 END, updated=?2 WHERE id=?3", params![status,crate::api::now(),id])?;
             }
@@ -92,7 +125,7 @@ impl Store {
     }
     pub async fn get(&self, id: String) -> Result<Value> {
         self.access(move |conn| {
-            let (conversation,status,input): (String,String,String) = conn.query_row("SELECT conversation,status,input FROM runs WHERE id=?1", [&id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.context("Задача не найдена")?;
+            let (conversation,status,input): (String,String,String) = conn.query_row("SELECT conversation,status,input FROM runs WHERE id=?1", [&id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(MissingRun)?;
             Ok(json!({"id":id,"conversation":conversation,"status":status,"input":serde_json::from_str::<Value>(&input)?}))
         }).await
     }
@@ -102,6 +135,35 @@ impl Store {
             let rows=statement.query_map([], |r|Ok(json!({"id":r.get::<_,String>(0)?,"conversation":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?,"created":r.get::<_,String>(3)?,"updated":r.get::<_,String>(4)?})))?;
             Ok(Value::Array(rows.collect::<rusqlite::Result<Vec<_>>>()?))
         }).await
+    }
+}
+
+#[derive(Default)]
+struct Fold {
+    text: String,
+    thinking: String,
+    notice: String,
+    tools: Vec<Value>,
+    approvals: Vec<Value>,
+}
+impl Fold {
+    fn consume(&mut self, event: &Value) {
+        let text = event["text"].as_str().unwrap_or("");
+        match event["type"].as_str().unwrap_or("") {
+            "token"=>self.text.push_str(text),
+            "replace_content"=>self.text=text.into(),
+            "thinking"=>self.thinking.push_str(text),
+            "notice"|"progress"=>self.notice=event["message"].as_str().unwrap_or("").into(),
+            "tool_start"=>self.tools.push(json!({"id":event["id"],"name":event["name"],"arguments":event["arguments"],"status":"running"})),
+            "tool_result"=>{if let Some(tool)=self.tools.iter_mut().find(|t|t["id"]==event["tool"]["id"]){*tool=event["tool"].clone();}else{self.tools.push(event["tool"].clone());}},
+            "approval"=>{self.approvals.push(event.clone());if let Some(tool)=self.tools.iter_mut().find(|t|t["id"]==event["tool_id"]){tool["status"]=json!("awaiting_approval");}},
+            "approval_closed"=>{self.approvals.retain(|a|a["id"]!=event["id"]);if let Some(tool)=self.tools.iter_mut().find(|t|t["id"]==event["tool_id"]){tool["status"]=event["status"].clone();}},
+            "extracted"=>self.tools.push(json!({"name":event["name"],"arguments":{"file":event["name"]},"result":text,"status":"succeeded"})),
+            _=>{}
+        }
+    }
+    fn value(self) -> Value {
+        json!({"streamText":self.text,"streamThinking":self.thinking,"streamTools":self.tools,"approvals":self.approvals,"notice":self.notice})
     }
 }
 
@@ -131,6 +193,12 @@ mod tests {
             .unwrap();
         let events = store.events("r".into(), 0).await.unwrap();
         assert_eq!(events[0]["text"], "partial");
+        let dashboard = store.dashboard().await.unwrap();
+        assert_eq!(dashboard["cursor"], events[0]["sequence"]);
+        assert_eq!(dashboard["runs"][0]["state"]["streamText"], "partial");
+        let shared = store.workspace_events(0).await.unwrap();
+        assert_eq!(shared[0]["run_id"], "r");
+        assert_eq!(shared[0]["conversation_id"], "c");
         assert!(store
             .events("r".into(), events[0]["sequence"].as_i64().unwrap())
             .await

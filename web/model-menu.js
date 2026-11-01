@@ -37,7 +37,7 @@ function openModelMenu(all=false,focus=true){
   const menu=document.createElement('div');menu.id='model-menu';menu.className='model-popover';menu.setAttribute('role','menu');
   menu.setAttribute('aria-label',all?'Другие модели':'Выбор модели');
   const title=all?'Другие модели':state.mode==='team'?'Управляющая модель Qwen':state.mode==='translate'?'Модель перевода':state.mode==='agent'?'Модель агента':'Модель чата';
-  menu.innerHTML=`<div class="model-popover-heading">${all?`<button class="model-back" data-model-back aria-label="Назад">${modelCaret('right')}</button>`:''}<span>${title}</span><span class="model-local">Локально</span></div><div class="model-popover-options">${choices.map(m=>{
+  menu.innerHTML=`<div class="model-popover-heading">${all?`<button class="model-back" data-model-back aria-label="Назад">${modelCaret('right')}</button>`:''}<span>${title}</span><span class="model-local">${state.localInference===false?"Внешний движок":"На устройстве"}</span></div><div class="model-popover-options">${choices.map(m=>{
     const ready=hasModel(m.id),active=m.id===selected;
     return `<button class="model-option ${active?'is-selected':''}" role="${ready?'menuitemradio':'menuitem'}" ${ready?`aria-checked="${active}" data-select-model="${escapeHtml(m.id)}"`:`data-install-model="${escapeHtml(m.id)}"`}><span class="model-option-copy"><span class="model-option-name">${escapeHtml(m.name)}</span>${!ready?'<span class="model-option-note">Скачать для использования</span>':''}</span><span class="model-option-trailing">${active?icon('check'):ready?'':icon('download')}</span></button>`;
   }).join('')||'<p class="model-empty">Пока нет установленных моделей</p>'}</div><div class="model-popover-footer">${all?`<button role="menuitem" data-model-settings>${icon('settings')}<span>Управление моделями</span>${modelCaret('right')}</button>`:`<button role="menuitem" data-model-more><span>Другие модели</span>${modelCaret('right')}</button>`}</div>`;
@@ -78,8 +78,8 @@ async function openModelDownloads(id=null){
 function bindModelMenu(){
   $('#model-name').addEventListener('click',()=>document.getElementById('model-menu')?closeModelMenu():openModelMenu());
   $('#model-name').addEventListener('keydown',event=>{if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();openModelMenu();}});
-  document.addEventListener('pointerdown',event=>{if(!event.target.closest('#model-menu,#model-name'))closeModelMenu();});
-  document.addEventListener('focusin',event=>{if(!event.target.closest('#model-menu,#model-name'))closeModelMenu();});
-  window.addEventListener('resize',()=>{if(innerWidth<761)document.body.classList.add('sidebar-hidden');positionModelMenu();});
-  window.addEventListener('scroll',event=>{if(!event.target.closest?.('#model-menu'))positionModelMenu();},true);
+  uiListen(document,'pointerdown',event=>{if(!event.target.closest('#model-menu,#model-name'))closeModelMenu();});
+  uiListen(document,'focusin',event=>{if(!event.target.closest('#model-menu,#model-name'))closeModelMenu();});
+  uiListen(window,'resize',()=>{positionModelMenu();});
+  uiListen(window,'scroll',event=>{if(!event.target.closest?.('#model-menu'))positionModelMenu();},true);
 }

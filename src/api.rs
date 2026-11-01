@@ -30,6 +30,47 @@ fn require(condition: bool, message: &str) -> Result<(), ApiError> {
     }
 }
 pub struct ApiError(pub anyhow::Error);
+#[derive(Debug)]
+struct HttpFailure(StatusCode, String);
+impl std::fmt::Display for HttpFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+impl std::error::Error for HttpFailure {}
+impl ApiError {
+    fn status(status: StatusCode, message: &str) -> Self {
+        Self(HttpFailure(status, message.into()).into())
+    }
+    fn status_code(&self) -> StatusCode {
+        if let Some(error) = self.0.downcast_ref::<HttpFailure>() {
+            return error.0;
+        }
+        if self.0.is::<crate::task_store::MissingRun>() {
+            return StatusCode::NOT_FOUND;
+        }
+        if let Some(error) = self.0.downcast_ref::<reqwest::Error>() {
+            return if error.is_timeout() {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+        }
+        if let Some(error) = self.0.downcast_ref::<std::io::Error>() {
+            return match error.kind() {
+                std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+                std::io::ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
+                std::io::ErrorKind::AlreadyExists => StatusCode::CONFLICT,
+                std::io::ErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+        }
+        if self.0.is::<rusqlite::Error>() || self.0.is::<serde_json::Error>() {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        StatusCode::BAD_REQUEST
+    }
+}
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(e: E) -> Self {
         Self(e.into())
@@ -37,9 +78,18 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let status = self.status_code();
+        let code = match status {
+            StatusCode::NOT_FOUND => "not_found",
+            StatusCode::FORBIDDEN => "permission_denied",
+            StatusCode::CONFLICT => "conflict",
+            StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT => "upstream_error",
+            StatusCode::INTERNAL_SERVER_ERROR => "internal_error",
+            _ => "invalid_request",
+        };
         (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":format!("{:#}",self.0)})),
+            status,
+            Json(json!({"code":code,"error":format!("{:#}",self.0)})),
         )
             .into_response()
     }
@@ -47,6 +97,8 @@ impl IntoResponse for ApiError {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub revision: u64,
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
     #[serde(default)]
@@ -166,6 +218,7 @@ pub struct Run {
     pub conversation: String,
 }
 pub struct App {
+    pub settings_write: Mutex<()>,
     pub resources: crate::resources::Broker,
     pub tasks: crate::task_store::Store,
     pub root: PathBuf,
@@ -196,6 +249,7 @@ impl App {
             std::fs::create_dir_all(data.join(folder))?;
         }
         let defaults = Settings {
+            revision: 0,
             permission_mode: default_permission_mode(),
             schema_version: 1,
             context: Default::default(),
@@ -239,6 +293,7 @@ impl App {
         settings.cpu_only = settings.compute.backend == "cpu";
         let compute = crate::compute::Runtime::load(&data);
         Ok(Self {
+            settings_write: Mutex::new(()),
             resources: Default::default(),
             tasks: crate::task_store::Store::open(&data)?,
             grants: Mutex::new(crate::permissions::Grants::load(&data)?),
@@ -318,7 +373,9 @@ pub fn router(app: Shared) -> Router {
         .route("/api/changes", get(changes))
         .route("/api/changes/{id}/restore", post(restore_change))
         .route("/api/chat", post(send))
-        .route("/api/runs", get(run_list))
+        .route("/api/runs", get(run_list).post(create_run))
+        .route("/api/session", get(session_snapshot))
+        .route("/api/events", get(workspace_events))
         .route("/api/runs/{id}", get(run_snapshot))
         .route("/api/runs/{id}/events", get(run_events))
         .route("/api/approve/{id}", post(approve))
@@ -485,7 +542,7 @@ async fn guard(State(app): State<Shared>, req: Request<Body>, next: Next) -> Res
 }
 async fn bootstrap(State(app): State<Shared>) -> Json<Value> {
     Json(
-        json!({"app":"Local Gemma Studio","root":app.root.to_string_lossy(),"version":env!("CARGO_PKG_VERSION"),"token":app.token,"settings":app.settings.lock().await.clone(),"platform":std::env::consts::OS,"catalog":crate::models::catalog()}),
+        json!({"app":"Local Gemma Studio","root":app.root.to_string_lossy(),"version":env!("CARGO_PKG_VERSION"),"token":app.token,"settings":app.settings.lock().await.clone(),"platform":std::env::consts::OS,"local_inference":engine::local_inference(),"catalog":crate::models::catalog()}),
     )
 }
 async fn status(State(app): State<Shared>) -> Json<Value> {
@@ -502,6 +559,14 @@ async fn settings(
     State(app): State<Shared>,
     Json(mut value): Json<Settings>,
 ) -> ApiResult<Settings> {
+    let _write = app.settings_write.lock().await;
+    let revision = app.settings.lock().await.revision;
+    if value.revision != revision {
+        return Err(ApiError::status(StatusCode::CONFLICT,"Настройки изменились в другом окне. Введённые значения сохранены в окне; сбросьте их для загрузки новой версии."));
+    }
+    value.revision = revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("Переполнение версии настроек"))?;
     value.schema_version = 1;
     require(
         ["manual", "project", "full"].contains(&value.permission_mode.as_str()),
@@ -918,7 +983,28 @@ async fn send(
     State(app): State<Shared>,
     Json(input): Json<ChatInput>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let id = start_run(app.clone(), input).await?;
+    Ok(run_stream(app, id, 0))
+}
+async fn create_run(State(app): State<Shared>, Json(input): Json<ChatInput>) -> ApiResult<Value> {
+    let conversation = input.conversation.clone();
+    let id = start_run(app.clone(), input).await?;
+    let run = app.tasks.get(id.clone()).await?;
+    Ok(Json(
+        json!({"accepted":true,"run_id":id,"conversation":conversation,"status":run["status"]}),
+    ))
+}
+async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
+    let _settings_guard = app.settings_write.lock().await;
     let _chat = app.load(&input.conversation).await?;
+    require(
+        ["agent", "team", "translate", "chat"].contains(&input.mode.as_str()),
+        "Неизвестный режим работы",
+    )?;
+    require(
+        !input.content.trim().is_empty() || !input.attachments.is_empty(),
+        "Введите сообщение или прикрепите материал",
+    )?;
     require(
         ["auto", "off", "search", "research"].contains(&input.web.as_str()),
         "Неизвестный режим сети",
@@ -943,6 +1029,7 @@ async fn send(
     Uuid::parse_str(&run_id)?;
     {
         let mut runs = app.runs.lock().await;
+        app.load(&input.conversation).await?;
         if app.tasks.get(run_id.clone()).await.is_ok() {
             // Reconnecting an accepted request must not execute it twice.
             app.tasks
@@ -952,7 +1039,7 @@ async fn send(
                     serde_json::to_value(&input)?,
                 )
                 .await?;
-            return Ok(run_stream(app.clone(), run_id, 0));
+            return Ok(run_id);
         }
         require(
             !runs.values().any(|r| r.conversation == input.conversation),
@@ -992,7 +1079,9 @@ async fn send(
     let id = run_id.clone();
     tokio::spawn(async move {
         let _model_guard = model_guard;
-        let _ = tx.send(json!({"type":"start","run_id":id})).await;
+        let _ = tx
+            .send(json!({"type":"start","run_id":id,"mode":input.mode}))
+            .await;
         let started = std::time::Instant::now();
         let conversation = input.conversation.clone();
         if let Err(error) = crate::permissions::TASK
@@ -1025,13 +1114,17 @@ async fn send(
                 }
             }
             eprintln!("Chat {conversation}: {diagnostic}");
-            let _ = tx.send(json!({"type":"error","message":diagnostic})).await;
+            let _ = tx
+                .send(
+                    json!({"type":"error","message":diagnostic,"cancelled":cancel.is_cancelled()}),
+                )
+                .await;
         }
         worker.runs.lock().await.remove(&id);
         worker.grants.lock().await.finish(&id);
         let _ = tx.send(json!({"type":"done","status":if cancel.is_cancelled(){"cancelled"}else{"completed"}})).await;
     });
-    Ok(run_stream(app, run_id, 0))
+    Ok(run_id)
 }
 fn run_stream(
     app: Shared,
@@ -1066,6 +1159,27 @@ fn run_stream(
 }
 async fn run_list(State(app): State<Shared>) -> ApiResult<Value> {
     Ok(Json(app.tasks.list().await?))
+}
+async fn session_snapshot(State(app): State<Shared>) -> ApiResult<Value> {
+    Ok(Json(app.tasks.dashboard().await?))
+}
+async fn workspace_events(
+    State(app): State<Shared>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut cursor = q
+        .get("after")
+        .map(|s| s.parse::<i64>())
+        .transpose()?
+        .unwrap_or(0);
+    let stream = async_stream::stream! {
+        loop {
+            let events=match app.tasks.workspace_events(cursor).await {Ok(events)=>events,Err(error)=>{yield Ok::<Event,Infallible>(Event::default().json_data(json!({"type":"error","message":format!("{error:#}")})).unwrap());return;}};
+            if events.is_empty(){tokio::select!{_=app.shutdown.cancelled()=>return,_=tokio::time::sleep(std::time::Duration::from_millis(200))=>{}};continue;}
+            for event in events {cursor=event["sequence"].as_i64().unwrap_or(cursor);yield Ok(Event::default().id(cursor.to_string()).json_data(event).unwrap());}
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 async fn run_snapshot(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     Ok(Json(app.tasks.get(id).await?))

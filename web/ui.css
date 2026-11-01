@@ -1,0 +1,42 @@
+:root{--muted:#b4b3aa;--subtle:#a6a59c;--border:var(--line2);--control-border:#73756b;font-size:16px}
+body.light{--muted:#595c53;--subtle:#62645b;--accent:#87532f;--border:var(--line2);--control-border:#85877b}
+body{font-size:15px;line-height:1.5}
+h1,h2,h3,.welcome h1,.welcome .intro{font-family:inherit}
+button,input,select,textarea{font:inherit}
+.form-label,.button,.full-input,.voice-result,.composer textarea{font-size:14px}
+.full-input,.voice-result,.composer,.approval select{border-color:var(--control-border)}
+.message-body .hljs-comment,.message-body .hljs-quote{color:#a2a9b6}
+.form-help,.composer-caption,.tool-status-label,.time,.tag,.settings-section p,.catalog-model p,.response-timing p,.welcome-note{font-size:12px;line-height:1.55}
+.chat-row>button:first-child,.catalog-model strong,.suggestion strong{font-size:14px}
+.suggestion small,.mode-tabs button,.model-name{font-size:12px}
+.chat-run-state{color:var(--accent);font-size:11px;flex-shrink:0;margin-left:auto}
+.chat-row>button:first-child{min-width:0}.chat-row>button>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.chat-row{border-left:2px solid transparent}.chat-row.active{border-left-color:var(--accent)}
+.mode-tabs button,.icon-button{min-height:32px}
+.welcome{padding-top:clamp(24px,7vh,80px)}.welcome h1{font-size:28px}.welcome .intro{font-size:15px}
+.settings-nav{display:flex;gap:4px;overflow:auto;border-bottom:1px solid var(--line2);padding:0 0 10px;flex-shrink:0}
+.settings-nav button{border:0;background:transparent;color:var(--muted);padding:8px 12px;border-radius:6px;white-space:nowrap;font-size:14px;cursor:pointer}
+.settings-nav button[aria-selected=true]{background:var(--card);color:var(--text)}
+.settings-nav button,.mode-tabs button{border-bottom:2px solid transparent}.settings-nav button[aria-selected=true],.mode-tabs button.selected{border-bottom-color:var(--accent)}
+.settings-pages{min-height:220px;padding-top:12px;min-width:0}
+.settings-pages>section[hidden]{display:none}
+#settings-dialog{width:min(860px,calc(100vw - 28px));max-height:calc(100dvh - 28px);padding:0}
+#settings-dialog[open]{display:flex;flex-direction:column}
+#settings-dialog>.dialog-head{flex-shrink:0}
+#settings-dialog>.dialog-body{overflow:auto;max-height:none;min-height:0;flex:1;padding:18px 24px}
+#settings-dialog>.dialog-footer{margin:0;padding:14px 24px;border-top:1px solid var(--line2);flex-shrink:0;background:var(--panel);gap:10px;align-items:center}
+#settings-dirty{margin-right:auto;color:var(--muted);font-size:12px}
+.permission-grant{padding:12px 0;border-bottom:1px solid var(--line2);overflow-wrap:anywhere}.permission-grant pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.attachment-preview{display:flex;align-items:center;gap:10px;min-width:0;max-width:100%;border:0;background:transparent;color:inherit;padding:0;text-align:left;cursor:pointer}.attachment-preview>span:last-child{min-width:0}.attachment-preview .filename,.attachment-preview small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.approval select{max-width:100%;padding:8px;background:var(--panel);color:var(--text);border:1px solid var(--line2);border-radius:6px}
+.sidebar-backdrop{position:fixed;inset:0;z-index:35;background:#0008;border:0;padding:0}.sidebar-backdrop[hidden]{display:none}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+@media(max-width:760px){
+  .composer-caption{display:none}
+  .mode-tabs button{font-size:12px;padding:7px}.model-name{font-size:12px}.suggestion strong{font-size:14px}.suggestion small{font-size:12px}
+  .composer-caption,.welcome-note{font-size:12px}.composer-toolbar .icon-button{min-width:36px;min-height:36px}
+  #settings-dialog>.dialog-body{padding:14px}.settings-nav{margin:0 -4px}.settings-nav button{padding:8px}
+  #settings-dialog>.dialog-footer{padding:12px;flex-wrap:wrap}#settings-dirty{width:100%}
+  .suggestions{grid-template-columns:1fr}.welcome h1{font-size:24px}
+}
+@media(forced-colors:active){.button,.approval,.tool-card,.settings-nav button[aria-selected=true]{border:1px solid CanvasText}:focus-visible{outline:2px solid Highlight}}

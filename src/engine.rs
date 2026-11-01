@@ -34,6 +34,18 @@ pub fn ollama_url() -> String {
     std::env::var("LOCAL_GEMMA_OLLAMA")
         .unwrap_or_else(|_| format!("http://127.0.0.1:{}", crate::compute::engine_port()))
 }
+pub fn local_inference() -> bool {
+    reqwest::Url::parse(&ollama_url())
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+}
 pub async fn ensure_ollama(app: &Shared) -> Result<()> {
     let config = app.settings.lock().await.compute.clone();
     crate::compute::ensure(app, &config).await
@@ -868,7 +880,10 @@ pub async fn run(
         diagnostics: None,
         duration_ms: None,
         model: None,
-        id: uuid::Uuid::new_v4().to_string(),
+        id: input
+            .request_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         role: "user".into(),
         content: input.content.clone(),
         attachments: attachments.clone(),
@@ -901,7 +916,7 @@ pub async fn run(
             translation_input.push_str("\n\n");
         }
         translation_input.push_str(&text);
-        extracted.push(json!({"name":format!("Распознано: {}",attachment.name),"arguments":{"file":attachment.name},"result":text}));
+        extracted.push(json!({"name":format!("Вложение: {}",attachment.name),"arguments":{"file":attachment.name},"result":text}));
         emit(
             tx,
             json!({"type":"extracted","name":attachment.name,"text":text}),

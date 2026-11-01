@@ -71,6 +71,12 @@ try:
         try:token=read('/api/bootstrap')['token']; break
         except Exception:time.sleep(.1)
     else:raise RuntimeError('Studio startup failed')
+    for path in ['/api/chats/'+str(uuid.uuid4()),'/api/runs/'+str(uuid.uuid4())]:
+        try:read(path)
+        except urllib.error.HTTPError as error:
+            assert error.code==404
+            assert json.load(error)['code']=='not_found'
+        else:raise AssertionError('missing resource must return typed 404')
     config=read('/api/bootstrap')['settings']
     config['assistant']['chat_instructions']='CHAT_PERSONA_FIXTURE'
     config['assistant']['agent_instructions']='AGENT_PERSONA_FIXTURE'
@@ -123,15 +129,15 @@ try:
     assert not (root/'data/workspace/should-never-exist.txt').exists() and not chat['messages'][-1]['tools'],chat
     chat=turn('BROKEN_STREAM_FIXTURE Explain the response.','chat',allow_error=True)
     assert '\u26a0' in chat['messages'][-1]['content'],chat
-    current=read('/api/bootstrap')['settings'];current['chat_model']=foundation;read('/api/settings',current)
+    current=read('/api/bootstrap')['settings'];current['chat_model']=foundation;current=read('/api/settings',current)
     chat=turn('OUTPUT_LIMIT_FIXTURE Explain the supplied text.','chat')
     assert chat['messages'][-1]['diagnostics']['length_limited'] is True and '\u26a0' in chat['messages'][-1]['content'],chat
-    current['chat_model']=model;read('/api/settings',current)
+    current['chat_model']=model;current=read('/api/settings',current)
     print('PASS partial tool calls never execute; broken streams and adapted-model output limits remain visible')
     chat=turn('OUTPUT_LIMIT_FIXTURE This translation must not be reported as complete.','translate',allow_error=True)
     assert '\u26a0' in chat['messages'][-1]['content'],chat
     print('PASS truncated translation returns an explicit incomplete result instead of successful text')
-    current=read('/api/bootstrap')['settings']; current['context']={'window_tokens':8192,'auto_max_tokens':32768,'output_tokens':1024}; read('/api/settings',current)
+    current=read('/api/bootstrap')['settings']; current['context']={'window_tokens':8192,'auto_max_tokens':32768,'output_tokens':1024}; current=read('/api/settings',current)
     requests.clear(); long_task='CURRENT_TASK_PRESERVED '+('完整要求 Русский текст\n'*3000)
     chat=turn(long_task,'chat',allow_error=True)
     assert not requests and chat['messages'][-2]['content']==long_task,chat
@@ -145,22 +151,39 @@ try:
     model_limit=8192; requests.clear();chat=turn('Short explanation without actions.','chat')
     assert requests[-1]['options']['num_ctx']==8192
     print('PASS settings validation preserves persisted data; model native context maximum respected')
+    numeric=read('/api/bootstrap')['settings']
+    numeric['assistant'].update(agent_temperature=0.17,chat_temperature=0.63,repeat_penalty=1.057)
+    numeric['agent_timeout_seconds']=61
+    read('/api/settings',numeric)
     from playwright.sync_api import sync_playwright
     with sync_playwright() as playwright:
         browser=playwright.chromium.launch(channel='msedge',headless=True)
         page=browser.new_page(viewport={'width':1280,'height':900})
         errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         page.goto(base);page.locator('[data-action="settings"]').click()
+        page.locator('[data-settings-tab="context"]').click()
         page.locator('#context-window').wait_for(state='visible')
         assert page.locator('#context-window').input_value()=='0'
         page.locator('#context-window').select_option('16384')
-        page.locator('#context-auto-max').fill('65536')
-        page.locator('#context-output').fill('2048')
+        page.locator('#context-auto-max').fill('65537')
+        page.locator('#context-output').fill('2049')
         page.wait_for_function('()=>document.querySelector("#compute-device").options.length>0')
         page.locator('[data-action="save-settings"]').click()
-        page.wait_for_function('()=>!document.querySelector("#settings-dialog").open')
-        assert read('/api/bootstrap')['settings']['context']=={'window_tokens':16384,'auto_max_tokens':65536,'output_tokens':2048}
+        page.wait_for_function('()=>!settingsSaving')
+        assert not page.locator('#settings-dialog').evaluate('(dialog)=>dialog.open'),page.evaluate('()=>({toasts:document.getElementById("toasts").textContent,invalid:[...document.querySelectorAll("#settings-dialog input,#settings-dialog select,#settings-dialog textarea")].filter(input=>!input.checkValidity()).map(input=>({id:input.id,value:input.value,reason:input.validationMessage})),dirty:settingsDirty,version:settingsEditVersion})')
+        assert read('/api/bootstrap')['settings']['context']=={'window_tokens':16384,'auto_max_tokens':65537,'output_tokens':2049}
+        saved=read('/api/bootstrap')['settings']
+        assert saved['agent_timeout_seconds']==61
+        assert saved['assistant']==numeric['assistant']
+        stale=saved
+        read('/api/settings',{**stale,'theme':'light'})
+        before=(root/'data/settings.json').read_bytes()
+        try:read('/api/settings',stale)
+        except urllib.error.HTTPError as error:assert error.code==409
+        else:raise AssertionError('stale settings must not overwrite a newer revision')
+        assert (root/'data/settings.json').read_bytes()==before
         page.locator('[data-action="settings"]').click()
+        page.locator('[data-settings-tab="context"]').click()
         assert page.locator('#context-window').input_value()=='16384'
         page.set_viewport_size({'width':390,'height':844})
         assert page.evaluate('document.documentElement.scrollWidth')<=390
