@@ -2,7 +2,7 @@ use crate::{api::Shared, tools};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -78,9 +78,10 @@ pub fn is_web_tool(name: &str) -> bool {
 }
 
 struct Worker {
+    group:crate::process_group::Group,
     child: tokio::process::Child,
     input: tokio::process::ChildStdin,
-    output: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    output: BufReader<tokio::process::ChildStdout>,
 }
 #[derive(Debug)]
 pub struct InputRequired(pub String);
@@ -172,12 +173,13 @@ impl Session {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        #[cfg(windows)]
-        c.creation_flags(0x08000000);
+        let mut group=crate::process_group::Group::prepare(&mut c)?;
         let mut child = c.spawn()?;
+        if let Err(error)=group.attach(&child){group.terminate();let _=child.kill().await;return Err(error);}
         let input = child.stdin.take().unwrap();
-        let output = BufReader::new(child.stdout.take().unwrap()).lines();
+        let output = BufReader::new(child.stdout.take().unwrap());
         self.worker = Some(Worker {
+            group,
             child,
             input,
             output,
@@ -202,16 +204,14 @@ impl Session {
                 .write_all(format!("{}\n", request).as_bytes())
                 .await?;
             worker.input.flush().await?;
-            let line = worker
-                .output
-                .next_line()
-                .await?
-                .context("Веб-обработчик закрыл соединение")?;
+            let mut line=Vec::new();
+            (&mut worker.output).take(8_000_001).read_until(b'\n',&mut line).await?;
+            anyhow::ensure!(!line.is_empty(),"Веб-обработчик закрыл соединение");
             anyhow::ensure!(
                 line.len() <= 8_000_000,
                 "Слишком большой результат браузера"
             );
-            let value: Value = serde_json::from_str(&line)?;
+            let value: Value = serde_json::from_slice(&line)?;
             Ok::<Value, anyhow::Error>(value)
         };
         let result = tokio::select! {_ = cancel.cancelled()=>Err(anyhow::anyhow!("Остановлено пользователем")), r=tokio::time::timeout(std::time::Duration::from_secs(60),call)=>match r {Ok(v)=>v,Err(_)=>Err(anyhow::anyhow!("Истекло время веб-инструмента"))}};
@@ -260,14 +260,12 @@ impl Session {
     }
     pub async fn close(&mut self) {
         if let Some(mut w) = self.worker.take() {
-            let _ = w.input.write_all(b"{\"name\":\"close\"}\n").await;
-            let _ = w.input.shutdown().await;
-            if tokio::time::timeout(std::time::Duration::from_secs(2), w.child.wait())
-                .await
-                .is_err()
-            {
-                let _ = w.child.kill().await;
-            }
+            // Bound the complete graceful close, including a blocked pipe.
+            let _=tokio::time::timeout(std::time::Duration::from_secs(2),async{
+                w.input.write_all(b"{\"name\":\"close\"}\n").await?;
+                w.input.shutdown().await?;w.child.wait().await?;Ok::<_,std::io::Error>(())
+            }).await;
+            w.group.terminate();let _=w.child.kill().await;let _=w.child.wait().await;
         }
         self.last_page.clear();
     }
