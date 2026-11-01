@@ -35,18 +35,13 @@ pub fn set_location(app: &Shared, model: &str, directory: &str) -> Result<()> {
     if path != default {
         all.insert(model.into(), value);
     }
-    let tmp = app.data.join("model-locations.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&all)?)?;
-    std::fs::rename(tmp, app.data.join("model-locations.json"))?;
+    crate::changes::replace(&app.data.join("model-locations.json"),&serde_json::to_vec_pretty(&all)?)?;
     Ok(())
 }
 pub fn forget(app: &Shared, model: &str) -> Result<()> {
     let mut all = locations(app);
     all.remove(model);
-    std::fs::write(
-        app.data.join("model-locations.json"),
-        serde_json::to_vec_pretty(&all)?,
-    )?;
+    crate::changes::replace(&app.data.join("model-locations.json"),&serde_json::to_vec_pretty(&all)?)?;
     Ok(())
 }
 pub async fn endpoint(app: &Shared, model: &str) -> Result<String> {

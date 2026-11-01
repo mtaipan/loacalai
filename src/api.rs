@@ -48,6 +48,8 @@ impl IntoResponse for ApiError {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
+    pub context: crate::context::Config,
+    #[serde(default)]
     pub web: crate::web_tools::Config,
     #[serde(default)]
     pub assistant: crate::agent::AssistantConfig,
@@ -182,6 +184,7 @@ impl App {
             std::fs::create_dir_all(data.join(folder))?;
         }
         let defaults = Settings {
+            context: Default::default(),
             web: Default::default(),
             assistant: Default::default(),
             agent_max_actions: default_actions(),
@@ -250,13 +253,8 @@ impl App {
     pub async fn save(&self, chat: &Conversation) -> anyhow::Result<()> {
         let _guard = self.storage.lock().await;
         let path = self.chat_path(&chat.id)?;
-        let tmp = path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, serde_json::to_vec_pretty(chat)?).await?;
-        #[cfg(target_os = "windows")]
-        if path.exists() {
-            tokio::fs::remove_file(&path).await?;
-        }
-        tokio::fs::rename(tmp, path).await?;
+        let bytes=serde_json::to_vec_pretty(chat)?;
+        tokio::task::spawn_blocking(move || crate::changes::replace(&path,&bytes)).await??;
         Ok(())
     }
 }
@@ -483,6 +481,7 @@ async fn settings(
         "Лимит времени: от 60 до 3600 секунд",
     )?;
     value.assistant.validate()?;
+    value.context.validate()?;
     value.web.validate()?;
     crate::models::validate_settings(&value)?;
     #[cfg(feature = "desktop")]
@@ -524,7 +523,8 @@ async fn settings(
                 && value.team_model == previous.team_model
                 && value.chat_model == previous.chat_model
                 && value.web == previous.web
-                && value.assistant == previous.assistant),
+                && value.assistant == previous.assistant
+                && value.context == previous.context),
         "Остановите текущую задачу перед изменением настроек",
     )?;
     if compute_changed {
@@ -550,11 +550,7 @@ async fn settings(
             break;
         }
     }
-    tokio::fs::write(
-        app.data.join("settings.json"),
-        serde_json::to_vec_pretty(&value)?,
-    )
-    .await?;
+    crate::changes::replace(&app.data.join("settings.json"),&serde_json::to_vec_pretty(&value)?)?;
     *app.settings.lock().await = value.clone();
     Ok(Json(value))
 }
@@ -887,7 +883,7 @@ async fn send(
         "Неизвестный режим сети",
     )?;
     require(input.thinking.len() <= 32, "Некорректный режим рассуждений")?;
-    require(input.content.len() <= 100_000, "Сообщение слишком длинное")?;
+    require(input.content.len() <= crate::context::MAX_REQUEST_TEXT_BYTES, "Текст сообщения превышает 512 КиБ; приложите его файлом или разделите")?;
     require(
         input.attachments.len() <= 12,
         "Максимум 12 вложений за сообщение",

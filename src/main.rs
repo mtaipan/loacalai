@@ -3,6 +3,7 @@ mod agent;
 mod api;
 mod changes;
 mod compute;
+mod context;
 mod documents;
 mod engine;
 mod executions;

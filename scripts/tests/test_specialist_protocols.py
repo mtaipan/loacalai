@@ -29,9 +29,9 @@ class Fixture(BaseHTTPRequestHandler):
   data=json.dumps(body).encode()+b'\n';self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
  def do_POST(self):
   b=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))) or '{}')
-  if self.path=='/api/show':return self.reply({'capabilities':['completion'],'thinking':{'values':[False]}})
+  if self.path=='/api/show':return self.reply({'capabilities':['completion'],'thinking':{'values':[False]},'model_info':{'test.context_length':262144}})
   if self.path=='/api/generate':
-   if not b.get('stream',True) and 'TEAM_WORKFLOW_FIXTURE' in b.get('prompt',''):team_requests.append(('specialist',b))
+   if not b.get('format') and 'TEAM_WORKFLOW_FIXTURE' in b.get('prompt',''):team_requests.append(('specialist',b))
    assert b.get('raw') is True and 'messages' not in b and 'tools' not in b,b
    prompt=b['prompt']
    if b['model']==foundation:
@@ -40,7 +40,7 @@ class Fixture(BaseHTTPRequestHandler):
       answer=json.dumps({'answer':'Successfully logged in.','tool_calls':[]})
      else:
       answer=json.dumps({'answer':'Already logged in before tool execution.','tool_calls':[{'function':{'name':'browser_open','arguments':{'url':site+'/page'}}}]})
-    elif not b['stream']:answer='Supplied SQL concatenates user input; use bound parameters. No live tests were performed.'
+    elif not b.get('format'):answer='Supplied SQL concatenates user input; use bound parameters. No live tests were performed.'
     elif 'FOUNDATION_PROTOCOL_EVIDENCE' in prompt:answer=json.dumps({'answer':'FOUNDATION_PROTOCOL_EVIDENCE','tool_calls':[]})
     else:
      assert b['format']['type']=='object',b
@@ -53,7 +53,7 @@ class Fixture(BaseHTTPRequestHandler):
   if self.path=='/api/chat':
    messages=b['messages']
    if any('REVIEW_ATTACHMENT_FIXTURE' in m.get('content','') for m in messages if m.get('role')=='user'):
-    assert not b.get('tools') and b['options']['num_ctx']==16384,b
+    assert not b.get('tools') and b['options']['num_ctx']>=16384,b
     review_requests.append(b)
     return self.reply({'message':{'role':'assistant','content':'REVIEW_ATTACHMENT_COMPLETE: static source observations only; no commands or edits were performed.'},'done':True})
    if any('TEAM_WORKFLOW_FIXTURE' in m.get('content','') for m in messages if m.get('role')=='user'):
@@ -151,7 +151,7 @@ try:
   assert 'REVIEW_ATTACHMENT_COMPLETE' in a['content'] and a['diagnostics']['attachment_review'] is True,a
   assert len(review_requests)==1 and review_requests[0]['messages'][-1]['content'].count(source)==1,review_requests
  print('PASS pasted source followed by a review instruction, in both Agent and Chat, without duplicating source in the prompt')
- review_requests.clear();large_source=source*3;attachment=upload_source(large_source)
+ review_requests.clear();large_source=source*8;attachment=upload_source(large_source)
  a=run('qwen2.5:3b','REVIEW_ATTACHMENT_FIXTURE review attached code','off',attachments=[attachment])
  assert 'REVIEW_ATTACHMENT_COMPLETE' in a['content'] and a['diagnostics']['source_parts']>1 and a['diagnostics']['summary_based'] is True,a
  pages=[b['messages'][-1]['content'].split('Report concrete findings briefly, with exact supporting excerpts.\n',1)[1] for b in review_requests if 'Source fragment ' in b['messages'][-1]['content']]

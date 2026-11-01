@@ -319,6 +319,24 @@ pub fn preview(before: Option<&[u8]>, after: Option<&[u8]>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn failed_atomic_replace_preserves_old_data_and_removes_temp() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("atomic-test-{}",uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path=root.join("settings.json");
+        replace(&path,b"old complete data").unwrap();
+        // A reader refusing delete-sharing simulates a replacement failure.
+        let held=fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();
+        assert!(replace(&path,b"new data").is_err());
+        assert_eq!(fs::read(&path).unwrap(),b"old complete data");
+        assert_eq!(fs::read_dir(&root).unwrap().count(),1);
+        drop(held);
+        replace(&path,b"new complete data").unwrap();
+        assert_eq!(fs::read(&path).unwrap(),b"new complete data");
+        fs::remove_dir_all(root).unwrap();
+    }
     use super::*;
     #[test]
     fn edits_preserve_windows_newlines_without_fuzzy_matching() {

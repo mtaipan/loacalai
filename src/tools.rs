@@ -446,6 +446,7 @@ pub async fn execute(
                 .as_str()
                 .unwrap_or("Analyze security findings and remedies"),
             args["evidence"].as_str().unwrap_or(""),
+            tx,
             cancel,
         )
         .await?

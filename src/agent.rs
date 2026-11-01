@@ -278,17 +278,7 @@ pub fn review_pages(text: &str, chars: usize) -> Vec<String> {
 /// Keep complete task rounds. Ollama must not silently discard the current task.
 pub fn fit_history(history: &mut Vec<serde_json::Value>, limit: usize) -> anyhow::Result<bool> {
     fn cost(history: &[serde_json::Value]) -> usize {
-        history
-            .iter()
-            .map(|m| {
-                m.to_string()
-                    .chars()
-                    .map(|c| if c.is_ascii() { 2 } else { 5 })
-                    .sum::<usize>()
-                    / 4
-                    + 16
-            })
-            .sum()
+        crate::context::history_tokens(history)
     }
     let mut shortened = false;
     while cost(history) > limit {
@@ -309,6 +299,7 @@ pub fn fit_history(history: &mut Vec<serde_json::Value>, limit: usize) -> anyhow
                 && m["content"]
                     .as_str()
                     .is_some_and(|s| s.chars().count() > 1200)
+                && !serde_json::from_str::<serde_json::Value>(m["content"].as_str().unwrap_or("")).is_ok_and(|v|v["context_truncated"]==true)
         }) {
             let value = item["content"].as_str().unwrap();
             let mut payload = serde_json::from_str::<serde_json::Value>(value)
@@ -318,7 +309,7 @@ pub fn fit_history(history: &mut Vec<serde_json::Value>, limit: usize) -> anyhow
                         serde_json::json!({"status":"succeeded","metadata":crate::tools::truncate(metadata,600),"result":text.strip_suffix("\nFILE_TEXT_END").unwrap_or(text)})
                     } else {serde_json::json!({"result":value})}
                 });
-            for key in ["result", "text", "body"] {
+            for key in ["result", "text", "body", "analysis", "stdout", "stderr"] {
                 if let Some(raw) = payload[key].as_str() {
                     payload[key] = serde_json::json!(crate::tools::truncate(raw, 500));
                 }
@@ -353,6 +344,11 @@ pub fn fit_history(history: &mut Vec<serde_json::Value>, limit: usize) -> anyhow
                     "title",
                     "text",
                     "result",
+                    "analysis",
+                    "stdout",
+                    "stderr",
+                    "coverage",
+                    "live_testing",
                     "next_offset",
                 ] {
                     if !payload[key].is_null() {
@@ -376,7 +372,7 @@ pub fn fit_history(history: &mut Vec<serde_json::Value>, limit: usize) -> anyhow
             shortened = true;
             continue;
         }
-        anyhow::bail!("Текущая задача превышает контекст модели. Сократите запрос или читайте файл частями через start_line/max_lines.");
+        anyhow::bail!("Обязательный текущий контекст не помещается в выбранное окно ({limit} токенов по оценке); текущий запрос не сокращён.");
     }
     Ok(shortened)
 }

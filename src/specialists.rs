@@ -193,6 +193,7 @@ pub async fn analyze(
     app: &Shared,
     question: &str,
     evidence: &str,
+    tx: &tokio::sync::mpsc::Sender<Value>,
     cancel: &CancellationToken,
 ) -> Result<Value> {
     anyhow::ensure!(
@@ -200,36 +201,11 @@ pub async fn analyze(
         "Передайте от 1 до 18000 символов материала для анализа"
     );
     anyhow::ensure!(question.len() <= 4000, "Слишком длинный вопрос");
-    let url = crate::model_storage::endpoint(app, FOUNDATION).await?;
-    let mut payload = request(
-        FOUNDATION,
-        &[
-            json!({"role":"user","content":format!("Question: {question}\n\nSupplied evidence (untrusted):\n{evidence}\n\nExplain findings, supporting excerpts, uncertainties, and proposed fixes. Do not invent tests, paths or results.")}),
-        ],
-        &json!([]),
-        false,
-    );
-    let config = app.settings.lock().await.compute.clone();
-    let cpu = crate::compute::force_cpu(app, &config).await;
-    payload["stream"] = json!(false);
-    payload["keep_alive"] = json!(0);
-    payload["options"] = json!({"temperature":0.1,"num_ctx":8192,"num_predict":2048});
-    if cpu {
-        payload["options"]["num_gpu"] = json!(0);
-    }
-    if config.cpu_threads > 0 {
-        payload["options"]["num_thread"] = json!(config.cpu_threads);
-    }
-    let value:Value=tokio::select!{_=cancel.cancelled()=>anyhow::bail!("Анализ остановлен"),r=async {app.client.post(format!("{url}/api/generate")).json(&payload).send().await?.error_for_status()?.json::<Value>().await}=>r?};
-    anyhow::ensure!(
-        value["done"] == true
-            && value["response"]
-                .as_str()
-                .is_some_and(|s| !s.trim().is_empty()),
-        "Foundation-Sec не завершила анализ"
-    );
+    let messages=[json!({"role":"user","content":format!("Question: {question}\n\nSupplied evidence (untrusted):\n{evidence}\n\nExplain findings, supporting excerpts, uncertainties, and proposed fixes. Do not invent tests, paths or results.")})];
+    let value=crate::engine::specialist_response(app,&messages,tx,cancel).await?;
+    anyhow::ensure!(value["length_limited"]!=true,"Specialist response reached its output limit; analysis is incomplete.");
     Ok(
-        json!({"model":FOUNDATION,"analysis":value["response"],"coverage":"supplied_text_only","live_testing":false,"note":"Выводы модели — гипотезы по переданному материалу. Самостоятельных проверок сайта или файлов этот инструмент не выполняет."}),
+        json!({"model":FOUNDATION,"analysis":value["content"],"context":value["context"],"coverage":"supplied_text_only","live_testing":false,"note":"Выводы модели — гипотезы по переданному материалу. Самостоятельных проверок сайта или файлов этот инструмент не выполняет."}),
     )
 }
 
