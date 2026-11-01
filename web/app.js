@@ -155,7 +155,7 @@ async function projectGit(action){
  }catch(error){if(request===projectRequest)$('#project-git-output').textContent=error.message;}
 }
 function planHtml(tool){
- try{const data=JSON.parse(tool.result);if(!Array.isArray(data.plan))return '';return `<section class="task-plan"><div>План агента</div><ol>${data.plan.map(step=>`<li class="plan-${escapeHtml(step.status)}"><span>${step.status==='completed'?icon('check'):step.status==='in_progress'?'<span class="spinner"></span>':'<span class="plan-dot"></span>'}</span><span>${escapeHtml(step.title)}</span></li>`).join('')}</ol><small>Отметки модели; результаты проверок показаны отдельно.</small></section>`;}catch{return '';}
+ try{const data=JSON.parse(tool.result);if(!Array.isArray(data.plan))return '';return `<section class="task-plan"><div>План агента</div><ol>${data.plan.map(step=>`<li class="plan-${escapeHtml(step.status)}"><span>${step.status==='completed'?icon('check'):step.status==='in_progress'?'<span class="spinner"></span>':'<span class="plan-dot"></span>'}</span><span>${escapeHtml(step.title)}</span></li>`).join('')}</ol><small>Отметки модели; результаты проверок показаны отдельно.</small>${artifactLinks(tool)}</section>`;}catch{return '';}
 }
 function toolsHtml(tools){const last=tools.findLastIndex(t=>t.name==='update_plan'&&t.status==='succeeded');return tools.filter((t,i)=>t.name!=='update_plan'||t.status!=='succeeded'||i===last).map(t=>toolHtml(t,t.result===undefined)).join('');}
 async function downloadExecution(id){const report=await api('/api/executions/'+id);download(JSON.stringify(report,null,2),'execution-'+id+'.json','application/json');}
@@ -189,9 +189,9 @@ function fileReadHtml(tool){
 function toolHtml(tool,pending=false){
   const execution=executionHtml(tool),fileRead=fileReadHtml(tool);
   if(tool.name==='update_plan'&&tool.status==='succeeded')return planHtml(tool);
-  const status=actionStatus(tool,pending),labels={running:'Выполняется',awaiting_approval:'Ожидает подтверждения',succeeded:'Выполнено',denied:'Отклонено',expired:'Время истекло',cancelled:'Прервано',failed:'Ошибка',skipped:'Пропущено',timed_out:'Лимит времени',needs_input:'Нужны данные',legacy:'Завершено · старый формат'};
+  const status=actionStatus(tool,pending);
   const marker=status==='running'?'<span class="spinner"></span>':status==='succeeded'?icon('check'):status==='awaiting_approval'?icon('shield'):['denied','failed','cancelled','expired','timed_out'].includes(status)?icon('close'):'<span aria-hidden="true">—</span>';
-  return `<details class="tool-card tool-${escapeHtml(status)}" data-tool-status="${escapeHtml(status)}"><summary>${marker}<span>${escapeHtml(toolTitle(tool.name))}</span><span class="tool-status-label">${escapeHtml(labels[status]||status)}${escapeHtml(browserToolTiming(tool))}</span></summary><pre>${execution?escapeHtml(tool.arguments?.command||''):escapeHtml(JSON.stringify(tool.arguments,null,2))+(!fileRead&&tool.result!==undefined?'\n\n'+escapeHtml(tool.result):'')}</pre>${fileRead}${execution}${changeButton(tool)}</details>`;
+  return `<details class="tool-card tool-${escapeHtml(status)}" data-tool-status="${escapeHtml(status)}"><summary>${marker}<span>${escapeHtml(toolTitle(tool.name))}</span><span class="tool-status-label">${escapeHtml(toolStatusTitle(status))}${escapeHtml(browserToolTiming(tool))}</span></summary><pre>${execution?escapeHtml(tool.arguments?.command||''):escapeHtml(JSON.stringify(tool.arguments,null,2))+(!fileRead&&tool.result!==undefined?'\n\n'+escapeHtml(tool.result):'')}</pre>${fileRead}${execution}${changeButton(tool)}${artifactLinks(tool)}</details>`;
 }
 function renderMessages(){pendingViewRender=null;const target=$('#conversation');if(!state.chat?.messages?.length&&!state.busy){target.className='';target.innerHTML=welcome();return;}target.className='conversation';target.innerHTML=(state.chat?.messages||[]).map((message,index)=>messageHtml(message,index)).join('')+(state.busy?streamHtml():'');primeStreamCards();enhanceMarkdown(target);if(!state.busy&&state.chat?.messages.at(-1)?.role==='user'){const actions=target.lastElementChild?.querySelector('.message-actions');if(actions){const retry=document.createElement('button');retry.className='icon-button';retry.dataset.action='retry';retry.title='Повторить запрос';retry.innerHTML=icon('refresh');actions.append(retry);}}if(state.busy)paintStream();followScroll();}
 function diagnosticsHtml(d){
@@ -339,6 +339,7 @@ function bindEvents(){
       if(button.dataset.chatMenu)return chatMenu(button.dataset.chatMenu,button);
       if(button.dataset.remove){state.pending=state.pending.filter(a=>a.id!==button.dataset.remove);renderPending();return;}
       if(button.dataset.preview)return await preview(button.dataset.preview);
+      if(button.dataset.artifact)return await showArtifact(button.dataset.artifact);
       if(button.dataset.processView)return await showProcess(button.dataset.processView);
       if(button.dataset.treePath){insertText('`'+button.dataset.treePath+'`');return;}
       if(button.dataset.close){$('#'+button.dataset.close).close();return;}

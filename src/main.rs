@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod agent;
+mod artifacts;
 mod api;
 mod changes;
 mod compute;

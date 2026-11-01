@@ -46,7 +46,7 @@ impl ApiError {
         if let Some(error) = self.0.downcast_ref::<HttpFailure>() {
             return error.0;
         }
-        if self.0.is::<crate::task_store::MissingRun>() {
+        if self.0.is::<crate::task_store::MissingRun>() || self.0.is::<crate::task_store::MissingResource>() {
             return StatusCode::NOT_FOUND;
         }
         if let Some(error) = self.0.downcast_ref::<reqwest::Error>() {
@@ -379,6 +379,8 @@ pub fn router(app: Shared) -> Router {
         .route("/api/quick", get(quick_state).post(quick_translate))
         .route("/api/quick/stop", post(quick_stop))
         .route("/api/files/{id}", get(file))
+        .route("/api/artifacts/{id}", get(artifact))
+        .route("/api/artifacts/{id}/download", get(artifact_download))
         .route("/api/tree", get(tree))
         .route("/api/project/inspect", post(inspect_project))
         .route("/api/project/git", post(project_git))
@@ -957,6 +959,14 @@ async fn execution(State(app): State<Shared>, Path(id): Path<String>,axum::extra
     if let Some(stream)=q.get("stream") {let offset=q.get("offset").map(|v|v.parse::<u64>()).transpose()?.unwrap_or(0);return Ok(Json(crate::processes::log(&app,&id,stream,offset).await?));}
     Ok(Json(crate::processes::view(&app,&id).await?))
 }
+async fn artifact(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
+    Uuid::parse_str(&id)?;let offset=q.get("offset").map(|value|value.parse::<usize>()).transpose()?.unwrap_or(0);Ok(Json(app.tasks.artifact_page(id,offset).await?))
+}
+async fn artifact_download(State(app):State<Shared>,Path(id):Path<String>)->Result<Response,ApiError>{
+    Uuid::parse_str(&id)?;let descriptor=app.tasks.artifact(id.clone()).await?;let download_id=id.clone();
+    let chunks=async_stream::stream!{let mut offset=0;loop{match app.tasks.artifact_page(id.clone(),offset).await{Ok(page)=>{yield Ok::<_,std::io::Error>(page["text"].as_str().unwrap_or("").as_bytes().to_vec());if page["has_more"]!=true{break;}offset=page["next_offset"].as_u64().unwrap_or(offset as u64) as usize;},Err(error)=>{yield Err(std::io::Error::other(error.to_string()));break;}}}};
+    let mut headers=HeaderMap::new();headers.insert("content-type","text/plain; charset=utf-8".parse()?);headers.insert("content-length",descriptor["bytes"].to_string().parse()?);headers.insert("etag",format!("\"{}\"",descriptor["sha256"].as_str().unwrap_or("")).parse()?);headers.insert("content-disposition",format!("attachment; filename=\"artifact-{download_id}.txt\"").parse()?);Ok((headers,Body::from_stream(chunks)).into_response())
+}
 async fn stop_execution(State(app):State<Shared>,Path(id):Path<String>)->ApiResult<Value>{crate::processes::stop(&app,&id).await?;Ok(Json(json!({"stop_requested":true})))}
 async fn process_input(State(app):State<Shared>,Path(id):Path<String>,Json(value):Json<Value>)->ApiResult<Value>{
     let text=value["text"].as_str().ok_or_else(||anyhow::anyhow!("Не задан текст для stdin"))?;crate::processes::input(&app,&id,text,&app.shutdown.child_token()).await?;Ok(Json(json!({"bytes_written":text.len()})))
@@ -1319,7 +1329,9 @@ async fn conversation_tasks(State(app):State<Shared>,Path(id):Path<String>)->Api
 async fn task_state(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
     let after=q.get("after").map(|v|v.parse::<i64>()).transpose()?.unwrap_or(0);
     require(after>=0,"Курсор должен быть неотрицательным")?;
-    let mut task=app.tasks.task(id.clone(),after).await?;task["active_processes"]=json!(crate::processes::for_task(&app,&id).await?);Ok(Json(task))
+    let mut task=app.tasks.task(id.clone(),after).await?;task["active_processes"]=json!(crate::processes::for_task(&app,&id).await?);
+    if let Some(run)=task["runs"].as_array().and_then(|runs|runs.first()).and_then(|run|run["id"].as_str()).map(str::to_owned){let before=q.get("before_artifact").map(|value|value.parse::<i64>()).transpose()?;task["observations"]=app.tasks.artifact_list(run,before).await?;}
+    Ok(Json(task))
 }
 async fn task_request(State(app):State<Shared>,Path((id,sequence)):Path<(String,i64)>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
     let offset=q.get("offset").map(|v|v.parse::<usize>()).transpose()?.unwrap_or(0);

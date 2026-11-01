@@ -1017,7 +1017,7 @@ pub async fn run(
                     current_task=task["id"].as_str().unwrap_or("").into();
                     initial_task=use_tools && task["requests"].as_array().is_some_and(|requests|requests.len()>1) && ["продолжай","продолжай работу","продолжи","дальше","continue","continue work","resume"].contains(&input.content.trim().to_lowercase().trim_end_matches(['.','!']));
                     let brief=json!({"id":task["id"],"project":task["project"],"goal_preview":tools::truncate(task["goal_preview"].as_str().unwrap_or(""),4000),"goal_characters":task["goal_characters"],"plan_saved":!task["plan"].is_null(),"context_partial":true});
-                    system.push_str(&format!("\nPersistent user task state (survives context trimming and restarts): {}\nThe original goal and requests are user-provided data. Do not lose their constraints when the latest message asks to continue. Before continuing, call read_task for the current plan and requests; read further index pages and full request text when necessary. A completed run or an agent plan checkmark is not verified completion of the goal. Inspect actual files/process state before repeating any interrupted mutation; an interrupted result has unknown effects. Explicitly report remaining work and missing verification.",brief));
+                    system.push_str(&format!("\nPersistent user task state (survives context trimming and restarts): {}\nThe original goal and requests are user-provided data. Do not lose their constraints when the latest message asks to continue. Before continuing, call read_task for the current plan and requests; read further index pages and full request text when necessary. A completed run or an agent plan checkmark is not verified completion of the goal. Inspect actual files/process state before repeating any interrupted mutation; an interrupted result has unknown effects. Saved observations remain available through search_artifacts/read_artifact; do not replay a mutation merely to recover its result. Explicitly report remaining work and missing verification.",brief));
                 }
             }
             if input.web=="off"{system.push_str("\nNetwork tools are disabled for this turn. Do not claim to search or browse.");}
@@ -1144,10 +1144,13 @@ pub async fn run(
                 // Planning text can contain premature claims of success. Do not
                 // display or retain it as verified facts before tools execute.
                 response["content"] = json!("");
+                let assistant_index=history.len();
                 history.push(response);
                 for (index, call) in calls.iter().enumerate() {
                     let name=call["function"]["name"].as_str().unwrap_or("");
-                    let mut args=call["function"]["arguments"].clone();
+                    let raw_args=call["function"]["arguments"].clone();
+                    let (mut args,invalid)=match tools::arguments(name,raw_args.clone()){Ok(value)=>(value,None),Err(error)=>(raw_args,Some(error))};
+                    history[assistant_index]["tool_calls"][index]["function"]["arguments"]=args.clone();
                     let id=uuid::Uuid::new_v4().to_string();
                     let action_started=std::time::Instant::now();
                     emit(tx,json!({"type":"tool_start","id":id,"name":name,"arguments":args,"status":"running"})).await?;
@@ -1155,7 +1158,7 @@ pub async fn run(
                     let allowed = if deadline.is_some_and(|at|tokio::time::Instant::now() >= at) { Err("Истёк заданный срок задачи. Новые действия остановлены.") } else { budget.reserve(name,&args) };
                     let result = match allowed {
                         Err(reason)=>Err(crate::agent::ApprovalStopped(if reason.starts_with("Остановлен повтор") {"repeated"} else {"limit"}).into()),
-                        Ok(())=>{
+                        Ok(())=>if let Some(error)=invalid {Err(error)}else{
                             let action_cancel=cancel.child_token();
                             let deadline_cancel=action_cancel.clone();
                             let timer=tokio::spawn(async move {crate::lifecycle::wait(deadline).await;deadline_cancel.cancel();});
@@ -1187,9 +1190,11 @@ pub async fn run(
                     let text = if status=="skipped" { allowed.unwrap_err().to_string() } else {text};
                     if status=="succeeded" && matches!(name,"write_file"|"edit_file"|"move_file"|"copy_file"|"delete_file"|"translate_file") && serde_json::from_str::<Value>(&text).is_ok_and(|v|v["changed"]==true) { budget.files_changed(); }
                     let record=json!({"id":id,"name":name,"arguments":args,"status":status,"result":text,"exit_code":exit_code,"duration_ms":action_started.elapsed().as_millis().min(u64::MAX as u128) as u64});
+                    let run=crate::permissions::TASK.try_with(Clone::clone).context("Нет источника журнала инструмента")?;
+                    let record=crate::artifacts::archive_record(&app,&run,record).await?;
                     answer.tools.push(record.clone());
                     emit(tx,json!({"type":"tool_result","tool":record})).await?;
-                    history.push(json!({"role":"tool","tool_name":name,"content":crate::agent::tool_context(name,status,&text,exit_code)}));
+                    history.push(json!({"role":"tool","tool_name":name,"content":crate::artifacts::context_reference(crate::agent::tool_context(name,status,&text,exit_code),&record["result_artifact"])}));
                     if stale_ref {
                         for pending in calls.iter().skip(index+1){
                             let pending_name=pending["function"]["name"].as_str().unwrap_or("");

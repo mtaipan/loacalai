@@ -420,13 +420,16 @@ pub fn fit_history(history: &mut Vec<serde_json::Value>, limit: usize) -> anyhow
                     .is_ok_and(|v| v["context_truncated"] == true)
         }) {
             let value = item["content"].as_str().unwrap();
-            let mut payload = serde_json::from_str::<serde_json::Value>(value)
+            let stored=value.rsplit_once("\nSTORED_RESULT: ").and_then(|(text,reference)|serde_json::from_str::<serde_json::Value>(reference).ok().map(|reference|(text,reference)));
+            let content=stored.as_ref().map(|(text,_)|*text).unwrap_or(value);
+            let mut payload = serde_json::from_str::<serde_json::Value>(content)
                 .unwrap_or_else(|_| {
-                    if value.starts_with("STATUS: succeeded\n") {
-                        let (metadata,text)=value.split_once("\nFILE_TEXT_BEGIN\n").unwrap_or(("",value));
+                    if content.starts_with("STATUS: succeeded\n") {
+                        let (metadata,text)=content.split_once("\nFILE_TEXT_BEGIN\n").unwrap_or(("",content));
                         serde_json::json!({"status":"succeeded","metadata":crate::tools::truncate(metadata,600),"result":text.strip_suffix("\nFILE_TEXT_END").unwrap_or(text)})
-                    } else {serde_json::json!({"result":value})}
+                    } else {serde_json::json!({"result":content})}
                 });
+            if let Some((_,reference))=stored {payload["artifact"]=reference;}
             for key in ["result", "text", "body", "analysis", "stdout", "stderr"] {
                 if let Some(raw) = payload[key].as_str() {
                     payload[key] = serde_json::json!(crate::tools::truncate(raw, 500));
@@ -454,6 +457,7 @@ pub fn fit_history(history: &mut Vec<serde_json::Value>, limit: usize) -> anyhow
                     "tool_status",
                     "path",
                     "metadata",
+                    "artifact",
                     "start_line",
                     "end_line",
                     "has_more",
@@ -901,6 +905,17 @@ mod tests {
         assert!(plan(&json!({"steps":[]})).is_err());
         assert!(plan(&json!({"steps":[{"title":"Read","status":"in_progress"},{"title":"Edit","status":"in_progress"}]})).is_err());
         assert!(plan(&json!({"steps":[{"title":"Read","status":"completed"},{"title":"Edit","status":"in_progress"},{"title":"Check","status":"pending"}]})).is_ok());
+    }
+    #[test]
+    fn file_compaction_keeps_the_immutable_result_reference_outside_source_text(){
+        use serde_json::json;
+        let source="raw source line\n".repeat(3000);
+        let result=json!({"path":"source.rs","start_line":1,"end_line":3000,"has_more":false,"text":source}).to_string();
+        let content=crate::artifacts::context_reference(tool_context("read_file","succeeded",&result,None),&json!({"id":"source-id","sha256":"content-hash","characters":source.chars().count()}));
+        let mut history=vec![json!({"role":"system","content":"Task"}),json!({"role":"user","content":"Read"}),json!({"role":"tool","content":content})];
+        assert!(fit_history(&mut history,1500).unwrap());
+        let compact:serde_json::Value=serde_json::from_str(history[2]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(compact["artifact"]["id"],"source-id");assert!(!compact["result"].as_str().unwrap().contains("STORED_RESULT"));
     }
     #[test]
     fn only_explicit_action_quota_stops_execution() {

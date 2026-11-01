@@ -12,8 +12,9 @@ pub fn validate(name:&str,args:&Value)->Result<()> {
     Ok(())
 }
 fn check(value:&Value,schema:&Value,path:&str)->Result<()> {
-    let valid=match schema["type"].as_str(){Some("object")=>value.is_object(),Some("array")=>value.is_array(),Some("string")=>value.is_string(),Some("integer")=>value.is_i64()||value.is_u64(),Some("number")=>value.is_number(),Some("boolean")=>value.is_boolean(),_=>true};
-    anyhow::ensure!(valid,"{path}: ожидается {}",schema["type"].as_str().unwrap_or("значение"));
+    let valid=match schema["type"].as_str(){Some("object")=>value.is_object(),Some("array")=>value.is_array(),Some("string")=>value.is_string(),Some("integer")=>value.is_i64(),Some("number")=>value.is_number(),Some("boolean")=>value.is_boolean(),_=>true};
+    let expected=match schema["type"].as_str(){Some("object")=>"объект",Some("array")=>"массив",Some("string")=>"строка",Some("integer")=>"целое 64-битное число",Some("number")=>"число",Some("boolean")=>"логическое значение",_=>"значение"};
+    anyhow::ensure!(valid,"{path}: ожидается {expected}");
     if let Some(choices)=schema["enum"].as_array(){anyhow::ensure!(choices.contains(value),"{path}: недопустимое значение");}
     if let Some(number)=value.as_f64(){
         if let Some(min)=schema["minimum"].as_f64(){anyhow::ensure!(number>=min,"{path}: значение должно быть не меньше {min}");}
@@ -43,6 +44,7 @@ mod tests {
         for timeout in [json!(-1),json!(1.5),json!("60"),json!(true)]{assert!(validate("run_command",&json!({"command":"never execute","timeout_seconds":timeout})).is_err());assert!(validate("start_process",&json!({"command":"never execute","timeout_seconds":timeout})).is_err());}
         assert!(validate("poll_process",&json!({"execution_id":"id","stdout_offset":-1})).is_err());
         assert!(validate("run_command",&json!({"command":"never execute","timeout_seconds":u64::MAX})).is_err());
+        assert!(validate("read_task",&json!({"request":u64::MAX})).is_err());
         assert!(validate("write_file",&json!({"path":"file"})).is_err());
         assert!(validate("run_command",&json!({"command":"never execute","cwd":"wrong_parameter"})).is_err());
         assert!(validate("update_plan",&json!({"steps":[{"title":"Check","status":"invented"}]})).is_err());

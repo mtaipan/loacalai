@@ -44,7 +44,7 @@ pub fn associate(tx:&Transaction<'_>,run:&str,conversation:&str,input:&Value,pro
     Ok(())
 }
 pub fn snapshot(conn:&Connection,task:&str,after:i64)->Result<Value> {
-    let (conversation,project,goal,state):(String,String,String,String)=conn.query_row("SELECT conversation,project,goal,state FROM work_tasks WHERE id=?1",[task],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or(crate::task_store::MissingRun)?;
+    let (conversation,project,goal,state):(String,String,String,String)=conn.query_row("SELECT conversation,project,goal,state FROM work_tasks WHERE id=?1",[task],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or(crate::task_store::MissingResource("Рабочая задача не найдена"))?;
     let mut query=conn.prepare("SELECT sequence,run,substr(content,1,400),length(content),attachments FROM task_requests WHERE task=?1 AND sequence>?2 ORDER BY sequence LIMIT 32")?;
     let requests=query.query_map(params![task,after],|r|Ok(json!({"sequence":r.get::<_,i64>(0)?,"run":r.get::<_,String>(1)?,"preview":r.get::<_,String>(2)?,"characters":r.get::<_,i64>(3)?,"attachments":serde_json::from_str::<Value>(&r.get::<_,String>(4)?).unwrap_or(json!([]))})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let next=requests.last().and_then(|r|r["sequence"].as_i64()).unwrap_or(after);

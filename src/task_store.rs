@@ -13,10 +13,14 @@ pub struct Store(Arc<Mutex<Connection>>);
 pub struct MissingRun;
 impl std::fmt::Display for MissingRun {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Задача не найдена")
+        f.write_str("Запуск не найден")
     }
 }
 impl std::error::Error for MissingRun {}
+#[derive(Debug)]
+pub struct MissingResource(pub &'static str);
+impl std::fmt::Display for MissingResource {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str(self.0)}}
+impl std::error::Error for MissingResource {}
 impl Store {
     pub async fn workspace_events(&self, after: i64) -> Result<Vec<Value>> {
         self.access(move|conn|{
@@ -47,7 +51,7 @@ impl Store {
         let mut conn = Connection::open(data.join("tasks.sqlite3"))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 3,
+            version <= 4,
             "База задач создана более новой версией приложения; исходный файл сохранён"
         );
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -65,7 +69,8 @@ impl Store {
             ",
         )?;
         crate::task_state::install(&mut conn,version<3)?;
-        conn.pragma_update(None,"user_version",3)?;
+        crate::artifacts::install(&mut conn)?;
+        conn.pragma_update(None,"user_version",4)?;
         // A crash leaves effects with unknown outcome. Never replay mutations automatically.
         conn.execute(
             "UPDATE runs SET status='interrupted', updated=?1 WHERE status IN ('running','queued','awaiting_approval','stopping')",
@@ -81,6 +86,8 @@ impl Store {
         self.access(move |conn| {
             let tx=conn.transaction()?;
             tx.execute("INSERT OR IGNORE INTO deleted_conversations VALUES (?1)", [&id])?;
+            tx.execute("DELETE FROM artifacts WHERE run IN (SELECT id FROM runs WHERE conversation=?1)",[&id])?;
+            tx.execute("DELETE FROM artifact_bodies WHERE NOT EXISTS (SELECT 1 FROM artifacts WHERE artifacts.hash=artifact_bodies.hash)",[])?;
             tx.execute("DELETE FROM task_plans WHERE task IN (SELECT id FROM work_tasks WHERE conversation=?1)",[&id])?;
             tx.execute("DELETE FROM task_requests WHERE task IN (SELECT id FROM work_tasks WHERE conversation=?1)",[&id])?;
             tx.execute("DELETE FROM task_runs WHERE task IN (SELECT id FROM work_tasks WHERE conversation=?1)",[&id])?;
@@ -103,7 +110,7 @@ impl Store {
         }
         Ok(())
     }
-    async fn access<T: Send + 'static>(
+    pub(crate) async fn access<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
@@ -185,7 +192,7 @@ impl Store {
     pub async fn task(&self,id:String,after:i64)->Result<Value>{self.access(move|conn|crate::task_state::snapshot(conn,&id,after)).await}
     pub async fn task_request(&self,id:String,sequence:i64,offset:usize)->Result<Value>{
         self.access(move|conn|{
-            let (text,total):(String,i64)=conn.query_row("SELECT substr(content,?3+1,16000),length(content) FROM task_requests WHERE task=?1 AND sequence=?2",params![id,sequence,i64::try_from(offset)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(MissingRun)?;
+            let (text,total):(String,i64)=conn.query_row("SELECT substr(content,?3+1,16000),length(content) FROM task_requests WHERE task=?1 AND sequence=?2",params![id,sequence,i64::try_from(offset)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(MissingResource("Запрос задачи не найден"))?;
             let next=offset.saturating_add(text.chars().count());
             Ok(json!({"sequence":sequence,"text":text,"offset":offset,"next_offset":next,"characters":total,"has_more":(next as u64)<total as u64}))
         }).await

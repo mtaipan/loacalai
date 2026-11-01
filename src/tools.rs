@@ -398,6 +398,12 @@ async fn mutate(
     }
     Ok(crate::changes::apply(&app.data, operation, mutations)?.to_string())
 }
+pub fn arguments(name:&str,mut args:Value)->Result<Value>{
+    if let Some(text)=args.as_str(){args=serde_json::from_str(text)?;}
+    if args.is_null(){args=json!({});}
+    crate::tool_schema::validate(name,&args)?;
+    Ok(args)
+}
 pub async fn execute(
     app: &Shared,
     name: &str,
@@ -407,12 +413,18 @@ pub async fn execute(
     tool_id: &str,
     web: &mut crate::web_tools::Session,
 ) -> Result<String> {
-    if let Some(text) = args.as_str() {
-        args = serde_json::from_str(text)?;
-    }
-    crate::tool_schema::validate(name,&args)?;
+    args=arguments(name,args)?;
     let root = PathBuf::from(app.settings.lock().await.workspace.clone());
     match name {
+        "read_artifact"=>{
+            let run=crate::permissions::TASK.try_with(Clone::clone).context("Нет активного запуска")?;let id=string(&args,"id")?.to_string();
+            anyhow::ensure!(app.tasks.artifact_owned(id.clone(),run).await?,"Материал недоступен этой задаче");
+            Ok(app.tasks.artifact_page(id,usize::try_from(args["offset"].as_u64().unwrap_or(0))?).await?.to_string())
+        },
+        "search_artifacts"=>{
+            let run=crate::permissions::TASK.try_with(Clone::clone).context("Нет активного запуска")?;
+            Ok(app.tasks.artifact_search(run,string(&args,"query")?.to_string(),args["after"].as_i64().unwrap_or(0),args.get("snapshot").filter(|value|!value.is_null()).cloned()).await?.to_string())
+        },
         "inspect_project" => {
             let directory = crate::projects::directory(app, args["path"].as_str()).await?;
             let token = cancel.clone();
@@ -450,6 +462,8 @@ pub async fn execute(
             } else {
                 let mut state=app.tasks.task(id.clone(),args["after"].as_i64().unwrap_or(0)).await?;
                 state["active_processes"]=json!(crate::processes::for_task(app,&id).await?);
+                let run=crate::permissions::TASK.try_with(Clone::clone).context("Нет активного запуска")?;
+                state["observations"]=app.tasks.artifact_list(run,args["before_artifact"].as_i64()).await?;
                 Ok(state.to_string())
             }
         },
@@ -842,11 +856,13 @@ pub fn definitions() -> Value {
     }
     let s = json!({"type":"string"});
     json!([
+        f("read_artifact","Read an immutable saved observation or material belonging to this task. Full original text remains available even after context compaction. Use the returned next_offset to read subsequent parts; offsets are Unicode scalar characters. A saved observation may cover only part of its source: preserve its coverage/status metadata.",json!({"id":s,"offset":{"type":"integer","minimum":0}}),&["id"]),
+        f("search_artifacts","Keyword search over this task's saved observations/materials, without network or model calls. Not semantic search. Results are paged by chunk cursor with a fixed source snapshot; use next_after and the returned snapshot until has_more=false. Scores are relevance hints, not verified claims. read_artifact opens a matching saved source. Raw tool arguments are excluded from the search corpus.",json!({"query":s,"after":{"type":"integer","minimum":0},"snapshot":{"type":"object","properties":{"chunk":{"type":"integer","minimum":0},"reference":{"type":"integer","minimum":0}},"required":["chunk","reference"]}}),&["query"]),
         f("start_process","Start an approved managed foreground process, such as a dev server or stdin-enabled CLI (not a PTY; TTY-only programs are unsupported). Returns execution_id immediately, without declaring the application ready. Use poll_process to read logs and verify readiness; stdin needs a separate confirmation. The owned process survives a successful run in this task, but stops on its initiating run cancellation or application shutdown. Background descendants do not detach from the owner. No deadline unless the user requests it.",json!({"command":s,"directory":s,"timeout_seconds":{"type":"integer","minimum":0}}),&["command"]),
         f("poll_process","Read the state and paged stdout/stderr of this task's process. Use the returned per-stream next_offset for subsequent reads; full raw logs remain on disk. wait_ms waits for a state change or returns a partial snapshot. Running and exit_code=0 are not proof of project correctness.",json!({"execution_id":s,"wait_ms":{"type":"integer","minimum":0},"stdout_offset":{"type":"integer","minimum":0},"stderr_offset":{"type":"integer","minimum":0}}),&["execution_id"]),
         f("write_stdin","Write exact text to a managed process in this task, with confirmation. Include an actual newline when needed. Does not infer success of the operation; read subsequent output with poll_process.",json!({"execution_id":s,"text":s}),&["execution_id","text"]),
         f("stop_process","Stop this task's managed process and its owned descendants. Preserve logs and wait for process cleanup. Does not undo completed side effects.",json!({"execution_id":s}),&["execution_id"]),
-        f("read_task","Read the persistent current task goal, user requests, current plan and run states. Plans are agent claims, not verified completion. Requests have stable sequence IDs; use request and offset for full text, after for the next request-index page. Reconcile interrupted run effects before repeating mutations.",json!({"request":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"after":{"type":"integer","minimum":0}}),&[]),
+        f("read_task","Read the persistent current task goal, user requests, current plan and run states. Plans are agent claims, not verified completion. Requests have stable sequence IDs; use request and offset for full text, after for the next request-index page. Observations are newest first; before_artifact pages older saved results. search_artifacts searches observations, read_artifact reads full text. Reconcile interrupted run effects before repeating mutations.",json!({"request":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"after":{"type":"integer","minimum":0},"before_artifact":{"type":"integer","minimum":1}}),&[]),
         f("security_analyze","Ask the locally installed Foundation-Sec specialist to analyze supplied evidence, such as code, logs, or actual page/tool results. Pass the relevant text and the user's question. Does not run a live exploit or verify findings. No automatic model download.",json!({"question":s,"evidence":s}),&["question","evidence"]),
         f("get_system_paths","Get actual OS user Desktop, Documents, Downloads and home paths. These are not the workspace or a drive root. Resolve these instead of guessing. @desktop/file.txt is a supported path alias.",json!({}),&[]),
         f("web_search","Search the internet for the current question. Returns real ranked titles, URLs and snippets where available. Open relevant results with fetch_url or browser_open before answering, cite actual URLs. On network/provider error do not fabricate results.",json!({"query":s,"count":{"type":"integer","minimum":1,"maximum":8}}),&["query"]),
