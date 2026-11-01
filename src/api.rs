@@ -159,6 +159,7 @@ pub struct Run {
     pub conversation: String,
 }
 pub struct App {
+    pub tasks: crate::task_store::Store,
     pub root: PathBuf,
     pub data: PathBuf,
     pub client: reqwest::Client,
@@ -228,6 +229,7 @@ impl App {
         settings.cpu_only = settings.compute.backend == "cpu";
         let compute = crate::compute::Runtime::load(&data);
         Ok(Self {
+            tasks: crate::task_store::Store::open(&data)?,
             root,
             data,
             client: reqwest::Client::builder()
@@ -304,6 +306,9 @@ pub fn router(app: Shared) -> Router {
         .route("/api/changes", get(changes))
         .route("/api/changes/{id}/restore", post(restore_change))
         .route("/api/chat", post(send))
+        .route("/api/runs", get(run_list))
+        .route("/api/runs/{id}", get(run_snapshot))
+        .route("/api/runs/{id}/events", get(run_events))
         .route("/api/approve/{id}", post(approve))
         .route("/api/stop/{id}", post(stop))
         .route("/api/media", post(media))
@@ -648,19 +653,16 @@ async fn new_chat(State(app): State<Shared>, Json(value): Json<Value>) -> ApiRes
 async fn chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Conversation> {
     Ok(Json(app.load(&id).await?))
 }
-async fn ensure_idle(app: &App, id: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !app.runs.lock().await.values().any(|r| r.conversation == id),
-        "Дождитесь завершения ответа или остановите его"
-    );
-    Ok(())
-}
 async fn rename(
     State(app): State<Shared>,
     Path(id): Path<String>,
     Json(value): Json<Value>,
 ) -> ApiResult<Conversation> {
-    ensure_idle(&app, &id).await?;
+    let runs = app.runs.lock().await;
+    require(
+        !runs.values().any(|r| r.conversation == id),
+        "Дождитесь завершения ответа или остановите его",
+    )?;
     let mut chat = app.load(&id).await?;
     chat.title = value["title"]
         .as_str()
@@ -672,7 +674,11 @@ async fn rename(
     Ok(Json(chat))
 }
 async fn delete_chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
-    ensure_idle(&app, &id).await?;
+    let runs = app.runs.lock().await;
+    require(
+        !runs.values().any(|r| r.conversation == id),
+        "Дождитесь завершения ответа или остановите его",
+    )?;
     if let Some(session) = app.web_sessions.lock().await.remove(&id) {
         session.lock().await.close().await;
     }
@@ -833,8 +839,10 @@ async fn execution(State(app): State<Shared>, Path(id): Path<String>) -> ApiResu
         &tokio::fs::read(app.data.join("executions").join(format!("{id}.json"))).await?,
     )?))
 }
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ChatInput {
+    #[serde(default)]
+    pub request_id: Option<String>,
     #[serde(default = "thinking_off")]
     pub thinking: String,
     #[serde(default = "web_auto")]
@@ -902,13 +910,35 @@ async fn send(
         anyhow::anyhow!("Движок обновляется или меняет устройство. Дождитесь завершения операции.")
     })?;
     let cancel = app.shutdown.child_token();
-    let run_id = Uuid::new_v4().to_string();
+    let run_id = input
+        .request_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    Uuid::parse_str(&run_id)?;
     {
         let mut runs = app.runs.lock().await;
+        if app.tasks.get(run_id.clone()).await.is_ok() {
+            // Reconnecting an accepted request must not execute it twice.
+            app.tasks
+                .begin(
+                    run_id.clone(),
+                    input.conversation.clone(),
+                    serde_json::to_value(&input)?,
+                )
+                .await?;
+            return Ok(run_stream(app.clone(), run_id, 0));
+        }
         require(
             !runs.values().any(|r| r.conversation == input.conversation),
             "В этом чате уже идёт ответ",
         )?;
+        app.tasks
+            .begin(
+                run_id.clone(),
+                input.conversation.clone(),
+                serde_json::to_value(&input)?,
+            )
+            .await?;
         runs.insert(
             run_id.clone(),
             Run {
@@ -918,6 +948,20 @@ async fn send(
         );
     }
     let (tx, mut rx) = mpsc::channel::<Value>(128);
+    let journal = app.clone();
+    let journal_id = run_id.clone();
+    // The receiver lives independently of any HTTP connection.
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let Err(error) = journal.tasks.append(journal_id.clone(), event).await {
+                eprintln!("Cannot persist task {journal_id}: {error:#}");
+                if let Some(run) = journal.runs.lock().await.get(&journal_id) {
+                    run.cancel.cancel();
+                }
+                break;
+            }
+        }
+    });
     let worker = app.clone();
     let id = run_id.clone();
     tokio::spawn(async move {
@@ -925,7 +969,7 @@ async fn send(
         let _ = tx.send(json!({"type":"start","run_id":id})).await;
         let started = std::time::Instant::now();
         let conversation = input.conversation.clone();
-        if let Err(error) = engine::run(worker.clone(), input, &tx, cancel).await {
+        if let Err(error) = engine::run(worker.clone(), input, &tx, cancel.clone()).await {
             let diagnostic = format!("{error:#}");
             if let Ok(mut chat) = worker.load(&conversation).await {
                 if chat.messages.last().is_some_and(|m| m.role == "user") {
@@ -951,10 +995,59 @@ async fn send(
             let _ = tx.send(json!({"type":"error","message":diagnostic})).await;
         }
         worker.runs.lock().await.remove(&id);
-        let _ = tx.send(json!({"type":"done"})).await;
+        let _ = tx.send(json!({"type":"done","status":if cancel.is_cancelled(){"cancelled"}else{"completed"}})).await;
     });
-    let stream = async_stream::stream! {while let Some(value)=rx.recv().await{yield Ok::<Event,Infallible>(Event::default().json_data(value).unwrap());}};
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(run_stream(app, run_id, 0))
+}
+fn run_stream(
+    app: Shared,
+    id: String,
+    mut cursor: i64,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let stream = async_stream::stream! {
+        loop {
+            match app.tasks.events(id.clone(),cursor).await {
+                Ok(events) if !events.is_empty() => {
+                    for event in events {
+                        cursor=event["sequence"].as_i64().unwrap_or(cursor);
+                        let done=event["type"]=="done";
+                        yield Ok(Event::default().id(cursor.to_string()).json_data(event).unwrap());
+                        if done {return;}
+                    }
+                },
+                Ok(_) => {
+                    let terminal=app.tasks.get(id.clone()).await.ok().is_some_and(|r|["interrupted","completed","cancelled","failed"].iter().any(|s|r["status"]==*s)) && !app.runs.lock().await.contains_key(&id);
+                    if terminal {
+                        yield Ok(Event::default().json_data(json!({"type":"done","run_id":id})).unwrap());return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                },
+                Err(error) => {
+                    yield Ok(Event::default().json_data(json!({"type":"error","message":format!("{error:#}")})).unwrap());return;
+                }
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+async fn run_list(State(app): State<Shared>) -> ApiResult<Value> {
+    Ok(Json(app.tasks.list().await?))
+}
+async fn run_snapshot(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(app.tasks.get(id).await?))
+}
+async fn run_events(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, ApiError> {
+    app.tasks.get(id.clone()).await?;
+    let cursor = q
+        .get("after")
+        .map(|s| s.parse::<i64>())
+        .transpose()?
+        .unwrap_or(0);
+    Ok(run_stream(app, id, cursor))
 }
 async fn changes(State(app): State<Shared>) -> ApiResult<Value> {
     let _guard = app.file_changes.lock().await;

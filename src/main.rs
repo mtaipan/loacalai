@@ -21,6 +21,7 @@ mod specialists;
 mod system_paths;
 mod system_translate;
 mod task_scope;
+mod task_store;
 mod thinking;
 mod tools;
 mod web_tools;

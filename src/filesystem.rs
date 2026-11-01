@@ -453,6 +453,7 @@ mod tests {
         assert!(readable(&app, &file.to_string_lossy(), &cancel)
             .await
             .is_err());
+        drop(app); // SQLite owns open files until the application is dropped.
         std::fs::remove_dir_all(root).unwrap();
     }
 }

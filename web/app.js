@@ -48,13 +48,23 @@ async function api(path, options={}) {
   return response.json();
 }
 async function consumeEvents(path, body, onEvent) {
-  const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Studio-Token':state.token},body:JSON.stringify(body)});
-  if(!response.ok){const error=await response.json().catch(()=>({error:response.statusText}));throw new Error(error.error||response.statusText);}
-  const reader=response.body.getReader();const decoder=new TextDecoder();let buffer='';
-  while(true){const{done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});let position;
-    while((position=buffer.indexOf('\n\n'))!==-1){const block=buffer.slice(0,position);buffer=buffer.slice(position+2);const data=block.split('\n').filter(s=>s.startsWith('data:')).map(s=>s.slice(5).trimStart()).join('\n');if(data)await onEvent(JSON.parse(data));}
+  let cursor=0, terminal=false, reconnect=body?.request_id||path.match(/^\/api\/runs\/([^/]+)\/events/)?.[1]||null;
+  while(!terminal){
+    let response;
+    try {
+      response=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-Studio-Token':state.token},...(body===undefined?{}:{body:JSON.stringify(body)})});
+      if(!response.ok){const detail=await response.json().catch(()=>({error:response.statusText}));const error=new Error(detail.error||response.statusText);error.http=true;throw error;}
+      const reader=response.body.getReader(), decoder=new TextDecoder();let buffer='';
+      while(true){const{done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});let position;
+        while((position=buffer.indexOf('\n\n'))!==-1){const block=buffer.slice(0,position);buffer=buffer.slice(position+2);const data=block.split('\n').filter(s=>s.startsWith('data:')).map(s=>s.slice(5).trimStart()).join('\n');if(!data)continue;const event=JSON.parse(data);if(event.sequence&&event.sequence<=cursor)continue;await onEvent(event);cursor=event.sequence||cursor;if(event.type==='start')reconnect=event.run_id;if(event.type==='done')terminal=true;}
+      }
+      if(terminal||!reconnect)return;
+    }catch(error){if(error.http||!reconnect)throw error;}
+    await new Promise(resolve=>setTimeout(resolve,1000));
+    path='/api/runs/'+reconnect+'/events?after='+cursor;body=undefined;
   }
 }
+
 function buildShell() {
   $('#app').innerHTML=`
     <aside class="sidebar"><div class="brand"><img src="/logo.svg" alt=""><div>Local Gemma<small>STUDIO</small></div></div>
@@ -199,17 +209,22 @@ async function refreshChats(){state.chats=await api('/api/chats');renderChats();
 async function selectChat(id){if(state.busy){toast('Сначала остановите текущий ответ.');return;}state.chat=await api('/api/chats/'+id);localStorage.setItem('gemma.lastChat',id);setMode(modes[state.chat.mode]?state.chat.mode:'agent');$('#chat-title').textContent=state.chat.title;renderChats();renderMessages();followScroll(true);if(innerWidth<761)document.body.classList.add('sidebar-hidden');}
 function newChat(){if(state.busy){toast('Сначала остановите текущий ответ.');return;}state.chat=null;localStorage.removeItem('gemma.lastChat');state.pending=[];$('#chat-title').textContent='Новый чат';$('#prompt').value='';renderChats();renderMessages();renderPending();resizeInput();$('#prompt').focus();}
 async function send(retry=false){
-  if(state.busy)return stopRun();if(state.uploading)return;
+  if(state.sending)return;if(state.busy)return stopRun();if(state.uploading)return;
   let content=$('#prompt').value.trim();let attachments=[...state.pending];
   if(retry){const previous=[...(state.chat?.messages||[])].reverse().find(m=>m.role==='user');if(!previous)return;content=previous.content;attachments=previous.attachments||[];}
   if(!content&&!attachments.length)return;
-  if(!state.chat)state.chat=await api('/api/chats',{method:'POST',body:{mode:state.mode}});
-  localStorage.setItem('gemma.lastChat',state.chat.id);const payload={conversation:state.chat.id,content,attachments:attachments.map(a=>a.id),mode:state.mode,source:$('#source').value,target:$('#target').value,retry,thinking:thinkingChoice,web:webChoice};
+  state.sending=true;try{if(!state.chat)state.chat=await api('/api/chats',{method:'POST',body:{mode:state.mode}});}catch(error){state.sending=false;throw error;}
+  localStorage.setItem('gemma.lastChat',state.chat.id);const payload={request_id:crypto.randomUUID(),conversation:state.chat.id,content,attachments:attachments.map(a=>a.id),mode:state.mode,source:$('#source').value,target:$('#target').value,retry,thinking:thinkingChoice,web:webChoice};
   if(retry){if(state.chat.messages.at(-1)?.role==='assistant')state.chat.messages.pop();if(state.chat.messages.at(-1)?.role==='user')state.chat.messages.pop();}
   state.chat.messages.push({role:'user',content,attachments,tools:[],created:new Date().toISOString()});
-  state.busy=true;state.run=null;state.streamText='';state.streamThinking='';state.streamTools=[];state.approvals=[];state.notice='Подготовка ответа…';state.scrollFollow=true;state.pending=[];$('#prompt').value='';resizeInput();renderPending();renderMessages();startResponseTimer();
+  state.busy=true;state.run=null;state.streamText='';state.streamThinking='';state.streamTools=[];state.approvals=[];state.notice='Подготовка ответа…';state.scrollFollow=true;state.sending=false;renderMessages();startResponseTimer();
   try{await consumeEvents('/api/chat',payload,async event=>{
-    switch(event.type){case 'start':state.run=event.run_id;break;
+    await handleRunEvent(event,!retry);
+  });}catch(error){toast(error.message,true);}
+  finally{stopResponseTimer();state.busy=false;state.run=null;state.approvals=[];clearTimeout(renderTimer);renderTimer=null;try{state.chat=await api('/api/chats/'+payload.conversation);}catch{}renderMessages();await refreshChats();updateSend();}
+}
+async function handleRunEvent(event,clearDraft=false){
+    switch(event.type){case 'start':state.run=event.run_id;if(clearDraft){state.pending=[];$('#prompt').value='';resizeInput();renderPending();}break;
       case 'replace_content':state.streamText=event.text;state.notice='';scheduleStream();break;
       case 'thinking':state.streamThinking=(state.streamThinking||'')+event.text;state.notice='Рассуждение…';scheduleStream();break;
       case 'token':state.streamText+=event.text;state.notice='Генерация ответа…';scheduleStream();break;
@@ -223,9 +238,9 @@ async function send(retry=false){
       case 'saved':state.chat=event.conversation;$('#chat-title').textContent=state.chat.title;break;
       case 'error':toast(event.message,true);break;
     }
-  });}catch(error){toast(error.message,true);}
-  finally{stopResponseTimer();state.busy=false;state.run=null;state.approvals=[];clearTimeout(renderTimer);renderTimer=null;try{state.chat=await api('/api/chats/'+payload.conversation);}catch{}renderMessages();await refreshChats();updateSend();}
 }
+async function reconnectRun(){const runs=await api('/api/runs');const run=runs.find(r=>r.conversation===state.chat?.id&&['running','queued'].includes(r.status));if(!run)return;state.busy=true;state.run=run.id;state.streamText='';state.streamThinking='';state.streamTools=[];state.approvals=[];renderMessages();updateSend();startResponseTimer();try{await consumeEvents('/api/runs/'+run.id+'/events',undefined,handleRunEvent);}catch(error){toast(error.message,true);}finally{stopResponseTimer();state.busy=false;state.run=null;state.chat=await api('/api/chats/'+run.conversation);renderMessages();updateSend();}}
+
 async function stopRun(){if(state.run){await api('/api/stop/'+state.run,{method:'POST',body:{}});state.notice='Остановка…';scheduleStream();}}
 async function uploadFiles(files){const available=12-state.pending.length;if(files.length>available)toast('В одном сообщении можно прикрепить до 12 файлов.');for(const file of Array.from(files).slice(0,available)){if(file.size>80*1024*1024){toast(file.name+': больше 80 МБ',true);continue;}state.uploading++;renderPending();try{const form=new FormData();form.append('file',file,file.name);const attachment=await api('/api/upload',{method:'POST',body:form});state.pending.push(attachment);}catch(error){toast(error.message,true);}finally{state.uploading--;renderPending();}}$('#prompt').focus();}
 async function pasteNative(){const result=await api('/api/clipboard',{method:'POST',body:{}});if(result.text)insertText(result.text);if(result.attachments?.length){state.pending.push(...result.attachments.slice(0,12-state.pending.length));renderPending();}if(!result.text&&!result.attachments?.length)toast('Буфер пуст или формат не поддерживается.');}
@@ -350,5 +365,5 @@ function bindEvents(){
     }catch(error){toast(error.message,true);}
   });
 }
-async function boot(){try{const bootstrap=await api('/api/bootstrap');state.token=bootstrap.token;state.settings=bootstrap.settings;state.catalog=bootstrap.catalog||[];state.mode=localStorage.getItem('gemma.mode')||'agent';if(!modes[state.mode])state.mode='agent';buildShell();updateWorkspace();await refreshChats();const last=localStorage.getItem('gemma.lastChat');if(last&&state.chats.some(c=>c.id===last))await selectChat(last);else renderMessages();$('#prompt').value=localStorage.getItem('gemma.draft')||'';resizeInput();await refreshStatus();setInterval(refreshStatus,15000);}catch(error){$('#app').innerHTML=`<div class="boot">Не удалось подключиться<span>${escapeHtml(error.message)}</span></div>`;}}
+async function boot(){try{const bootstrap=await api('/api/bootstrap');state.token=bootstrap.token;state.settings=bootstrap.settings;state.catalog=bootstrap.catalog||[];state.mode=localStorage.getItem('gemma.mode')||'agent';if(!modes[state.mode])state.mode='agent';buildShell();updateWorkspace();await refreshChats();const last=localStorage.getItem('gemma.lastChat');if(last&&state.chats.some(c=>c.id===last))await selectChat(last);else renderMessages();$('#prompt').value=localStorage.getItem('gemma.draft')||'';resizeInput();reconnectRun().catch(error=>toast(error.message,true));await refreshStatus();setInterval(refreshStatus,15000);}catch(error){$('#app').innerHTML=`<div class="boot">Не удалось подключиться<span>${escapeHtml(error.message)}</span></div>`;}}
 boot();
