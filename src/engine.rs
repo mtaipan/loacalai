@@ -94,8 +94,21 @@ async fn model(
     }
     result
 }
-pub async fn specialist_response(app: &Shared, messages: &[Value], tx: &mpsc::Sender<Value>, cancel: &CancellationToken) -> Result<Value> {
-    model(app,crate::specialists::FOUNDATION,messages,InferenceMode::Configured(Box::new(InferenceMode::Review),json!(false),true),tx,cancel).await
+pub async fn specialist_response(
+    app: &Shared,
+    messages: &[Value],
+    tx: &mpsc::Sender<Value>,
+    cancel: &CancellationToken,
+) -> Result<Value> {
+    model(
+        app,
+        crate::specialists::FOUNDATION,
+        messages,
+        InferenceMode::Configured(Box::new(InferenceMode::Review), json!(false), true),
+        tx,
+        cancel,
+    )
+    .await
 }
 async fn model_once(
     app: &Shared,
@@ -113,7 +126,7 @@ async fn model_once(
     };
     let agent = matches!(&mode, InferenceMode::Agent(_));
     let reply_mode = matches!(&mode, InferenceMode::Reply);
-    let review_mode=matches!(&mode,InferenceMode::Review);
+    let review_mode = matches!(&mode, InferenceMode::Review);
     let buffered_reply = reply_mode || review_mode || model == crate::specialists::WEBSAILOR;
     crate::model_adapter::prepare(app, model).await?;
     let mut payload = json!({"model":model,"messages":messages,"stream":true,"think":think,"keep_alive":"2m","options":{"temperature":0.1}});
@@ -126,7 +139,9 @@ async fn model_once(
         });
         payload["options"]["repeat_penalty"] = json!(config.repeat_penalty);
     }
-    if review_mode {payload["options"]["temperature"]=json!(0.1);}
+    if review_mode {
+        payload["options"]["temperature"] = json!(0.1);
+    }
     // Ollama's automatic conversion of this GGUF's Jinja template loses the
     // user message and leaves a literal "onse". Use the original token format.
     let raw_hy = model.starts_with("hf.co/tencent/Hy-MT2-1.8B-GGUF:");
@@ -172,9 +187,21 @@ async fn model_once(
         payload = crate::specialists::request(model, messages, &definitions, agent);
         payload["options"] = options;
     }
-    if unload { payload["keep_alive"] = json!(0); }
-    let context_plan=crate::context::configure_payload(app,model,&mut payload,if agent || review_mode || matches!(&mode,InferenceMode::Document) {16384}else{8192}).await?;
-    emit(tx,json!({"type":"model_context","context":context_plan})).await?;
+    if unload {
+        payload["keep_alive"] = json!(0);
+    }
+    let context_plan = crate::context::configure_payload(
+        app,
+        model,
+        &mut payload,
+        if agent || review_mode || matches!(&mode, InferenceMode::Document) {
+            16384
+        } else {
+            8192
+        },
+    )
+    .await?;
+    emit(tx, json!({"type":"model_context","context":context_plan})).await?;
     let model_endpoint = crate::model_storage::endpoint(app, model).await?;
     let endpoint = if raw_hy || adapted {
         "generate"
@@ -197,7 +224,7 @@ async fn model_once(
     let mut calls: Vec<Value> = vec![];
     let mut completed = false;
     let mut length_limited = false;
-    let mut usage=json!({});
+    let mut usage = json!({});
     let mut device_checked = force_cpu || ["auto", "cpu"].contains(&config.backend.as_str());
     loop {
         let next = tokio::select! {_=cancel.cancelled()=>return Err(Interrupted{text:if agent {String::new()} else {content},cause:"Остановлено пользователем".into()}.into()),value=stream.next()=>value};
@@ -264,9 +291,19 @@ async fn model_once(
             if let Some(items) = value["message"]["tool_calls"].as_array() {
                 calls.extend(items.iter().cloned());
             }
-            if value["done"]==true {
-                for key in ["done_reason","prompt_eval_count","eval_count","total_duration","load_duration","prompt_eval_duration","eval_duration"] {
-                    if !value[key].is_null(){usage[key]=value[key].clone();}
+            if value["done"] == true {
+                for key in [
+                    "done_reason",
+                    "prompt_eval_count",
+                    "eval_count",
+                    "total_duration",
+                    "load_duration",
+                    "prompt_eval_duration",
+                    "eval_duration",
+                ] {
+                    if !value[key].is_null() {
+                        usage[key] = value[key].clone();
+                    }
                 }
             }
             if value["done_reason"] == "length" {
@@ -311,9 +348,11 @@ async fn model_once(
         !result["content"].as_str().unwrap_or("").is_empty() || result["tool_calls"].as_array().is_some_and(|calls| !calls.is_empty()),
         "Модель вернула пустой ответ без вызова инструмента. Попробуйте повторить запрос или выбрать другую модель."
     );
-    result["context"]=json!(context_plan);
-    result["usage"]=usage;
-    if length_limited {result["length_limited"]=json!(true);}
+    result["context"] = json!(context_plan);
+    result["usage"] = usage;
+    if length_limited {
+        result["length_limited"] = json!(true);
+    }
     Ok(result)
 }
 fn hy_mt_18_prompt(text: &str) -> String {
@@ -427,11 +466,15 @@ pub async fn translate_with_model(
                     }
                     .into());
                 }
-                return Err(error);
+                return Err(Interrupted {
+                    text: output,
+                    cause: format!("{error:#}"),
+                }
+                .into());
             }
         };
         output.push_str(result["content"].as_str().unwrap_or(""));
-        if result["length_limited"]==true {
+        if result["length_limited"] == true {
             return Err(Interrupted{text:output,cause:"Перевод достиг лимита ответа и не завершён. Увеличьте резерв ответа в настройках контекста.".into()}.into());
         }
     }
@@ -604,51 +647,126 @@ fn review_history(question: &str, material: &str) -> Vec<Value> {
         json!({"role":"user","content":format!("Task: {question}\n\n{material}")}),
     ]
 }
-async fn review_call(app: &Shared, selected: &str, question: &str, material: &str, think: &Value, tx: &mpsc::Sender<Value>, cancel: &CancellationToken, stats: &mut Vec<Value>) -> Result<String> {
-    let mut history=review_history(question,material);
-    let config=app.settings.lock().await.context.clone();
-    let show=crate::thinking::show(app,selected).await?;
-    crate::context::prepare(&mut history,&json!([]),&config,&show,crate::context::thinking_enabled(think,&show),16384)?;
-    let response=model(app,selected,&history,InferenceMode::Configured(Box::new(InferenceMode::Review),think.clone(),false),tx,cancel).await?;
-    anyhow::ensure!(response["tool_calls"].as_array().is_none_or(|c|c.is_empty()),"Модель запросила инструменты вместо анализа вложения; действия не выполнялись");
+async fn review_call(
+    app: &Shared,
+    selected: &str,
+    question: &str,
+    material: &str,
+    think: &Value,
+    tx: &mpsc::Sender<Value>,
+    cancel: &CancellationToken,
+    stats: &mut Vec<Value>,
+) -> Result<String> {
+    let mut history = review_history(question, material);
+    let config = app.settings.lock().await.context.clone();
+    let show = crate::thinking::show(app, selected).await?;
+    crate::context::prepare(
+        &mut history,
+        &json!([]),
+        &config,
+        &show,
+        crate::context::thinking_enabled(think, &show),
+        16384,
+    )?;
+    let response = model(
+        app,
+        selected,
+        &history,
+        InferenceMode::Configured(Box::new(InferenceMode::Review), think.clone(), false),
+        tx,
+        cancel,
+    )
+    .await?;
+    anyhow::ensure!(
+        response["tool_calls"]
+            .as_array()
+            .is_none_or(|c| c.is_empty()),
+        "Модель запросила инструменты вместо анализа вложения; действия не выполнялись"
+    );
     anyhow::ensure!(response["length_limited"]!=true,"Анализ достиг лимита ответа и не завершён. Увеличьте резерв ответа в настройках контекста.");
     stats.push(json!({"context":response["context"],"usage":response["usage"],"thinking":response["thinking"]}));
     Ok(response["content"].as_str().unwrap_or("").to_string())
 }
 
-async fn review_attachment(app: &Shared, selected: &str, question: &str, material: &str, think: &Value, tx: &mpsc::Sender<Value>, cancel: &CancellationToken) -> Result<(String,usize,Vec<Value>)> {
+async fn review_attachment(
+    app: &Shared,
+    selected: &str,
+    question: &str,
+    material: &str,
+    think: &Value,
+    tx: &mpsc::Sender<Value>,
+    cancel: &CancellationToken,
+) -> Result<(String, usize, Vec<Value>)> {
     // Test the full source with the same conservative estimator before deciding
     // to page it. Current task text is never silently discarded.
-    let mut stats=vec![];
-    let mut trial=review_history(question,material);
-    let config=app.settings.lock().await.context.clone();
-    let show=crate::thinking::show(app,selected).await?;
-    if crate::context::prepare(&mut trial,&json!([]),&config,&show,crate::context::thinking_enabled(think,&show),16384).is_ok() {
-        return Ok((review_call(app,selected,question,material,think,tx,cancel,&mut stats).await?,1,stats));
+    let mut stats = vec![];
+    let mut trial = review_history(question, material);
+    let config = app.settings.lock().await.context.clone();
+    let show = crate::thinking::show(app, selected).await?;
+    if crate::context::prepare(
+        &mut trial,
+        &json!([]),
+        &config,
+        &show,
+        crate::context::thinking_enabled(think, &show),
+        16384,
+    )
+    .is_ok()
+    {
+        return Ok((
+            review_call(
+                app, selected, question, material, think, tx, cancel, &mut stats,
+            )
+            .await?,
+            1,
+            stats,
+        ));
     }
-    let mut baseline=review_history(question,"");
-    let (budget,_)=crate::context::prepare(&mut baseline,&json!([]),&config,&show,crate::context::thinking_enabled(think,&show),16384)?;
-    let available=budget.history_budget.saturating_sub(crate::context::history_tokens(&baseline)+512);
+    let mut baseline = review_history(question, "");
+    let (budget, _) = crate::context::prepare(
+        &mut baseline,
+        &json!([]),
+        &config,
+        &show,
+        crate::context::thinking_enabled(think, &show),
+        16384,
+    )?;
+    let available = budget
+        .history_budget
+        .saturating_sub(crate::context::history_tokens(&baseline) + 512);
     anyhow::ensure!(available>=256,"В выбранном контексте недостаточно места для частей вложения. Увеличьте окно или уменьшите резерв ответа.");
-    let pages=crate::agent::review_pages(material,available.min(5000));
-    let note_chars=(available/4).clamp(64,1800);
-    let count=pages.len();let mut notes=vec![];
-    for (i,page) in pages.iter().enumerate() {
-        emit(tx,json!({"type":"notice","message":format!("Анализ вложения: часть {}/{}",i+1,count)})).await?;
+    let pages = crate::agent::review_pages(material, available.min(5000));
+    let note_chars = (available / 4).clamp(64, 1800);
+    let count = pages.len();
+    let mut notes = vec![];
+    for (i, page) in pages.iter().enumerate() {
+        emit(
+            tx,
+            json!({"type":"notice","message":format!("Анализ вложения: часть {}/{}",i+1,count)}),
+        )
+        .await?;
         let report=review_call(app,selected,question,&format!("Source fragment {}/{count}. Adjacent context may be missing. Report concrete findings briefly, with exact supporting excerpts.\n{page}",i+1),think,tx,cancel,&mut stats).await?;
-        notes.push(format!("Fragment {}/{count}:\n{}",i+1,crate::tools::truncate(&report,note_chars)));
+        notes.push(format!(
+            "Fragment {}/{count}:\n{}",
+            i + 1,
+            crate::tools::truncate(&report, note_chars)
+        ));
     }
-    while notes.len()>3 {
-        let mut next=vec![];
+    while notes.len() > 3 {
+        let mut next = vec![];
         for group in notes.chunks(3) {
             let report=review_call(app,selected,question,&format!("Consolidate these partial review notes. Preserve concrete defects, supporting excerpts and uncertainty. Do not invent source not present in the notes. Keep it concise.\n{}",group.join("\n\n")),think,tx,cancel,&mut stats).await?;
-            next.push(crate::tools::truncate(&report,note_chars));
+            next.push(crate::tools::truncate(&report, note_chars));
         }
-        notes=next;
+        notes = next;
     }
-    emit(tx,json!({"type":"notice","message":"Собираю результаты анализа частей…"})).await?;
+    emit(
+        tx,
+        json!({"type":"notice","message":"Собираю результаты анализа частей…"}),
+    )
+    .await?;
     let result=review_call(app,selected,question,&format!("Synthesize the following notes from {count} source fragments into one review. Notes are summaries, not the original code; cross-fragment relationships may remain unverified. Do not claim tests ran.\n{}",notes.join("\n\n")),think,tx,cancel,&mut stats).await?;
-    Ok((result,count,stats))
+    Ok((result, count, stats))
 }
 
 pub async fn run(
@@ -773,7 +891,7 @@ pub async fn run(
             let think=crate::thinking::resolve(&input.thinking,&crate::thinking::show(&app,&selected).await?)?;
             let instruction=crate::agent::review_instruction(&input.content).unwrap();
             let operation=review_attachment(&app,&selected,&instruction,&context,&think,tx,&cancel);
-            let (text,parts,inferences)=tokio::time::timeout(std::time::Duration::from_secs(settings.agent_timeout_seconds.clamp(60,3600)),operation).await.context("Истекло время анализа вложения")??;
+            let (text,parts,inferences)=crate::lifecycle::bounded(crate::lifecycle::deadline(settings.agent_timeout_seconds),operation).await?;
             answer.content=if parts>1 {format!("Вложение разобрано на {parts} частей; итог собран по заметкам к ним. Связи между частями требуют дополнительной проверки.\n\n{text}")} else {text};
             answer.diagnostics=Some(json!({"model":selected,"tools_enabled":false,"attachment_review":true,"source_parts":parts,"context_config":settings.context,"inferences":inferences,"summary_based":parts>1}));
             emit(tx,json!({"type":"token","text":answer.content})).await?;
@@ -827,8 +945,8 @@ pub async fn run(
                 for message in chat.messages.iter().take(chat.messages.len()-1){history.push(json!({"role":message.role,"content":message.content}));}
             }
             history.push(json!({"role":"user","content":context}));
-            let mut budget = crate::agent::Budget::new(settings.agent_max_actions.clamp(1,40));
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(settings.agent_timeout_seconds.clamp(60,3600));
+            let mut budget = crate::agent::Budget::new(settings.agent_max_actions);
+            let deadline = crate::lifecycle::deadline(settings.agent_timeout_seconds);
             let turn_tools_start=answer.tools.len();
             let mut grounding_retry=false;
             let mut browser_claim_retry=false;
@@ -846,7 +964,7 @@ pub async fn run(
                 if reduced { emit(tx,json!({"type":"notice","message":"Старый контекст сокращён. Текущая задача и статусы действий сохранены."})).await?; }
                 let mode = if use_tools { InferenceMode::Agent(definitions) } else if simple_reply { InferenceMode::Reply } else { InferenceMode::Chat };
                 let team_evidence=crate::specialists::team_evidence(&answer.tools[turn_tools_start..]);
-                let mut response = if let Some(url)=initial_browser.take() {json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_open","arguments":{"url":url}}}]})} else if team && !team_consulted && !team_evidence.is_empty() {crate::specialists::consultation(&input.content,&team_evidence)} else if refresh_browser {refresh_browser=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_read","arguments":{}}}]})} else if initial_search { initial_search=false; json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"web_search","arguments":{"query":input.content,"count":5}}}]}) } else { tokio::time::timeout_at(deadline, model(&app,&selected,&history,InferenceMode::Configured(Box::new(mode),thinking.clone(),team),tx,&cancel)).await.context("Agent task timed out")?? };
+                let mut response = if let Some(url)=initial_browser.take() {json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_open","arguments":{"url":url}}}]})} else if team && !team_consulted && !team_evidence.is_empty() {crate::specialists::consultation(&input.content,&team_evidence)} else if refresh_browser {refresh_browser=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_read","arguments":{"offset":0}}}]})} else if initial_search { initial_search=false; json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"web_search","arguments":{"query":input.content,"count":5}}}]}) } else { crate::lifecycle::bounded(deadline, model(&app,&selected,&history,InferenceMode::Configured(Box::new(mode),thinking.clone(),team),tx,&cancel)).await? };
                 if let Some(reason)=response["thinking"].as_str(){if let Some(d)=answer.diagnostics.as_mut(){let old=d["thinking"].as_str().unwrap_or("");d["thinking"]=json!(format!("{old}{reason}\n"));}}
                 if let Some(d)=answer.diagnostics.as_mut(){
                     if !response["context"].is_null(){d["context"]=response["context"].clone();d["usage"]=response["usage"].clone();}
@@ -946,13 +1064,13 @@ pub async fn run(
                     let action_started=std::time::Instant::now();
                     emit(tx,json!({"type":"tool_start","id":id,"name":name,"arguments":args,"status":"running"})).await?;
                     if team && name=="security_analyze" {emit(tx,json!({"type":"notice","message":"Foundation-Sec анализирует переданные материалы…"})).await?;}
-                    let allowed = if tokio::time::Instant::now() >= deadline { Err("Достигнут лимит времени задачи. Новые действия остановлены.") } else { budget.reserve(name,&args) };
+                    let allowed = if deadline.is_some_and(|at|tokio::time::Instant::now() >= at) { Err("Истёк заданный срок задачи. Новые действия остановлены.") } else { budget.reserve(name,&args) };
                     let result = match allowed {
                         Err(reason)=>Err(crate::agent::ApprovalStopped(if reason.starts_with("Остановлен повтор") {"repeated"} else {"limit"}).into()),
                         Ok(())=>{
                             let action_cancel=cancel.child_token();
                             let deadline_cancel=action_cancel.clone();
-                            let timer=tokio::spawn(async move {tokio::time::sleep_until(deadline).await;deadline_cancel.cancel();});
+                            let timer=tokio::spawn(async move {crate::lifecycle::wait(deadline).await;deadline_cancel.cancel();});
                             let result=match scope.prepare(name,&mut args,std::path::Path::new(&settings.workspace),settings.computer_access) {
                                 Ok(())=>tools::execute(&app,name,args.clone(),tx,&action_cancel,&id,&mut web).await,
                                 Err(error)=>Err(error),
@@ -971,7 +1089,7 @@ pub async fn run(
                     let (status,text,exit_code)=match result {
                         Ok(text)=>("succeeded",text,if name=="run_command" {Some(0)} else {None}),
                         Err(error)=>{
-                            let status=if tokio::time::Instant::now()>=deadline {"timed_out"} else if let Some(stopped)=error.downcast_ref::<crate::agent::ApprovalStopped>() { stopped.0 } else if cancel.is_cancelled() { "cancelled" } else if error.downcast_ref::<crate::agent::ExecutionStopped>().is_some_and(|e|serde_json::from_str::<Value>(&e.report).is_ok_and(|v|v["status"]=="timed_out")){"timed_out"}else { "failed" };
+                            let status=if deadline.is_some_and(|at|tokio::time::Instant::now()>=at) {"timed_out"} else if let Some(stopped)=error.downcast_ref::<crate::agent::ApprovalStopped>() { stopped.0 } else if cancel.is_cancelled() { "cancelled" } else if error.downcast_ref::<crate::agent::ExecutionStopped>().is_some_and(|e|serde_json::from_str::<Value>(&e.report).is_ok_and(|v|v["status"]=="timed_out")){"timed_out"}else { "failed" };
                             let code=error.downcast_ref::<crate::agent::CommandFailed>().map(|e|e.code);
                             let text=if let Some(command)=error.downcast_ref::<crate::agent::CommandFailed>(){command.output.clone()}else if let Some(stopped)=error.downcast_ref::<crate::agent::ExecutionStopped>(){stopped.report.clone()}else{format!("{error:#}")};
                             (if needs_input {"needs_input"}else{status},text,code)

@@ -100,27 +100,83 @@ pub fn needs_grounding(text: &str, tools: &[serde_json::Value]) -> bool {
 /// A bounded check for categorical browser claims. Browser actions and page
 /// text do not independently verify authentication or an exploited weakness.
 /// Describe observed evidence instead; never promote a click to a login proof.
-pub fn browser_claim_issue(text: &str, tools: &[serde_json::Value], browser_context: bool) -> Option<String> {
-    let browser_tools: Vec<_> = tools.iter().filter(|t| matches!(t["name"].as_str(),
-        Some("browser_open" | "browser_read" | "browser_action" | "fetch_url"))).collect();
-    if !browser_context && browser_tools.is_empty() { return None; }
+pub fn browser_claim_issue(
+    text: &str,
+    tools: &[serde_json::Value],
+    browser_context: bool,
+) -> Option<String> {
+    let browser_tools: Vec<_> = tools
+        .iter()
+        .filter(|t| {
+            matches!(
+                t["name"].as_str(),
+                Some("browser_open" | "browser_read" | "browser_action" | "fetch_url")
+            )
+        })
+        .collect();
+    if !browser_context && browser_tools.is_empty() {
+        return None;
+    }
     let lower = text.to_lowercase();
-    let claims = ["авторизация выполнена", "авторизация успешна", "успешно авториз", "успешная авторизация выполнена",
-        "взлом осуществл", "взлом сайта осуществл", "сайт взломан", "аккаунт взломан", "взломал сайт", "взломал аккаунт",
-        "успешно вош", "успешный вход выполнен", "доступ к аккаунту получен", "обход авторизации выполнен",
-        "successfully logged in", "successfully authenticated", "authentication succeeded", "login successful",
-        "successfully hacked", "account was hacked", "site was hacked", "bypassed authentication"];
+    let claims = [
+        "авторизация выполнена",
+        "авторизация успешна",
+        "успешно авториз",
+        "успешная авторизация выполнена",
+        "взлом осуществл",
+        "взлом сайта осуществл",
+        "сайт взломан",
+        "аккаунт взломан",
+        "взломал сайт",
+        "взломал аккаунт",
+        "успешно вош",
+        "успешный вход выполнен",
+        "доступ к аккаунту получен",
+        "обход авторизации выполнен",
+        "successfully logged in",
+        "successfully authenticated",
+        "authentication succeeded",
+        "login successful",
+        "successfully hacked",
+        "account was hacked",
+        "site was hacked",
+        "bypassed authentication",
+    ];
     let unsupported_claim = lower.split(['\n', '.', '!', '?']).any(|sentence| {
         let sentence = sentence.trim();
         !sentence.starts_with('>')
-            && !["не подтвержд", "не доказ", "нет доказательств", "нельзя утверждать", "not verified", "not confirmed", "no evidence", "cannot claim"]
-                .iter().any(|negation| sentence.contains(negation))
+            && ![
+                "не подтвержд",
+                "не доказ",
+                "нет доказательств",
+                "нельзя утверждать",
+                "not verified",
+                "not confirmed",
+                "no evidence",
+                "cannot claim",
+            ]
+            .iter()
+            .any(|negation| sentence.contains(negation))
             && claims.iter().any(|claim| sentence.contains(claim))
     });
-    if !unsupported_claim { return None; }
-    let opened = browser_tools.iter().filter(|t| t["status"] == "succeeded" && t["name"] == "browser_open").count();
-    let read = browser_tools.iter().filter(|t| t["status"] == "succeeded" && matches!(t["name"].as_str(), Some("browser_read" | "fetch_url"))).count();
-    let actions = browser_tools.iter().filter(|t| t["status"] == "succeeded" && t["name"] == "browser_action").count();
+    if !unsupported_claim {
+        return None;
+    }
+    let opened = browser_tools
+        .iter()
+        .filter(|t| t["status"] == "succeeded" && t["name"] == "browser_open")
+        .count();
+    let read = browser_tools
+        .iter()
+        .filter(|t| {
+            t["status"] == "succeeded"
+                && matches!(t["name"].as_str(), Some("browser_read" | "fetch_url"))
+        })
+        .count();
+    let actions = browser_tools
+        .iter()
+        .filter(|t| t["status"] == "succeeded" && t["name"] == "browser_action")
+        .count();
     Some(format!("Подтверждения входа в аккаунт или взлома нет. За этот запрос выполнено: открытий страницы — {opened}, чтений — {read}, действий в браузере — {actions}. Успешный вызов инструмента не доказывает авторизацию или уязвимость. Нужны конкретные наблюдения и проверка результата; непроведённые проверки нельзя считать успешными."))
 }
 
@@ -229,15 +285,11 @@ impl Budget {
         }
     }
     pub fn reserve(&mut self, name: &str, args: &serde_json::Value) -> Result<(), &'static str> {
-        if self.used >= self.limit {
+        if self.limit != 0 && self.used >= self.limit {
             return Err("Достигнут лимит действий. Продолжите новой репликой.");
         }
         let key = format!("{name}:{}", args);
-        let count = self.attempts.entry(key).or_default();
-        if *count >= 2 {
-            return Err("Остановлен повтор одного и того же действия без изменений файлов. Уточните задачу или продолжите новой репликой.");
-        }
-        *count += 1;
+        *self.attempts.entry(key).or_default() += 1;
         self.used += 1;
         Ok(())
     }
@@ -247,30 +299,71 @@ impl Budget {
 }
 
 pub fn attachment_review_request(text: &str) -> bool {
-    let t=text.to_lowercase();
-    ["оцени", "оценить", "ревью", "review", "проанализируй", "анализ кода", "проверь код", "check this code"]
-        .iter().any(|s| t.contains(s))
-        && !t.split(|c:char|!c.is_alphanumeric()).any(|word|
-            ["fix","modify","rewrite","save","execute","run"].contains(&word)
-            || ["исправ", "измени", "перепиши", "сохрани", "запусти", "выполни"].iter().any(|s|word.starts_with(s)))
+    let t = text.to_lowercase();
+    [
+        "оцени",
+        "оценить",
+        "ревью",
+        "review",
+        "проанализируй",
+        "анализ кода",
+        "проверь код",
+        "check this code",
+    ]
+    .iter()
+    .any(|s| t.contains(s))
+        && !t.split(|c: char| !c.is_alphanumeric()).any(|word| {
+            ["fix", "modify", "rewrite", "save", "execute", "run"].contains(&word)
+                || [
+                    "исправ",
+                    "измени",
+                    "перепиши",
+                    "сохрани",
+                    "запусти",
+                    "выполни",
+                ]
+                .iter()
+                .any(|s| word.starts_with(s))
+        })
 }
 
 /// Keep a pasted source body separate from the user's review instruction.
 /// Identifiers such as save/run inside the source are not requests to act.
 pub fn review_instruction(text: &str) -> Option<String> {
-    let lines:Vec<_>=text.lines().filter(|s|!s.trim().is_empty()).collect();
-    let candidates=if lines.len()>3 {vec![*lines.last()?,*lines.first()?]} else {vec![text]};
-    candidates.into_iter().map(str::trim).find(|line|line.chars().count()<=500 && attachment_review_request(line)).map(str::to_string)
+    let lines: Vec<_> = text.lines().filter(|s| !s.trim().is_empty()).collect();
+    let candidates = if lines.len() > 3 {
+        vec![*lines.last()?, *lines.first()?]
+    } else {
+        vec![text]
+    };
+    candidates
+        .into_iter()
+        .map(str::trim)
+        .find(|line| line.chars().count() <= 500 && attachment_review_request(line))
+        .map(str::to_string)
 }
 
 /// UTF-8 safe pages, preferring a newline near the end of each page.
 pub fn review_pages(text: &str, chars: usize) -> Vec<String> {
-    let mut rest=text;
-    let mut parts=vec![];
+    let mut rest = text;
+    let mut parts = vec![];
     while !rest.is_empty() {
-        let end=rest.char_indices().nth(chars).map(|(i,_)|i).unwrap_or(rest.len());
-        let cut=if end<rest.len() {rest[..end].rfind('\n').filter(|i|*i>end/2).map(|i|i+1).unwrap_or(end)} else {end};
-        parts.push(rest[..cut].to_string());rest=&rest[cut..];
+        let end = rest
+            .char_indices()
+            .nth(chars)
+            .map(|(i, _)| i)
+            .unwrap_or(rest.len());
+        let cut = if end < rest.len() {
+            rest[..end]
+                .rfind('\n')
+                .filter(|i| *i > end / 2)
+                .map(|i| i + 1)
+                .unwrap_or(end)
+        } else {
+            end
+        };
+        parts.push(rest[..cut].to_string());
+        rest = &rest[cut..];
     }
     parts
 }
@@ -299,7 +392,8 @@ pub fn fit_history(history: &mut Vec<serde_json::Value>, limit: usize) -> anyhow
                 && m["content"]
                     .as_str()
                     .is_some_and(|s| s.chars().count() > 1200)
-                && !serde_json::from_str::<serde_json::Value>(m["content"].as_str().unwrap_or("")).is_ok_and(|v|v["context_truncated"]==true)
+                && !serde_json::from_str::<serde_json::Value>(m["content"].as_str().unwrap_or(""))
+                    .is_ok_and(|v| v["context_truncated"] == true)
         }) {
             let value = item["content"].as_str().unwrap();
             let mut payload = serde_json::from_str::<serde_json::Value>(value)
@@ -611,23 +705,38 @@ mod tests {
     fn attached_reviews_are_read_only_and_pages_preserve_all_text() {
         assert!(attachment_review_request("оцени код"));
         assert!(attachment_review_request("Review attached files.rs"));
-        assert!(attachment_review_request("REVIEW_ATTACHMENT_FIXTURE оцени код"));
+        assert!(attachment_review_request(
+            "REVIEW_ATTACHMENT_FIXTURE оцени код"
+        ));
         assert!(!attachment_review_request("оцени код и исправь ошибки"));
         assert!(!attachment_review_request("review this and run tests"));
-        assert_eq!(review_instruction("fn run() {}\nfn save() {}\nfn fix() {}\nоцени код").as_deref(),Some("оцени код"));
-        assert_eq!(review_instruction("оцени код\n```rust\nfn run() {}\n```").as_deref(),Some("оцени код"));
-        assert!(review_instruction("fn run() {}\nfn save() {}\nfn fix() {}\nоцени код и исправь ошибки").is_none());
-        let text="fn main() {}\n// привет 🦀\n".repeat(2000);
-        let pages=review_pages(&text,5000);
-        assert_eq!(pages.concat(),text);
-        assert!(pages.iter().all(|p|p.chars().count()<=5000));
-        assert_eq!(review_pages(&"я".repeat(15000),5000).concat(),"я".repeat(15000));
+        assert_eq!(
+            review_instruction("fn run() {}\nfn save() {}\nfn fix() {}\nоцени код").as_deref(),
+            Some("оцени код")
+        );
+        assert_eq!(
+            review_instruction("оцени код\n```rust\nfn run() {}\n```").as_deref(),
+            Some("оцени код")
+        );
+        assert!(review_instruction(
+            "fn run() {}\nfn save() {}\nfn fix() {}\nоцени код и исправь ошибки"
+        )
+        .is_none());
+        let text = "fn main() {}\n// привет 🦀\n".repeat(2000);
+        let pages = review_pages(&text, 5000);
+        assert_eq!(pages.concat(), text);
+        assert!(pages.iter().all(|p| p.chars().count() <= 5000));
+        assert_eq!(
+            review_pages(&"я".repeat(15000), 5000).concat(),
+            "я".repeat(15000)
+        );
     }
 
     #[test]
     fn browser_success_cannot_be_invented_from_open_or_click() {
         use serde_json::json;
-        let opened = json!({"name":"browser_open","status":"succeeded","result":"{\"text\":\"Sign in\"}"});
+        let opened =
+            json!({"name":"browser_open","status":"succeeded","result":"{\"text\":\"Sign in\"}"});
         let fake_success = "Итог: Сайт успешно открыт и авторизация выполнена.";
         let issue = browser_claim_issue(fake_success, &[opened.clone()], true).unwrap();
         assert!(issue.contains("открытий страницы — 1"));
@@ -636,11 +745,18 @@ mod tests {
         assert!(browser_claim_issue(fake_success, &[opened, click], true).is_some());
         assert!(browser_claim_issue("Взлом сайта осуществлён.", &[], true).is_some());
         assert!(browser_claim_issue("Successfully logged in.", &[], true).is_some());
-        for text in ["Вход не проверен. Страница открыта.", "Нет доказательств, что авторизация выполнена.",
-            "The page shows a profile; authentication is not independently verified.", "План: проверить вход."] {
+        for text in [
+            "Вход не проверен. Страница открыта.",
+            "Нет доказательств, что авторизация выполнена.",
+            "The page shows a profile; authentication is not independently verified.",
+            "План: проверить вход.",
+        ] {
             assert!(browser_claim_issue(text, &[], true).is_none(), "{text}");
         }
-        assert!(browser_claim_issue("В рассказе персонаж успешно вошёл в комнату.", &[], false).is_none());
+        assert!(
+            browser_claim_issue("В рассказе персонаж успешно вошёл в комнату.", &[], false)
+                .is_none()
+        );
     }
 
     #[test]
@@ -771,15 +887,19 @@ mod tests {
         assert!(plan(&json!({"steps":[{"title":"Read","status":"completed"},{"title":"Edit","status":"in_progress"},{"title":"Check","status":"pending"}]})).is_ok());
     }
     #[test]
-    fn repetitions_and_total_actions_are_bounded() {
+    fn only_explicit_action_quota_stops_execution() {
         let mut b = Budget::new(3);
         let args = serde_json::json!({"path":"file"});
         assert!(b.reserve("read_file", &args).is_ok());
         assert!(b.reserve("read_file", &args).is_ok());
-        assert!(b.reserve("read_file", &args).is_err());
-        b.files_changed();
         assert!(b.reserve("read_file", &args).is_ok());
+        b.files_changed();
+        assert!(b.reserve("read_file", &args).is_err());
         assert!(b.reserve("other", &args).is_err());
+        let mut unlimited = Budget::new(0);
+        for _ in 0..100 {
+            assert!(unlimited.reserve("read_file", &args).is_ok());
+        }
     }
     #[test]
     fn context_keeps_current_task_and_whole_rounds() {

@@ -8,9 +8,11 @@ mod documents;
 mod engine;
 mod executions;
 mod filesystem;
+mod lifecycle;
 mod model_adapter;
 mod model_storage;
 mod models;
+mod process_group;
 mod projects;
 mod reranker;
 #[cfg(all(windows, feature = "desktop"))]

@@ -223,21 +223,19 @@ pub async fn capture(
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(0x08000000);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    let mut group = crate::process_group::Group::prepare(&mut command)?;
+    let deadline = crate::lifecycle::deadline(seconds);
     let mut child = command.spawn()?;
+    if let Err(error) = group.attach(&child) {
+        group.terminate();
+        let _ = child.kill().await;
+        return Err(error);
+    }
     let mut out = tokio::spawn(read_capped(child.stdout.take().unwrap()));
     let mut err = tokio::spawn(read_capped(child.stderr.take().unwrap()));
-    let status = tokio::select! {status=child.wait()=>Some(status?),_=cancel.cancelled()=>None,_=tokio::time::sleep_until(deadline)=>None};
+    let status = tokio::select! {status=child.wait()=>Some(status?),_=cancel.cancelled()=>None,_=crate::lifecycle::wait(deadline)=>None};
     if status.is_none() {
-        #[cfg(windows)]
-        if let Some(pid) = child.id() {
-            let mut kill = tokio::process::Command::new("taskkill");
-            kill.args(["/PID", &pid.to_string(), "/T", "/F"])
-                .creation_flags(0x08000000);
-            let _ = kill.output().await;
-        }
+        group.terminate();
         let _ = child.kill().await;
         out.abort();
         err.abort();
@@ -251,9 +249,10 @@ pub async fn capture(
     let streams = tokio::select! {
         result=async{Ok::<_,anyhow::Error>(((&mut out).await?,(&mut err).await?))}=>Some(result?),
         _=cancel.cancelled()=>None,
-        _=tokio::time::sleep_until(deadline)=>None
+        _=crate::lifecycle::wait(deadline)=>None
     };
     let Some((stdout, stderr)) = streams else {
+        group.terminate();
         out.abort();
         err.abort();
         return Err(crate::agent::ProcessInterrupted(if cancel.is_cancelled() {
@@ -290,7 +289,6 @@ async fn approval(
     let status = tokio::select! {
         _=cancel.cancelled()=>"cancelled",
         _=tx.closed()=>"cancelled",
-        _=tokio::time::sleep(std::time::Duration::from_secs(300))=>"expired",
         result=receiver=>match result { Ok(true)=>"running", Ok(false)=>"denied", Err(_)=>"cancelled" }
     };
     let allowed = status == "running";
@@ -728,11 +726,7 @@ pub async fn execute(
         "run_command" => {
             let script = string(&args, "command")?;
             let directory = crate::projects::directory(app, args["directory"].as_str()).await?;
-            let seconds = args["timeout_seconds"].as_u64().unwrap_or(120);
-            anyhow::ensure!(
-                (1..=900).contains(&seconds),
-                "Лимит команды: от 1 до 900 секунд"
-            );
+            let seconds = args["timeout_seconds"].as_u64().unwrap_or(0);
             approval(
                 app,
                 "Выполнить команду",
@@ -786,7 +780,7 @@ pub fn definitions() -> Value {
         f("read_image","Extract text from image inside workspace. Default OCR ru; en-US supported",json!({"path":s,"language":s}),&["path"]),
         f("transcribe_audio","Recognize speech from audio file inside workspace. Optional language ru/en, default detect",json!({"path":s,"language":s}),&["path"]),
         f("record_microphone","Record microphone only if explicitly asked. Requires approval",json!({"seconds":{"type":"integer","minimum":1,"maximum":120},"language":s}),&[]),
-        f("run_command","Execute an approved shell command in directory (default workspace). Windows PowerShell or macOS /bin/sh. Timeout 1-900 seconds, default 120. Returns exit code, stdout/stderr and saved execution_id. Do not start persistent servers with this tool.",json!({"command":s,"directory":s,"timeout_seconds":{"type":"integer","minimum":1,"maximum":900}}),&["command"])
+        f("run_command","Execute an approved shell command in directory (default workspace). Windows PowerShell or macOS /bin/sh. No time limit by default. timeout_seconds=0 means unlimited; set a positive deadline only if requested by the user. Returns exit code, stdout/stderr and saved execution_id. Do not start persistent servers with this tool.",json!({"command":s,"directory":s,"timeout_seconds":{"type":"integer","minimum":0}}),&["command"])
     ])
 }
 
@@ -794,20 +788,22 @@ pub fn definitions() -> Value {
 mod tests {
     use super::*;
     #[tokio::test(start_paused = true)]
-    async fn expired_confirmation_does_not_turn_into_success() {
+    async fn confirmation_waits_without_deadline_and_cancellation_cleans_it_up() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join(format!("approval-test-{}", uuid::Uuid::new_v4()));
         let app = std::sync::Arc::new(crate::api::App::new(root).unwrap());
         let (tx, mut rx) = mpsc::channel(8);
         let worker = app.clone();
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
         let job = tokio::spawn(async move {
             approval(
                 &worker,
                 "Test",
                 "No execution",
                 &tx,
-                &CancellationToken::new(),
+                &worker_cancel,
                 "test-action",
             )
             .await
@@ -816,18 +812,81 @@ mod tests {
         assert_eq!(event["type"], "approval");
         assert_eq!(event["tool_id"], "test-action");
         tokio::time::advance(std::time::Duration::from_secs(301)).await;
+        assert!(!job.is_finished());
+        assert_eq!(app.approvals.lock().await.len(), 1);
+        cancel.cancel();
         let error = job.await.unwrap().unwrap_err();
         assert_eq!(
             error
                 .downcast_ref::<crate::agent::ApprovalStopped>()
                 .unwrap()
                 .0,
-            "expired"
+            "cancelled"
         );
         let closed = rx.recv().await.unwrap();
-        assert_eq!(closed["status"], "expired");
+        assert_eq!(closed["status"], "cancelled");
         assert_eq!(closed["allowed"], false);
         assert!(app.approvals.lock().await.is_empty());
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn command_group_owns_descendants_after_parent_exits() {
+        for cancel_early in [false, true] {
+            let dir = std::env::temp_dir().join(format!("process-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&dir).unwrap();
+            let marker = dir.join("survived.txt");
+            let python =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime/python/python.exe");
+            let child_script = format!(
+                "import time,pathlib; time.sleep(2); pathlib.Path({}).write_text('escaped')",
+                serde_json::to_string(&marker.to_string_lossy()).unwrap()
+            );
+            let mut command = tokio::process::Command::new(&python);
+            command.arg("-c").arg("import subprocess,sys; subprocess.Popen([sys.executable,'-c',sys.argv[1]]); print('parent finished')").arg(child_script);
+            let cancel = CancellationToken::new();
+            let token = cancel.clone();
+            let task = tokio::spawn(async move {
+                capture(command, &token, if cancel_early { 0 } else { 1 }).await
+            });
+            if cancel_early {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                cancel.cancel();
+            }
+            let error = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<crate::agent::ProcessInterrupted>()
+                    .unwrap()
+                    .0,
+                if cancel_early {
+                    "cancelled"
+                } else {
+                    "timed_out"
+                }
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            assert!(!marker.exists(), "descendant escaped after parent exited");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn unlimited_command_completes_and_collects_both_streams() {
+        #[cfg(windows)]
+        let mut command = tokio::process::Command::new("powershell.exe");
+        #[cfg(windows)]
+        command.args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Milliseconds 150; [Console]::Out.Write('output'); [Console]::Error.Write('error')"]);
+        #[cfg(unix)]
+        let mut command = tokio::process::Command::new("/bin/sh");
+        #[cfg(unix)]
+        command.args(["-c", "sleep 0.15; printf output; printf error >&2"]);
+        let (code, out, err) = capture(command, &CancellationToken::new(), 0)
+            .await
+            .unwrap();
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "output", "error"));
     }
     #[test]
     fn restrict_paths() {

@@ -48,6 +48,8 @@ impl IntoResponse for ApiError {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default)]
     pub context: crate::context::Config,
     #[serde(default)]
     pub web: crate::web_tools::Config,
@@ -89,10 +91,10 @@ fn default_true() -> bool {
     true
 }
 fn default_actions() -> usize {
-    12
+    0
 }
 fn default_task_seconds() -> u64 {
-    900
+    0
 }
 fn default_auto() -> String {
     "auto".into()
@@ -184,6 +186,7 @@ impl App {
             std::fs::create_dir_all(data.join(folder))?;
         }
         let defaults = Settings {
+            schema_version: 1,
             context: Default::default(),
             web: Default::default(),
             assistant: Default::default(),
@@ -209,10 +212,18 @@ impl App {
             quick_hotkey: default_hotkey(),
             quick_area_hotkey: default_area_hotkey(),
         };
-        let mut settings: Settings = std::fs::read(data.join("settings.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or(defaults);
+        let settings_path = data.join("settings.json");
+        let mut settings: Settings = match std::fs::read(&settings_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!("Не удалось прочитать настройки {}: {e}. Исходный файл сохранён; восстановите его из резервной копии.",settings_path.display()))?,
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound => defaults,
+            Err(e) => return Err(anyhow::anyhow!("Не удалось открыть настройки {}: {e}",settings_path.display())),
+        };
+        if settings.schema_version == 0 {
+            // Legacy mandatory defaults were not an explicit user quota.
+            settings.agent_max_actions = 0;
+            settings.agent_timeout_seconds = 0;
+            settings.schema_version = 1;
+        }
         settings.compute.normalize(settings.cpu_only);
         settings.cpu_only = settings.compute.backend == "cpu";
         let compute = crate::compute::Runtime::load(&data);
@@ -221,7 +232,7 @@ impl App {
             data,
             client: reqwest::Client::builder()
                 .no_proxy()
-                .timeout(std::time::Duration::from_secs(600))
+                .connect_timeout(std::time::Duration::from_secs(15))
                 .build()?,
             token: Uuid::new_v4().to_string(),
             settings: Mutex::new(settings),
@@ -253,8 +264,8 @@ impl App {
     pub async fn save(&self, chat: &Conversation) -> anyhow::Result<()> {
         let _guard = self.storage.lock().await;
         let path = self.chat_path(&chat.id)?;
-        let bytes=serde_json::to_vec_pretty(chat)?;
-        tokio::task::spawn_blocking(move || crate::changes::replace(&path,&bytes)).await??;
+        let bytes = serde_json::to_vec_pretty(chat)?;
+        tokio::task::spawn_blocking(move || crate::changes::replace(&path, &bytes)).await??;
         Ok(())
     }
 }
@@ -472,14 +483,7 @@ async fn settings(
     State(app): State<Shared>,
     Json(mut value): Json<Settings>,
 ) -> ApiResult<Settings> {
-    require(
-        (1..=40).contains(&value.agent_max_actions),
-        "Лимит действий: от 1 до 40",
-    )?;
-    require(
-        (60..=3600).contains(&value.agent_timeout_seconds),
-        "Лимит времени: от 60 до 3600 секунд",
-    )?;
+    value.schema_version = 1;
     value.assistant.validate()?;
     value.context.validate()?;
     value.web.validate()?;
@@ -550,7 +554,10 @@ async fn settings(
             break;
         }
     }
-    crate::changes::replace(&app.data.join("settings.json"),&serde_json::to_vec_pretty(&value)?)?;
+    crate::changes::replace(
+        &app.data.join("settings.json"),
+        &serde_json::to_vec_pretty(&value)?,
+    )?;
     *app.settings.lock().await = value.clone();
     Ok(Json(value))
 }
@@ -883,7 +890,10 @@ async fn send(
         "Неизвестный режим сети",
     )?;
     require(input.thinking.len() <= 32, "Некорректный режим рассуждений")?;
-    require(input.content.len() <= crate::context::MAX_REQUEST_TEXT_BYTES, "Текст сообщения превышает 512 КиБ; приложите его файлом или разделите")?;
+    require(
+        input.content.len() <= crate::context::MAX_REQUEST_TEXT_BYTES,
+        "Текст сообщения превышает 512 КиБ; приложите его файлом или разделите",
+    )?;
     require(
         input.attachments.len() <= 12,
         "Максимум 12 вложений за сообщение",
