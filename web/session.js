@@ -2,7 +2,7 @@
 // Conversation state is independent of the currently visible conversation.
 const viewSessions=new Map();
 let navigationVersion=0,workspaceStreamStarted=false,workspaceConnecting=null;
-const sessionDefaults=()=>({busy:false,run:null,runMode:null,streamText:'',streamThinking:'',streamTools:[],approvals:[],notice:'',scrollFollow:true,uploading:0,pending:[],sending:false,startedAt:0,submitting:false,cancelRequested:false,draft:'',submission:null,chat:null});
+const sessionDefaults=()=>({busy:false,run:null,runMode:null,streamText:'',streamThinking:'',streamTools:[],approvals:[],notice:'',scrollFollow:true,uploading:0,pendingInput:0,pending:[],sending:false,startedAt:0,submitting:false,cancelRequested:false,draft:'',submission:null,chat:null});
 const visibleConversation=()=>state.chat?.id||'new';
 function draftStorageKey(id){return 'gemma.draft.v1.'+id;}
 function readDraft(id){
@@ -42,7 +42,7 @@ function restoreDraft(){
   if(session.draftMode&&modes[session.draftMode]&&!session.busy)setMode(session.draftMode);
   renderPending();resizeInput();
 }
-function prunePreviousSession(id){const session=viewSessions.get(id);if(session&&!session.busy&&!session.uploading&&!session.sending&&!session.draftError)viewSessions.delete(id);}
+function prunePreviousSession(id){const session=viewSessions.get(id);if(session&&!session.busy&&!session.uploading&&!session.pendingInput&&!session.sending&&!session.draftError)viewSessions.delete(id);}
 function clearAcceptedDraft(session,id,payload){
   if(payload.retry){session.submission=null;persistDraft(id,session);return;}
   const submitted=payload.submittedDraft??payload.content;
@@ -108,7 +108,7 @@ function newConversation(){
   if(innerWidth<761){setSidebarOpen(false);document.getElementById('prompt').focus();}
 }
 async function submitMessage(retry=false){
-  if(state.sending||state.uploading)return;if(state.busy)return stopRun();
+  if(state.sending||state.uploading||state.pendingInput)return;if(state.busy)return stopRun();
   const raw=document.getElementById('prompt').value;
   let content=raw.trim(),attachments=[...state.pending];
   if(retry){const previous=[...(state.chat?.messages||[])].reverse().find(m=>m.role==='user');if(!previous)return;content=previous.content;attachments=previous.attachments||[];}

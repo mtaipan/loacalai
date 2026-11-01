@@ -1027,10 +1027,6 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
         input.content.len() <= crate::context::MAX_REQUEST_TEXT_BYTES,
         "Текст сообщения превышает 512 КиБ; приложите его файлом или разделите",
     )?;
-    require(
-        input.attachments.len() <= 12,
-        "Максимум 12 вложений за сообщение",
-    )?;
     let model_guard = app.model_lifecycle.clone().try_read_owned().map_err(|_| {
         anyhow::anyhow!("Движок обновляется или меняет устройство. Дождитесь завершения операции.")
     })?;

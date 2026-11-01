@@ -223,6 +223,32 @@ try:
         assert (root/'data/workspace/grant-2.txt').read_text()=='verified-2'
         assert not read('/api/permissions'), 'task grant must expire when run finishes'
         page.locator('[data-action="new-chat"]').click();page.locator('[data-mode="chat"]').click()
+        # Deferred clipboard owns the original draft across navigation.
+        page.evaluate("async()=>{const chat=await api('/api/chats',{method:'POST',body:{}});await switchConversation(chat.id);window.pasteSourceId=chat.id;}")
+        page.locator('#prompt').fill('SOURCE_DRAFT')
+        page.evaluate("""()=>{window.clipboardReadBefore=navigator.clipboard.read;Object.defineProperty(navigator.clipboard,'read',{configurable:true,value:()=>new Promise(resolve=>window.resolveTestPaste=resolve)});window.pendingPaste=pasteClipboard();}""")
+        page.locator('[data-action="new-chat"]').click();page.locator('#prompt').fill('OTHER_DRAFT')
+        page.evaluate("""async()=>{resolveTestPaste([{types:['text/plain'],getType:async()=>new Blob(['PASTED_TEXT'])}]);await pendingPaste;Object.defineProperty(navigator.clipboard,'read',{configurable:true,value:clipboardReadBefore});}""")
+        assert page.locator('#prompt').input_value()=='OTHER_DRAFT'
+        assert page.evaluate("()=>JSON.parse(localStorage.getItem('gemma.draft.v1.'+pasteSourceId)).text.includes('PASTED_TEXT')")
+        # Permission requests cannot revive a closed recorder or reset a newer one.
+        page.evaluate("""()=>{
+          window.microphoneBefore=navigator.mediaDevices.getUserMedia;window.recorderBefore=window.MediaRecorder;
+          window.microphoneRequests=[];window.trackStops=[0,0];
+          navigator.mediaDevices.getUserMedia=()=>new Promise(resolve=>microphoneRequests.push(resolve));
+          window.MediaRecorder=class{static isTypeSupported(){return true;}constructor(stream){this.state='inactive';this.mimeType='audio/webm';}start(){this.state='recording';}stop(){this.state='inactive';queueMicrotask(()=>this.onstop?.());}};
+          openVoice();window.oldRecording=startRecord();window.oldVoice=state.voice;
+        }""")
+        page.evaluate('()=>startRecord()')
+        assert page.evaluate('()=>microphoneRequests.length')==1
+        page.evaluate('async()=>{await closeVoice();openVoice();window.newRecording=startRecord();window.newVoice=state.voice;}')
+        page.evaluate("""async()=>{microphoneRequests[0]({getTracks:()=>[{stop:()=>trackStops[0]++}]});await oldRecording;}""")
+        assert page.evaluate("()=>trackStops[0]===1&&state.voice===newVoice&&state.voice.phase==='requesting'")
+        page.evaluate("""async()=>{microphoneRequests[1]({getTracks:()=>[{stop:()=>trackStops[1]++}]});await newRecording;}""")
+        assert page.evaluate("()=>state.voice===newVoice&&state.voice.phase==='recording'")
+        page.evaluate("""async()=>{await closeVoice();await new Promise(resolve=>setTimeout(resolve,0));navigator.mediaDevices.getUserMedia=microphoneBefore;window.MediaRecorder=recorderBefore;}""")
+        assert page.evaluate('()=>trackStops[1]>=1&&state.voice===null&&!voiceView')
+        page.locator('[data-mode="chat"]').click()
         page.locator('#prompt').fill('STREAM_FIXTURE provide code')
         page.locator('#send').click()
         code_button=page.locator('#stream-body [data-copy-code]');code_button.wait_for()
@@ -251,6 +277,7 @@ try:
     print('PASS Edge reload reconnects, restores stop control and receives saved answer')
     print('PASS scoped approval survives stream/focus, authorizes two files and expires after run')
     print('PASS per-chat text/attachment drafts, explicit settings discard and background chat navigation')
+    print('PASS delayed clipboard destination and microphone close/reopen/request races')
     print('PASS late settings edits, streaming code focus, completed-response focus and untrusted HTML boundaries')
     # New request waits until cleanup of a cancelled request is acknowledged.
     first=read('/api/chats',{})
