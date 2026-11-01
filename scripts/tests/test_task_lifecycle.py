@@ -222,6 +222,12 @@ try:
         assert (root/'data/workspace/grant-1.txt').read_text()=='verified-1'
         assert (root/'data/workspace/grant-2.txt').read_text()=='verified-2'
         assert not read('/api/permissions'), 'task grant must expire when run finishes'
+        page.locator('[data-action="tasks"]').click()
+        page.wait_for_selector('#task-dialog select')
+        assert 'PERMISSION_FIXTURE' in page.locator('#task-dialog').inner_text()
+        page.locator('#task-dialog button',has_text='Начать новую задачу').click()
+        assert page.evaluate('()=>currentSession().nextTask')
+
         page.locator('[data-action="new-chat"]').click();page.locator('[data-mode="chat"]').click()
         # Deferred clipboard owns the original draft across navigation.
         page.evaluate("async()=>{const chat=await api('/api/chats',{method:'POST',body:{}});await switchConversation(chat.id);window.pasteSourceId=chat.id;}")

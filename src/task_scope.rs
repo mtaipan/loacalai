@@ -220,6 +220,7 @@ impl TaskScope {
         }
     }
     pub fn allows(&self, name: &str) -> bool {
+        if name=="read_task" {return true;}
         if crate::web_tools::is_web_tool(name) && !self.web_enabled {
             return false;
         }

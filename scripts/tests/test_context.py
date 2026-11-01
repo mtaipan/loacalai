@@ -57,9 +57,9 @@ def call(path, body=None):
     return http.open(urllib.request.Request(base+path,data=json.dumps(body).encode() if body is not None else None,headers={'Content-Type':'application/json','X-Studio-Token':token}),timeout=30)
 def read(path, body=None):
     with call(path,body) as response:return json.load(response)
-def turn(text,mode='agent',thinking='off',chat=None,allow_error=False,web='off',attachments=None,retry=False):
+def turn(text,mode='agent',thinking='off',chat=None,allow_error=False,web='off',attachments=None,retry=False,new_task=None,task_id=None):
     chat=chat or read('/api/chats',{})
-    with call('/api/chat',{'conversation':chat['id'],'content':text,'mode':mode,'source':'en','target':'ru','web':web,'thinking':thinking,'attachments':attachments or [],'retry':retry}) as response:
+    with call('/api/chat',{'conversation':chat['id'],'content':text,'mode':mode,'source':'en','target':'ru','web':web,'thinking':thinking,'attachments':attachments or [],'retry':retry,'new_task':new_task,'task_id':task_id}) as response:
         for line in response:
             if line.startswith(b'data:'):
                 event=json.loads(line[5:]); assert event['type']!='approval',event
@@ -92,6 +92,27 @@ try:
     assert body['options']['temperature']==.63,body
     turn('Explain the bug and fix it','agent')
     assert requests[-1]['tools'] and requests[-1]['options']['temperature']==.17
+    turn('Объясни ошибку и почини проект','agent')
+    assert requests[-1].get('tools'), 'an explanation prefix must not disable agent capabilities'
+    goal=turn('Build TASK_GOAL_FIXTURE and preserve its tests','agent')
+    task=read('/api/chats/'+goal['id']+'/tasks')[0]
+    # Remove the model working history to simulate a fresh context window.
+    saved_path=root/'data/chats'/f"{goal['id']}.json"
+    saved=json.loads(saved_path.read_text(encoding='utf-8'));saved['history']=[];saved['messages']=[]
+    saved_path.write_text(json.dumps(saved),encoding='utf-8')
+    continued=turn('продолжай работу','agent',chat=goal)
+    assert 'TASK_GOAL_FIXTURE' in requests[-1]['messages'][0]['content']
+    assert any(t['name']=='read_task' and t['status']=='succeeded' for t in continued['messages'][-1]['tools'])
+    state=read('/api/tasks/'+task['id'])
+    assert len(state['requests'])==2 and state['completion_verified'] is False
+    assert read('/api/tasks/'+task['id']+'/requests/'+str(state['requests'][0]['sequence']))['text']=='Build TASK_GOAL_FIXTURE and preserve its tests'
+    other=turn('Build SECOND_TASK_FIXTURE','agent',chat=continued,new_task=True)
+    assert 'TASK_GOAL_FIXTURE' not in json.dumps(requests[-1]['messages'])
+    restored=turn('continue','agent',chat=other,task_id=task['id'])
+    assert 'TASK_GOAL_FIXTURE' in requests[-1]['messages'][0]['content']
+    assert 'SECOND_TASK_FIXTURE' not in json.dumps(requests[-1]['messages'])
+    assert len(read('/api/chats/'+goal['id']+'/tasks'))==2
+    print('PASS persistent goal and requests survive fresh model history; continuation restores task state')
     boundary='test-'+uuid.uuid4().hex
     data=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="context.txt"\r\nContent-Type: text/plain\r\n\r\nATTACHMENT_MATERIAL_FIXTURE\r\n--{boundary}--\r\n').encode()
     req=urllib.request.Request(base+'/api/upload',data=data,headers={'X-Studio-Token':token,'Content-Type':'multipart/form-data; boundary='+boundary})

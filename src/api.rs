@@ -202,6 +202,8 @@ pub struct Message {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Conversation {
     #[serde(default)]
+    pub history_task: String,
+    #[serde(default)]
     pub history_workspace: String,
     #[serde(default)]
     pub history_model: String,
@@ -384,6 +386,9 @@ pub fn router(app: Shared) -> Router {
         .route("/api/events", get(workspace_events))
         .route("/api/runs/{id}", get(run_snapshot))
         .route("/api/runs/{id}/events", get(run_events))
+        .route("/api/chats/{id}/tasks", get(conversation_tasks))
+        .route("/api/tasks/{id}", get(task_state))
+        .route("/api/tasks/{id}/requests/{sequence}", get(task_request))
         .route("/api/approve/{id}", post(approve))
         .route("/api/permissions", get(permission_grants))
         .route("/api/permissions/{id}/revoke", post(revoke_permission))
@@ -737,6 +742,7 @@ async fn chats(State(app): State<Shared>) -> ApiResult<Value> {
 }
 async fn new_chat(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<Conversation> {
     let chat = Conversation {
+        history_task:String::new(),
         history_workspace: String::new(),
         history_model: String::new(),
         id: Uuid::new_v4().to_string(),
@@ -945,6 +951,10 @@ async fn execution(State(app): State<Shared>, Path(id): Path<String>) -> ApiResu
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChatInput {
+    #[serde(default,skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default,skip_serializing_if = "Option::is_none")]
+    pub new_task: Option<bool>,
     #[serde(default)]
     pub request_id: Option<String>,
     #[serde(default = "thinking_off")]
@@ -1014,6 +1024,7 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
         ["agent", "team", "translate", "chat"].contains(&input.mode.as_str()),
         "Неизвестный режим работы",
     )?;
+    require(["agent","team"].contains(&input.mode.as_str()) || (input.new_task!=Some(true)&&input.task_id.is_none()),"Выбор рабочей задачи доступен в режиме агента или команды")?;
     require(
         !input.content.trim().is_empty() || !input.attachments.is_empty(),
         "Введите сообщение или прикрепите материал",
@@ -1055,10 +1066,11 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
             "В этом чате уже идёт ответ",
         )?;
         app.tasks
-            .begin(
+            .begin_in_project(
                 run_id.clone(),
                 input.conversation.clone(),
                 serde_json::to_value(&input)?,
+                app.settings.lock().await.workspace.clone(),
             )
             .await?;
         runs.insert(
@@ -1267,6 +1279,19 @@ async fn permission_grants(State(app): State<Shared>) -> ApiResult<Value> {
     Ok(Json(serde_json::to_value(
         &app.grants.lock().await.entries,
     )?))
+}
+async fn conversation_tasks(State(app):State<Shared>,Path(id):Path<String>)->ApiResult<Value>{
+    app.load(&id).await?;
+    Ok(Json(app.tasks.task_list(id).await?))
+}
+async fn task_state(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
+    let after=q.get("after").map(|v|v.parse::<i64>()).transpose()?.unwrap_or(0);
+    require(after>=0,"Курсор должен быть неотрицательным")?;
+    Ok(Json(app.tasks.task(id,after).await?))
+}
+async fn task_request(State(app):State<Shared>,Path((id,sequence)):Path<(String,i64)>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
+    let offset=q.get("offset").map(|v|v.parse::<usize>()).transpose()?.unwrap_or(0);
+    Ok(Json(app.tasks.task_request(id,sequence,offset).await?))
 }
 async fn revoke_permission(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     app.grants.lock().await.revoke(&app.data, &id)?;

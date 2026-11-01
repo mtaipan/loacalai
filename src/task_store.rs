@@ -44,10 +44,10 @@ impl Store {
         }).await
     }
     pub fn open(data: &Path) -> Result<Self> {
-        let conn = Connection::open(data.join("tasks.sqlite3"))?;
+        let mut conn = Connection::open(data.join("tasks.sqlite3"))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 2,
+            version <= 3,
             "База задач создана более новой версией приложения; исходный файл сохранён"
         );
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -62,8 +62,10 @@ impl Store {
             payload TEXT NOT NULL, FOREIGN KEY(run) REFERENCES runs(id));
             CREATE INDEX IF NOT EXISTS events_run ON events(run,sequence);
             CREATE TABLE IF NOT EXISTS deleted_conversations (id TEXT PRIMARY KEY);
-            PRAGMA user_version=2;",
+            ",
         )?;
+        crate::task_state::install(&mut conn,version<3)?;
+        conn.pragma_update(None,"user_version",3)?;
         // A crash leaves effects with unknown outcome. Never replay mutations automatically.
         conn.execute(
             "UPDATE runs SET status='interrupted', updated=?1 WHERE status IN ('running','queued','awaiting_approval','stopping')",
@@ -79,6 +81,10 @@ impl Store {
         self.access(move |conn| {
             let tx=conn.transaction()?;
             tx.execute("INSERT OR IGNORE INTO deleted_conversations VALUES (?1)", [&id])?;
+            tx.execute("DELETE FROM task_plans WHERE task IN (SELECT id FROM work_tasks WHERE conversation=?1)",[&id])?;
+            tx.execute("DELETE FROM task_requests WHERE task IN (SELECT id FROM work_tasks WHERE conversation=?1)",[&id])?;
+            tx.execute("DELETE FROM task_runs WHERE task IN (SELECT id FROM work_tasks WHERE conversation=?1)",[&id])?;
+            tx.execute("DELETE FROM work_tasks WHERE conversation=?1",[&id])?;
             tx.execute("DELETE FROM events WHERE run IN (SELECT id FROM runs WHERE conversation=?1)", [&id])?;
             tx.execute("DELETE FROM runs WHERE conversation=?1", [&id])?;
             tx.commit()?;
@@ -111,6 +117,9 @@ impl Store {
         .await?
     }
     pub async fn begin(&self, id: String, conversation: String, input: Value) -> Result<bool> {
+        self.begin_in_project(id,conversation,input,String::new()).await
+    }
+    pub async fn begin_in_project(&self, id: String, conversation: String, input: Value, project:String) -> Result<bool> {
         self.access(move |conn| {
             let tx = conn.transaction()?;
             anyhow::ensure!(!tx.query_row("SELECT EXISTS(SELECT 1 FROM deleted_conversations WHERE id=?1)", [&conversation], |r|r.get::<_,bool>(0))?, "Чат удалён");
@@ -128,6 +137,7 @@ impl Store {
                 "INSERT INTO runs VALUES (?1,?2,?3,'running',?4,?4)",
                 params![id, conversation, input.to_string(), crate::api::now()],
             )?;
+            crate::task_state::associate(&tx,&id,&conversation,&input,&project)?;
             tx.commit()?;
             Ok(true)
         })
@@ -165,6 +175,36 @@ impl Store {
             Ok(Value::Array(rows.collect::<rusqlite::Result<Vec<_>>>()?))
         }).await
     }
+    pub async fn task_for_run(&self, run:String)->Result<Option<Value>> {
+        self.access(move|conn|{
+            let id:Option<String>=conn.query_row("SELECT task FROM task_runs WHERE run=?1",[run],|r|r.get(0)).optional()?;
+            id.map(|id|crate::task_state::snapshot(conn,&id,0)).transpose()
+        }).await
+    }
+    pub async fn task(&self,id:String,after:i64)->Result<Value>{self.access(move|conn|crate::task_state::snapshot(conn,&id,after)).await}
+    pub async fn task_request(&self,id:String,sequence:i64,offset:usize)->Result<Value>{
+        self.access(move|conn|{
+            let (text,total):(String,i64)=conn.query_row("SELECT substr(content,?3+1,16000),length(content) FROM task_requests WHERE task=?1 AND sequence=?2",params![id,sequence,i64::try_from(offset)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(MissingRun)?;
+            let next=offset.saturating_add(text.chars().count());
+            Ok(json!({"sequence":sequence,"text":text,"offset":offset,"next_offset":next,"characters":total,"has_more":(next as u64)<total as u64}))
+        }).await
+    }
+    pub async fn task_list(&self,conversation:String)->Result<Value>{
+        self.access(move|conn|{
+            let mut query=conn.prepare("SELECT id,goal,project,state,updated FROM work_tasks WHERE conversation=?1 ORDER BY created DESC,id DESC")?;
+            let rows=query.query_map([conversation],|r|Ok(json!({"id":r.get::<_,String>(0)?,"goal_preview":crate::tools::truncate(&r.get::<_,String>(1)?,300),"project":r.get::<_,String>(2)?,"state":r.get::<_,String>(3)?,"updated":r.get::<_,String>(4)?})))?;
+            Ok(json!(rows.collect::<rusqlite::Result<Vec<_>>>()?))
+        }).await
+    }
+    pub async fn save_task_plan(&self,run:String,plan:Value)->Result<()> {
+        self.access(move|conn|{
+            let task:Option<String>=conn.query_row("SELECT task FROM task_runs WHERE run=?1",[&run],|r|r.get(0)).optional()?;
+            if let Some(task)=task {
+                conn.execute("INSERT INTO task_plans VALUES (?1,?2,?3,1) ON CONFLICT(task) DO UPDATE SET plan=excluded.plan,source_run=excluded.source_run,revision=task_plans.revision+1",params![task,plan.to_string(),run])?;
+            }
+            Ok(())
+        }).await
+    }
 }
 
 #[derive(Default)]
@@ -199,6 +239,54 @@ impl Fold {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn schema_two_runs_backfill_without_losing_original_goal() {
+        let dir=std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&dir).unwrap();
+        let conn=Connection::open(dir.join("tasks.sqlite3")).unwrap();
+        conn.execute_batch("CREATE TABLE runs(id TEXT PRIMARY KEY,conversation TEXT NOT NULL,input TEXT NOT NULL,status TEXT NOT NULL,created TEXT NOT NULL,updated TEXT NOT NULL); PRAGMA user_version=2;").unwrap();
+        conn.execute("INSERT INTO runs VALUES ('old','chat',?1,'completed','2026-01-01','2026-01-01')",[json!({"mode":"agent","content":"ORIGINAL_REQUIREMENTS"}).to_string()]).unwrap();
+        drop(conn);
+        let store=Store::open(&dir).unwrap();
+        let old=store.task_for_run("old".into()).await.unwrap().unwrap();
+        store.begin_in_project("next".into(),"chat".into(),json!({"mode":"agent","content":"continue"}),"project".into()).await.unwrap();
+        let next=store.task_for_run("next".into()).await.unwrap().unwrap();
+        assert_eq!(next["id"],old["id"]);
+        assert_eq!(next["goal_preview"],"ORIGINAL_REQUIREMENTS");
+        assert_eq!(next["project"],"project");
+        drop(store);std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn task_goal_plan_and_full_requests_survive_runs_restart_and_pagination() {
+        let dir=std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&dir).unwrap();
+        let store=Store::open(&dir).unwrap();
+        let original=format!("Build the project with all constraints {} END_OF_GOAL", "требование 🦀 ".repeat(2000));
+        store.begin_in_project("first".into(),"chat".into(),json!({"mode":"agent","content":original,"attachments":["material"]}),"project".into()).await.unwrap();
+        let task=store.task_for_run("first".into()).await.unwrap().unwrap();
+        let id=task["id"].as_str().unwrap().to_string();
+        store.save_task_plan("first".into(),json!([{"title":"Tests","status":"pending"}])).await.unwrap();
+        drop(store);
+        let store=Store::open(&dir).unwrap();
+        store.begin_in_project("second".into(),"chat".into(),json!({"mode":"agent","content":"продолжай работу"}),"project".into()).await.unwrap();
+        let continued=store.task_for_run("second".into()).await.unwrap().unwrap();
+        assert_eq!(continued["id"],id);
+        assert_eq!(continued["plan"]["steps"][0]["status"],"pending");
+        assert_eq!(continued["completion_verified"],false);
+        assert_eq!(continued["runs"][1]["status"],"interrupted");
+        let sequence=continued["requests"][0]["sequence"].as_i64().unwrap();
+        let mut offset=0;let mut text=String::new();
+        loop {let page=store.task_request(id.clone(),sequence,offset).await.unwrap();text.push_str(page["text"].as_str().unwrap());if page["has_more"]!=true {break;}offset=page["next_offset"].as_u64().unwrap() as usize;}
+        assert_eq!(text,original);
+        assert!(store.begin_in_project("wrong-project".into(),"chat".into(),json!({"mode":"agent","content":"continue"}),"other".into()).await.is_err());
+        assert!(store.get("wrong-project".into()).await.is_err());
+        store.begin_in_project("new".into(),"chat".into(),json!({"mode":"agent","content":"Another goal","new_task":true}),"other".into()).await.unwrap();
+        assert_ne!(store.task_for_run("new".into()).await.unwrap().unwrap()["id"],id);
+        store.delete_conversation("chat".into()).await.unwrap();
+        assert!(store.task(id,0).await.is_err());
+        assert!(store.task_list("chat".into()).await.unwrap().as_array().unwrap().is_empty());
+        drop(store);std::fs::remove_dir_all(dir).unwrap();
+    }
     #[tokio::test]
     async fn deletion_removes_journal_and_recovers_the_json_crash_window() {
         let dir=std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());

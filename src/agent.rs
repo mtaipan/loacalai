@@ -552,8 +552,8 @@ pub fn plan(args: &serde_json::Value) -> anyhow::Result<String> {
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("Укажите steps"))?;
     anyhow::ensure!(
-        !steps.is_empty() && steps.len() <= 8,
-        "План: от 1 до 8 шагов"
+        !steps.is_empty(),
+        "План не должен быть пустым"
     );
     let mut active = 0;
     for step in steps {
@@ -613,24 +613,6 @@ pub fn reply_only(text: &str) -> bool {
     });
     if has_new_task {
         return false;
-    }
-    if [
-        "как создать",
-        "как мне ",
-        "как можно ",
-        "how to ",
-        "how do i ",
-        "explain ",
-        "объясни ",
-        "расскажи как ",
-    ]
-    .iter()
-    .any(|p| t.starts_with(p))
-        && !["сделай", "выполни", "do it", "execute it"]
-            .iter()
-            .any(|p| t.contains(p))
-    {
-        return true;
     }
     if (t.contains("в чат") || t.contains("in chat"))
         && ["код", "программ", "code", "program"]

@@ -27,6 +27,10 @@ button,input,select,textarea{font:inherit}
 #settings-dialog>.dialog-footer{margin:0;padding:14px 24px;border-top:1px solid var(--line2);flex-shrink:0;background:var(--panel);gap:10px;align-items:center}
 #settings-dirty{margin-right:auto;color:var(--muted);font-size:12px}
 .permission-grant{padding:12px 0;border-bottom:1px solid var(--line2);overflow-wrap:anywhere}.permission-grant pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.workspace-dialog{width:min(860px,calc(100vw - 28px));max-height:calc(100dvh - 28px)}
+.workspace-dialog[open]{display:flex;flex-direction:column}.workspace-dialog>h2{padding:18px 24px;margin:0;font-size:20px}
+.workspace-dialog>.dialog-body{min-height:0;max-height:none;flex:1;overflow:auto}.workspace-dialog>.dialog-footer{padding:14px 24px;margin:0;flex-wrap:wrap;border-top:1px solid var(--line2);flex-shrink:0}
+.task-intent{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:8px 0;font-size:12px;color:var(--muted)}.task-intent .button{padding:4px 8px}
 .attachment-preview{display:flex;align-items:center;gap:10px;min-width:0;max-width:100%;border:0;background:transparent;color:inherit;padding:0;text-align:left;cursor:pointer}.attachment-preview>span:last-child{min-width:0}.attachment-preview .filename,.attachment-preview small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .approval select{max-width:100%;padding:8px;background:var(--panel);color:var(--text);border:1px solid var(--line2);border-radius:6px}
 .sidebar-backdrop{position:fixed;inset:0;z-index:35;background:#0008;border:0;padding:0}.sidebar-backdrop[hidden]{display:none}

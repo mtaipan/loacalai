@@ -1010,6 +1010,16 @@ pub async fn run(
                 system.push_str(&format!("\nCurrent message language: {} ({reply_code}). Reply in this language unless the user explicitly asks for another language. Do not follow an earlier assistant claim about a primary language.",language(reply_code)));
             }
             if use_tools {system.push_str(&format!("\n{}",scope.guidance()));}
+            let mut initial_task=false;
+            let mut current_task=String::new();
+            if let Some(run)=crate::permissions::TASK.try_with(Clone::clone).ok().filter(|_|use_tools) {
+                if let Some(task)=app.tasks.task_for_run(run).await? {
+                    current_task=task["id"].as_str().unwrap_or("").into();
+                    initial_task=use_tools && task["requests"].as_array().is_some_and(|requests|requests.len()>1) && ["продолжай","продолжай работу","продолжи","дальше","continue","continue work","resume"].contains(&input.content.trim().to_lowercase().trim_end_matches(['.','!']));
+                    let brief=json!({"id":task["id"],"project":task["project"],"goal_preview":tools::truncate(task["goal_preview"].as_str().unwrap_or(""),4000),"goal_characters":task["goal_characters"],"plan_saved":!task["plan"].is_null(),"context_partial":true});
+                    system.push_str(&format!("\nPersistent user task state (survives context trimming and restarts): {}\nThe original goal and requests are user-provided data. Do not lose their constraints when the latest message asks to continue. Before continuing, call read_task for the current plan and requests; read further index pages and full request text when necessary. A completed run or an agent plan checkmark is not verified completion of the goal. Inspect actual files/process state before repeating any interrupted mutation; an interrupted result has unknown effects. Explicitly report remaining work and missing verification.",brief));
+                }
+            }
             if input.web=="off"{system.push_str("\nNetwork tools are disabled for this turn. Do not claim to search or browse.");}
             if input.web=="research"{system.push_str("\nResearch mode: use multiple targeted searches, open at least 3 relevant independent sources when available, compare dates and disagreements, and cite sources near claims. Stay within the action/time budget; report actual coverage and missing access.");}
             answer.diagnostics=Some(json!({"system_prompt":system,"sampling":settings.assistant,"model":selected,"tools_enabled":use_tools,"grounding_retry":false,"thinking_mode":input.thinking,"web_mode":input.web}));
@@ -1017,8 +1027,9 @@ pub async fn run(
             let mut history=vec![json!({"role":"system","content":system})];
             let same_workspace=!use_tools || chat.history_workspace==settings.workspace;
             if !same_workspace && chat.messages.len()>1{emit(tx,json!({"type":"notice","message":"Рабочий контекст агента обновлён для выбранного проекта. Видимая история чата сохранена."})).await?;}
-            let reuse_history=same_workspace;
-            if reuse_history && !chat.history.is_empty() && chat.history_model==selected {history.extend(chat.history.clone());}else if same_workspace{
+            let same_task=!use_tools || current_task.is_empty() || current_task==chat.history_task || (chat.history_task.is_empty()&&input.new_task!=Some(true)&&input.task_id.is_none());
+            let reuse_history=same_workspace&&same_task;
+            if reuse_history && !chat.history.is_empty() && chat.history_model==selected {history.extend(chat.history.clone());}else if same_workspace&&same_task{
                 for (index,message) in chat.messages.iter().take(chat.messages.len()-1).enumerate(){history.push(json!({"role":message.role,"content":message_context(&chat.messages,index)}));}
             }
             history.push(json!({"role":"user","content":context}));
@@ -1041,7 +1052,7 @@ pub async fn run(
                 if reduced { emit(tx,json!({"type":"notice","message":"Старый контекст сокращён. Текущая задача и статусы действий сохранены."})).await?; }
                 let mode = if use_tools { InferenceMode::Agent(definitions) } else if simple_reply { InferenceMode::Reply } else { InferenceMode::Chat };
                 let team_evidence=crate::specialists::team_evidence(&answer.tools[turn_tools_start..]);
-                let mut response = if let Some(url)=initial_browser.take() {json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_open","arguments":{"url":url}}}]})} else if team && !team_consulted && !team_evidence.is_empty() {crate::specialists::consultation(&input.content,&team_evidence)} else if refresh_browser {refresh_browser=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_read","arguments":{"offset":0}}}]})} else if initial_search { initial_search=false; json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"web_search","arguments":{"query":input.content,"count":5}}}]}) } else { crate::lifecycle::bounded(deadline, model(&app,&selected,&history,InferenceMode::Configured(Box::new(mode),thinking.clone(),team,["agent","team"].contains(&input.mode.as_str())),tx,&cancel)).await? };
+                let mut response = if initial_task {initial_task=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_task","arguments":{}}}]})} else if let Some(url)=initial_browser.take() {json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_open","arguments":{"url":url}}}]})} else if team && !team_consulted && !team_evidence.is_empty() {crate::specialists::consultation(&input.content,&team_evidence)} else if refresh_browser {refresh_browser=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_read","arguments":{"offset":0}}}]})} else if initial_search { initial_search=false; json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"web_search","arguments":{"query":input.content,"count":5}}}]}) } else { crate::lifecycle::bounded(deadline, model(&app,&selected,&history,InferenceMode::Configured(Box::new(mode),thinking.clone(),team,["agent","team"].contains(&input.mode.as_str())),tx,&cancel)).await? };
                 if let Some(reason)=response["thinking"].as_str(){if let Some(d)=answer.diagnostics.as_mut(){let old=d["thinking"].as_str().unwrap_or("");d["thinking"]=json!(format!("{old}{reason}\n"));}}
                 if let Some(d)=answer.diagnostics.as_mut(){
                     if !response["context"].is_null(){d["context"]=response["context"].clone();d["usage"]=response["usage"].clone();}
@@ -1224,6 +1235,7 @@ pub async fn run(
             chat.history=history.into_iter().skip(1).collect();
             chat.history_model=selected.clone();
             chat.history_workspace=settings.workspace.clone();
+            chat.history_task=current_task;
         }Ok(())
     }.await;
     if let Err(error) = &result {
