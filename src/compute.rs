@@ -66,6 +66,7 @@ pub struct Runtime {
     pub fallback_key: Option<String>,
     pub last_error: Option<String>,
     pub child: Option<tokio::process::Child>,
+    pub group: Option<crate::process_group::Group>,
     pub installing: bool,
 }
 impl Runtime {
@@ -277,7 +278,18 @@ async fn stop_private(app: &Shared) -> Result<()> {
         std::env::var_os("LOCAL_GEMMA_OLLAMA").is_none(),
         "Внешняя Ollama не перезапускается приложением"
     );
-    let tracked = app.compute.lock().await.child.take();
+    let (tracked, group) = {
+        let mut runtime = app.compute.lock().await;
+        (runtime.child.take(), runtime.group.take())
+    };
+    if let Some(group) = group {
+        group.terminate();
+        if let Some(mut child) = tracked {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        return Ok(());
+    }
     if let Some(mut child) = tracked {
         if child.try_wait()?.is_none() {
             #[cfg(windows)]
@@ -433,7 +445,12 @@ async fn start_private(app: &Shared, config: &Config, key: &str) -> Result<()> {
     cmd.stdout(log.try_clone()?).stderr(log);
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
+    let mut group = crate::process_group::Group::prepare(&mut cmd)?;
     let mut child = cmd.spawn().context("Не найден встроенный движок Ollama")?;
+    if let Err(error) = group.attach(&child) {
+        let _ = child.kill().await;
+        return Err(error);
+    }
     let pid = child.id();
     let mut ready_since = None;
     for _ in 0..80 {
@@ -455,6 +472,7 @@ async fn start_private(app: &Shared, config: &Config, key: &str) -> Result<()> {
             let mut runtime = app.compute.lock().await;
             runtime.applied_key = Some(key.to_owned());
             runtime.child = Some(child);
+            runtime.group = Some(group);
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -471,6 +489,16 @@ pub async fn reconfigure(app: &Shared, config: &Config) -> Result<()> {
     clear_fallback(app).await;
     ensure(app, config).await?;
     Ok(())
+}
+pub async fn restart(app: &Shared, config: &Config) -> Result<()> {
+    anyhow::ensure!(
+        std::env::var_os("LOCAL_GEMMA_OLLAMA").is_none(),
+        "Внешняя Ollama не перезапускается приложением"
+    );
+    app.model_stores.lock().await.clear();
+    stop_private(app).await?;
+    clear_fallback(app).await;
+    ensure(app, config).await
 }
 pub async fn summary(app: &Shared) -> Value {
     let config = app.settings.lock().await.compute.clone();
@@ -502,7 +530,7 @@ pub async fn summary(app: &Shared) -> Value {
             }
         }
     }
-    json!({"requested":config,"forced_cpu":fallback,"fallback_error":error,"loaded_models":models,"installing":app.compute.lock().await.installing})
+    json!({"requested":config,"forced_cpu":fallback,"fallback_error":error,"loaded_models":models,"installing":app.compute.lock().await.installing,"memory":crate::resources::memory(),"inference_busy":app.resources.gate.try_lock().is_err(),"release_after_inference":true,"cleanup_error":app.resources.failure.lock().unwrap().clone()})
 }
 pub async fn model_on_gpu(app: &Shared, model: &str) -> Option<bool> {
     let value = app

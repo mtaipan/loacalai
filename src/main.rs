@@ -16,6 +16,7 @@ mod process_group;
 mod permissions;
 mod projects;
 mod reranker;
+mod resources;
 #[cfg(all(windows, feature = "desktop"))]
 mod selection_clipboard;
 mod specialists;

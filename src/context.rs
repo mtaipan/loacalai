@@ -86,6 +86,7 @@ pub fn model_limit(show: &Value) -> usize {
 }
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Plan {
+    pub resources: Option<Value>,
     pub window_tokens: usize,
     pub output_tokens: usize,
     pub input_estimate: usize,
@@ -133,6 +134,7 @@ pub fn plan(
             .min(cap);
     }
     Plan {
+        resources: None,
         window_tokens: window,
         output_tokens: output,
         input_estimate: input,
@@ -186,9 +188,18 @@ pub async fn configure_payload(
     payload: &mut Value,
     base: usize,
 ) -> Result<Plan> {
-    let config = app.settings.lock().await.context.clone();
+    let settings = app.settings.lock().await.clone();
+    let mut config = settings.context.clone();
     config.validate()?;
     let show = crate::thinking::show(app, model).await?;
+    let memory = tokio::task::spawn_blocking(crate::resources::memory).await?;
+    let resources = crate::resources::fit_context(
+        &mut config,
+        &show,
+        &memory,
+        settings.compute.backend == "cpu"
+            || crate::compute::force_cpu(app, &settings.compute).await,
+    )?;
     let tools = tools_tokens(&payload["tools"]);
     let input = if let Some(s) = payload["prompt"].as_str() {
         text_tokens(s)
@@ -200,7 +211,7 @@ pub async fn configure_payload(
                 .unwrap_or(&[]),
         )
     };
-    let p = plan(
+    let mut p = plan(
         &config,
         &show,
         input,
@@ -208,6 +219,7 @@ pub async fn configure_payload(
         thinking_enabled(&payload["think"], &show),
         base,
     );
+    p.resources = Some(resources);
     anyhow::ensure!(input<=p.history_budget,"Для этого запроса нужно больше выбранного контекста {}. Запрос сохранён; увеличьте окно или предел Авто в настройках. Предел модели: {}.",p.window_tokens,p.model_limit);
     payload["options"]["num_ctx"] = json!(p.window_tokens);
     payload["options"]["num_predict"] = json!(p.output_tokens);

@@ -166,6 +166,7 @@ pub struct Run {
     pub conversation: String,
 }
 pub struct App {
+    pub resources: crate::resources::Broker,
     pub tasks: crate::task_store::Store,
     pub root: PathBuf,
     pub data: PathBuf,
@@ -238,6 +239,7 @@ impl App {
         settings.cpu_only = settings.compute.backend == "cpu";
         let compute = crate::compute::Runtime::load(&data);
         Ok(Self {
+            resources: Default::default(),
             tasks: crate::task_store::Store::open(&data)?,
             grants: Mutex::new(crate::permissions::Grants::load(&data)?),
             root,
@@ -598,7 +600,15 @@ async fn compute_retry(State(app): State<Shared>) -> ApiResult<Value> {
         "Остановите текущую задачу",
     )?;
     let config = app.settings.lock().await.compute.clone();
-    crate::compute::reconfigure(&app, &config).await?;
+    if std::env::var_os("LOCAL_GEMMA_OLLAMA").is_some() {
+        app.resources.recover(&app.client).await?;
+    }
+    if std::env::var_os("LOCAL_GEMMA_OLLAMA").is_none() {
+        crate::compute::restart(&app, &config).await?;
+        *app.resources.failure.lock().unwrap() = None;
+    } else {
+        crate::compute::reconfigure(&app, &config).await?;
+    }
     Ok(Json(crate::compute::info(&app, false).await))
 }
 async fn compute_install(
@@ -1134,7 +1144,7 @@ async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Va
 }
 async fn media(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<Value> {
     let _model_guard = app.model_lifecycle.read().await;
-    let cancel = CancellationToken::new();
+    let cancel = app.shutdown.child_token();
     let action = value["action"].as_str().unwrap_or("ocr");
     let path = if action == "record" {
         None
@@ -1203,7 +1213,7 @@ async fn pull(
             .try_write()
             .map_err(|_| anyhow::anyhow!("Дождитесь завершения работы с моделями"))?;
         if models[0] != "whisper-small"
-            && !crate::model_storage::locations(&app).contains_key(&models[0])
+            && !crate::model_storage::locations(&app)?.contains_key(&models[0])
         {
             let tags = crate::model_storage::tags(&app).await;
             if crate::models::installed(&models[0], &tags["models"]) {
@@ -1212,7 +1222,11 @@ async fn pull(
                 require(requested.is_some() && requested==current,"Модель уже установлена в основной папке. Удалите её перед скачиванием на другой диск")?;
             }
         }
-        crate::model_storage::set_location(&app, &models[0], directory)?;
+        let installed = crate::models::installed(
+            &models[0],
+            &crate::model_storage::tags(&app).await["models"],
+        );
+        crate::model_storage::set_location(&app, &models[0], directory, installed)?;
     }
     let (tx, mut rx) = mpsc::channel::<Value>(64);
     let model_guard = app.model_lifecycle.clone().read_owned().await;

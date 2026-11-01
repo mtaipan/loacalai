@@ -11,7 +11,7 @@ fn model_path(app: &Shared) -> Result<std::path::PathBuf> {
         std::env::var_os("LOCAL_GEMMA_OLLAMA").is_none(),
         "Реранкеру нужен локальный файл весов, внешняя Ollama здесь не поддерживается"
     );
-    let root = crate::model_storage::locations(app)
+    let root = crate::model_storage::locations(app)?
         .get(MODEL)
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| app.data.join("models"));

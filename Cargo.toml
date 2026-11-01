@@ -34,6 +34,7 @@ global-hotkey = { version = "0.9", optional = true }
 enigo = { version = "0.6", optional = true }
 whatlang = "0.18"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = { version = "5.4.3", features = ["std"] }

@@ -8,6 +8,13 @@ root = project / 'build-tools' / ('task-test-' + uuid.uuid4().hex[:8])
 (root / 'data/workspace').mkdir(parents=True)
 model = 'qwen2.5:3b'
 requests = []
+active = 0
+peak = 0
+inference_started = threading.Event()
+inference_idle = threading.Event()
+inference_idle.set()
+cleanup_seen = threading.Event()
+counter_lock = threading.Lock()
 
 class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
@@ -17,11 +24,16 @@ class Fixture(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
         try: self.wfile.write(data)
-        except (BrokenPipeError, ConnectionResetError): pass
+        except ConnectionError: pass
     def do_GET(self):
         self.reply({'models': [{'name': model}]} if self.path == '/api/tags' else {'models': []})
     def do_POST(self):
+        global active, peak
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or '{}')
+        if body.get('keep_alive')==0 and not body.get('messages') and not body.get('prompt'):
+            cleanup_seen.set()
+            assert inference_idle.wait(10)
+            return self.reply({'done':True,'done_reason':'unload'})
         if self.path == '/api/show':
             return self.reply({'model_info': {'qwen.context_length': 32768}, 'thinking': {'values': [False]}})
         if self.path == '/api/chat':
@@ -30,7 +42,15 @@ class Fixture(BaseHTTPRequestHandler):
                 count=sum(m.get('role')=='tool' for m in body.get('messages',[]))
                 if count<2:
                     return self.reply({'done': True, 'message': {'role': 'assistant', 'content': '', 'tool_calls':[{'function':{'name':'write_file','arguments':{'path':f'grant-{count+1}.txt','content':f'verified-{count+1}'}}}]}})
+            with counter_lock:
+                active+=1
+                peak=max(peak,active)
+                inference_idle.clear()
+            inference_started.set()
             time.sleep(3)
+            with counter_lock:
+                active-=1
+                if active==0:inference_idle.set()
             return self.reply({'done': True, 'done_reason': 'stop', 'message': {'role': 'assistant', 'content': 'DURABLE_RESULT'}})
         self.reply({'status': 'success'})
 
@@ -122,6 +142,24 @@ try:
         browser.close()
     print('PASS Edge reload reconnects, restores stop control and receives saved answer')
     print('PASS scoped approval survives stream/focus, authorizes two files and expires after run')
+    # New request waits until cleanup of a cancelled request is acknowledged.
+    first=read('/api/chats',{})
+    rid=str(uuid.uuid4())
+    body={'request_id':rid,'conversation':first['id'],'content':'Explain cancellation cleanup','mode':'chat','source':'en','target':'ru','web':'off'}
+    inference_started.clear()
+    response=call('/api/chat',body)
+    for line in response:
+        if line.startswith(b'data:'): break
+    response.close()
+    assert inference_started.wait(10)
+    read('/api/stop/'+rid,{})
+    events('/api/runs/'+rid+'/events')
+    second=read('/api/chats',{})
+    body={**body,'request_id':str(uuid.uuid4()),'conversation':second['id'],'content':'Explain queued cleanup'}
+    events('/api/chat',body)
+    assert cleanup_seen.is_set()
+    assert peak==1, f'overlapping inference: {peak}'
+    print('PASS cancellation requests model unload and the next inference waits for cleanup')
 finally:
     try: call('/api/shutdown', {}).close()
     except Exception: pass

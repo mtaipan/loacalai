@@ -44,6 +44,7 @@ pub async fn show(app: &Shared, model: &str) -> Result<Value> {
             crate::model_storage::endpoint(app, model).await?
         ))
         .json(&json!({"model":model}))
+        .timeout(std::time::Duration::from_secs(20))
         .send()
         .await?
         .error_for_status()?
@@ -53,6 +54,13 @@ pub async fn show(app: &Shared, model: &str) -> Result<Value> {
         v["thinking"] = json!({"values":[false]});
     }
     Ok(v)
+}
+pub async fn show_cancellable(
+    app: &Shared,
+    model: &str,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Value> {
+    tokio::select! {_=cancel.cancelled()=>anyhow::bail!("Остановлено пользователем"),value=show(app,model)=>value}
 }
 #[cfg(test)]
 mod tests {

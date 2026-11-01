@@ -23,6 +23,8 @@ class Fixture(BaseHTTPRequestHandler):
         self.reply({'models':[{'name':model},{'name':foundation}]} if self.path=='/api/tags' else {'models':[]} if self.path=='/api/ps' else {'version':'0.40.13'})
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))) or '{}')
+        if body.get('keep_alive')==0 and not body.get('messages') and not body.get('prompt'):
+            return self.reply({'done':True,'done_reason':'unload'})
         if self.path=='/api/show':
             return self.reply({'model_info':{'qwen.context_length':model_limit},'thinking':{'values':[False,True]}})
         if self.path in ['/api/chat','/api/generate']:

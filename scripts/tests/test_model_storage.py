@@ -18,6 +18,7 @@ root.mkdir(parents=True)
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 store=Path(os.environ['OLLAMA_MODELS']);store.mkdir(parents=True,exist_ok=True)
+(store/'started.txt').write_text('started')
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*a):pass
  def do_GET(self):self.handle_request()
@@ -27,7 +28,8 @@ class Handler(BaseHTTPRequestHandler):
   body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))) or '{}')
   marker=store/'fake-models.json';models=json.loads(marker.read_text()) if marker.exists() else []
   if self.path=='/api/pull':
-   models.append(body['model']);marker.write_text(json.dumps(models));result={'status':'success'}
+   if Path('partial-pull').exists():result={'status':'downloading','completed':10,'total':100}
+   else:models.append(body['model']);marker.write_text(json.dumps(models));result={'status':'success'}
   elif self.path=='/api/delete':
    models.remove(body['model']);marker.write_text(json.dumps(models));result={}
   elif self.path=='/api/tags':result={'models':[{'name':m,'model':m} for m in models]}
@@ -77,6 +79,23 @@ try:
     assert json.loads((folders[0]/'fake-models.json').read_text())==[]
     assert json.loads((folders[1]/'fake-models.json').read_text())==[ids[1]]
     assert ids[0] not in read('/api/status')['model_locations']
+    third=next(m['id'] for m in app['catalog'] if m['role']=='assistant' and m['id'] not in ids)
+    cold=root/'cold-store';cold.mkdir()
+    mapping=root/'data/model-locations.json'
+    locations=json.loads(mapping.read_text());locations[third]=str(cold);mapping.write_text(json.dumps(locations))
+    read('/api/status')
+    assert not (cold/'started.txt').exists(), 'status must not launch a cold store'
+    (root/'partial-pull').write_text('truncate stream')
+    with call('/api/models/pull',{'model':third,'directory':str(cold)}) as r:
+        events=[json.loads(l[5:]) for l in r if l.startswith(b'data:')]
+    assert any(e['type']=='error' for e in events), 'EOF without success was incorrectly accepted'
+    (root/'partial-pull').unlink()
+    replacement=root/'replacement-store'
+    with call('/api/models/pull',{'model':third,'directory':str(replacement)}) as r:
+        events=[json.loads(l[5:]) for l in r if l.startswith(b'data:')]
+    assert not any(e['type']=='error' for e in events),events
+    assert read('/api/status')['model_locations'][third]==str(replacement)
+    print('PASS passive cold-store status, incomplete download detection and destination change after failure')
     print('PASS separate destinations, aggregated tags, persisted mapping, no central copies, deletion isolation, relocation rejection; no model weights downloaded')
 finally:
     try:read('/api/shutdown',{})
