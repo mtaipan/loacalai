@@ -19,6 +19,8 @@ mod reranker;
 mod resources;
 #[cfg(all(windows, feature = "desktop"))]
 mod selection_clipboard;
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+mod macos_clipboard;
 mod specialists;
 mod system_paths;
 mod system_translate;
@@ -183,6 +185,19 @@ fn main() -> Result<()> {
             .with_inner_size(tao::dpi::LogicalSize::new(1360., 900.))
             .with_min_inner_size(tao::dpi::LogicalSize::new(820., 600.))
             .build(&event_loop)?;
+        #[cfg(target_os = "macos")]
+        let (native_menu, native_quit) = {
+            use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+            let menu=Menu::new();
+            let application=Submenu::new("Local Gemma Studio",true);
+            let quit=MenuItem::new("Выйти",true,Some(muda::accelerator::Accelerator::new(Some(muda::accelerator::Modifiers::SUPER),muda::accelerator::Code::KeyQ)));
+            application.append_items(&[&PredefinedMenuItem::hide(None),&PredefinedMenuItem::hide_others(None),&PredefinedMenuItem::show_all(None),&PredefinedMenuItem::separator(),&quit])?;
+            let edit=Submenu::new("Правка",true);
+            edit.append_items(&[&PredefinedMenuItem::undo(None),&PredefinedMenuItem::redo(None),&PredefinedMenuItem::separator(),&PredefinedMenuItem::cut(None),&PredefinedMenuItem::copy(None),&PredefinedMenuItem::paste(None),&PredefinedMenuItem::select_all(None)])?;
+            menu.append_items(&[&application,&edit])?;
+            menu.init_for_nsapp();
+            (menu,quit)
+        };
         let base_url = url.clone();
         let quick_window = WindowBuilder::new()
             .with_title("Быстрый перевод — Local Gemma")
@@ -240,6 +255,13 @@ fn main() -> Result<()> {
             Ok(view) => {
                 let code = event_loop.run_return(|event, _, flow| {
                     let _keep_alive = (&view, &runtime, &quick_view, &main_context, &quick_context);
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _keep_menu_alive=&native_menu;
+                        while let Ok(menu_event)=muda::MenuEvent::receiver().try_recv() {
+                            if menu_event.id==*native_quit.id() {shutdown.cancel();}
+                        }
+                    }
                     if selection_agent.as_mut().is_some_and(|agent| {
                         agent.poll(&runtime, &selection_client, &selection_url, |area| {
                             #[cfg(windows)]

@@ -64,6 +64,12 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
             .create_new(true)
             .open(&tmp)?;
         file.write_all(bytes)?;
+        #[cfg(unix)]
+        match fs::metadata(path) {
+            Ok(metadata) => file.set_permissions(metadata.permissions())?,
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
+            Err(error)=>return Err(error.into()),
+        }
         file.sync_all()?;
         drop(file);
         #[cfg(windows)]
@@ -82,7 +88,10 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
             );
         }
         #[cfg(not(windows))]
-        fs::rename(&tmp, path)?;
+        {
+            fs::rename(&tmp, path)?;
+            fs::File::open(parent)?.sync_all()?;
+        }
         Ok(())
     })();
     if tmp.exists() {
@@ -319,6 +328,20 @@ pub fn preview(before: Option<&[u8]>, after: Option<&[u8]>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn replacement_preserves_executable_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir=std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&dir).unwrap();
+        let path=dir.join("script.sh");
+        std::fs::write(&path,b"old").unwrap();
+        std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o751)).unwrap();
+        super::replace(&path,b"new").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode()&0o777,0o751);
+        assert_eq!(std::fs::read(&path).unwrap(),b"new");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[cfg(windows)]
     #[test]
     fn failed_atomic_replace_preserves_old_data_and_removes_temp() {

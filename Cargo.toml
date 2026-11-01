@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 default = ["desktop"]
-desktop = ["dep:wry", "dep:tao", "dep:clipboard-rs", "dep:global-hotkey", "dep:enigo"]
+desktop = ["dep:wry", "dep:tao", "dep:clipboard-rs", "dep:global-hotkey", "dep:enigo", "dep:muda", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 
 [dependencies]
 anyhow = "1"
@@ -38,6 +38,12 @@ sysinfo = { version = "0.40.1", default-features = false, features = ["system"] 
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = { version = "5.4.3", features = ["std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.20", default-features = false, optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSRunningApplication", "NSWorkspace"], optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSString"], optional = true }
 
 [profile.release]
 opt-level = 2

@@ -293,13 +293,15 @@ impl SelectionAgent {
 
 #[cfg(feature = "desktop")]
 fn capture_selection() -> anyhow::Result<String> {
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows,target_os = "macos")))]
     use clipboard_rs::common::ContentFormat;
     use clipboard_rs::{Clipboard, ClipboardContext};
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
     use std::{thread::sleep, time::Duration};
     #[cfg(windows)]
     let source_window = crate::selection_clipboard::foreground();
+    #[cfg(target_os = "macos")]
+    let source_window = crate::macos_clipboard::foreground();
     // Do not move focus until the copy command has completed in the source application.
     #[cfg(windows)]
     {
@@ -323,12 +325,24 @@ fn capture_selection() -> anyhow::Result<String> {
             "Отпустите клавиши сочетания и повторите перевод"
         );
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {fn CGEventSourceFlagsState(state:i32)->u64;}
+        // Combined session state, Shift/Control/Option/Command. A held Shift
+        // must not turn the synthetic Command+C into Command+Shift+C.
+        let released=||unsafe{CGEventSourceFlagsState(0)&0x001e0000==0};
+        for _ in 0..100 {if released(){break;}sleep(Duration::from_millis(15));}
+        anyhow::ensure!(released(),"Отпустите клавиши сочетания и повторите перевод");
+    }
+    #[cfg(not(any(windows,target_os = "macos")))]
     sleep(Duration::from_millis(300));
     let clipboard = ClipboardContext::new().map_err(|e| anyhow::anyhow!(e.to_string()))?;
     #[cfg(windows)]
     let backup = crate::selection_clipboard::Snapshot::capture()?;
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    let backup = crate::macos_clipboard::Snapshot::capture()?;
+    #[cfg(not(any(windows,target_os = "macos")))]
     let backup = clipboard
         .get(&[
             ContentFormat::Text,
@@ -338,13 +352,13 @@ fn capture_selection() -> anyhow::Result<String> {
             ContentFormat::Files,
         ])
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows,target_os = "macos")))]
     let marker = format!("local-gemma-selection-{}", uuid::Uuid::new_v4());
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows,target_os = "macos")))]
     clipboard
         .set_text(marker.clone())
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    #[cfg(windows)]
+    #[cfg(any(windows,target_os = "macos"))]
     let mut captured_revision = None;
     let captured = (|| -> anyhow::Result<String> {
         let mut keyboard = Enigo::new(&Settings::default()).map_err(|e| {
@@ -367,6 +381,8 @@ fn capture_selection() -> anyhow::Result<String> {
             source_window != 0 && crate::selection_clipboard::foreground() == source_window,
             "Фокус окна изменился. Выделите текст в нужном окне и повторите перевод."
         );
+        #[cfg(target_os = "macos")]
+        anyhow::ensure!(source_window.is_some() && crate::macos_clipboard::foreground()==source_window,"Фокус приложения изменился. Выделите текст и повторите перевод");
         keyboard.key(modifier, Direction::Press)?;
         let copy = keyboard.key(copy_key, Direction::Click);
         let release = keyboard.key(modifier, Direction::Release);
@@ -376,17 +392,23 @@ fn capture_selection() -> anyhow::Result<String> {
             sleep(Duration::from_millis(40));
             #[cfg(windows)]
             let revision = crate::selection_clipboard::revision();
-            #[cfg(windows)]
+            #[cfg(target_os = "macos")]
+            let revision = crate::macos_clipboard::revision();
+            #[cfg(any(windows,target_os = "macos"))]
             if revision == backup.revision {
                 continue;
             }
             if let Ok(text) = clipboard.get_text() {
-                #[cfg(windows)]
-                if !text.trim().is_empty() && crate::selection_clipboard::revision() == revision {
+                #[cfg(any(windows,target_os = "macos"))]
+                if !text.trim().is_empty() && {
+                    #[cfg(windows)] let stable=crate::selection_clipboard::revision()==revision;
+                    #[cfg(target_os = "macos")] let stable=crate::macos_clipboard::revision()==revision;
+                    stable
+                } {
                     captured_revision = Some(revision);
                     return Ok(text);
                 }
-                #[cfg(not(windows))]
+                #[cfg(not(any(windows,target_os = "macos")))]
                 if text != marker && !text.trim().is_empty() {
                     return Ok(text);
                 }
@@ -395,20 +417,21 @@ fn capture_selection() -> anyhow::Result<String> {
         anyhow::bail!("Не удалось скопировать выделение. Выделите обычный текст и повторите. В защищённых или повышенных окнах может потребоваться ручное Ctrl/⌘+C и кнопка «Перевести буфер».")
     })();
     // Avoid overwriting a new clipboard value copied by the user concurrently.
-    #[cfg(windows)]
+    #[cfg(any(windows,target_os = "macos"))]
     if let Some(revision) = captured_revision {
         // A restore error is visible; never silently claim the clipboard was preserved.
         backup.restore(revision)?;
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows,target_os = "macos")))]
     {
         let current = clipboard.get_text().unwrap_or_default();
         if current == marker || captured.as_ref().is_ok_and(|text| *text == current) {
-            let _ = if backup.is_empty() {
+            let restored = if backup.is_empty() {
                 clipboard.clear()
             } else {
                 clipboard.set(backup)
             };
+            restored.map_err(|e|anyhow::anyhow!("Не удалось восстановить буфер обмена: {e}"))?;
         }
     }
     captured
