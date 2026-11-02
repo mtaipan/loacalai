@@ -604,10 +604,11 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
         json!({"process_recovery_errors":app.process_recovery_errors,"compute":compute,"online":models["online"],"model_locations":models["locations"],"storage_errors":models["errors"],"models":models["models"],"python":tools::python(&app).map(|p|p.to_string_lossy().to_string()),"models_path":app.data.join("models").to_string_lossy(),"speech_ready":tools::speech_model(&app).join("model.bin").exists(),"workspace":app.settings.lock().await.workspace,"hotkey":hotkey,"active_tasks":app.runs.lock().await.len(),"models_busy":app.model_lifecycle.try_write().is_err(),"quick_busy":matches!(app.quick.lock().await["status"].as_str(),Some("translating"|"capturing"))}),
     )
 }
-async fn settings(
-    State(app): State<Shared>,
-    Json(mut value): Json<Settings>,
-) -> ApiResult<Settings> {
+async fn settings(State(app):State<Shared>,Json(value):Json<Settings>)->ApiResult<Settings>{
+    // A disconnected settings window must not abandon a runtime/disk transition midway.
+    tokio::spawn(async move{save_settings(app,value).await}).await?
+}
+async fn save_settings(app:Shared,mut value:Settings)->ApiResult<Settings>{
     let _write = app.settings_write.lock().await;
     let revision = app.settings.lock().await.revision;
     if value.revision != revision {
@@ -670,9 +671,6 @@ async fn settings(
                 && value.context == previous.context),
         "Остановите текущую задачу перед изменением настроек",
     )?;
-    if compute_changed {
-        crate::compute::reconfigure(&app, &value.compute).await?;
-    }
     let root = PathBuf::from(&value.workspace);
     require(
         root.is_absolute(),
@@ -683,7 +681,7 @@ async fn settings(
     let mut value = value;
     value.workspace = root.to_string_lossy().into();
     let mut recent = vec![value.workspace.clone(), previous.workspace.clone()];
-    recent.extend(previous.recent_projects);
+    recent.extend(previous.recent_projects.clone());
     value.recent_projects = vec![];
     for path in recent {
         if !value.recent_projects.contains(&path) {
@@ -693,13 +691,46 @@ async fn settings(
             break;
         }
     }
-    crate::changes::replace(
-        &app.data.join("settings.json"),
-        &serde_json::to_vec_pretty(&value)?,
-    )?;
+    if compute_changed {crate::compute::validate_reconfiguration(&app,&value.compute).await?;}
+    let path=app.data.join("settings.json");
+    let old_bytes=match std::fs::read(&path){Ok(bytes)=>Some(bytes),Err(error) if error.kind()==std::io::ErrorKind::NotFound=>None,Err(error)=>return Err(error.into())};
+    let staged=crate::changes::PreparedReplacement::new(&path,&serde_json::to_vec_pretty(&value)?)?;
+    let recovery=if compute_changed {Some(settings_compute_snapshot(&app).await?)}else{None};
+    if compute_changed {
+        if let Err(error)=crate::compute::reconfigure(&app,&value.compute).await {
+            return Err(settings_rollback(&app,&previous.compute,recovery,error).await.into());
+        }
+    }
+    if let Err(error)=staged.commit(){
+        let disk_restore=(||->anyhow::Result<()>{
+            match &old_bytes {
+                Some(bytes)=>if std::fs::read(&path).ok().as_ref()!=Some(bytes){crate::changes::replace(&path,bytes)?;},
+                None=>match std::fs::remove_file(&path){Ok(())=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.into())}
+            }Ok(())
+        })();
+        let error=if let Err(restore)=disk_restore{anyhow::anyhow!("{error:#}; восстановление файла настроек не завершено: {restore:#}")}else{error};
+        return Err(settings_rollback(&app,&previous.compute,recovery,error).await.into());
+    }
     *app.settings.lock().await = value.clone();
     crate::permissions::resolve_pending(&app).await;
     Ok(Json(value))
+}
+struct SettingsComputeSnapshot{key:Option<String>,error:Option<String>,file:Option<Vec<u8>>}
+async fn settings_compute_snapshot(app:&Shared)->anyhow::Result<SettingsComputeSnapshot>{
+    let file=match std::fs::read(app.data.join("compute-fallback.json")){Ok(bytes)=>Some(bytes),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>None,Err(e)=>return Err(e.into())};
+    let runtime=app.compute.lock().await;Ok(SettingsComputeSnapshot{key:runtime.fallback_key.clone(),error:runtime.last_error.clone(),file})
+}
+async fn settings_rollback(app:&Shared,previous:&crate::compute::Config,snapshot:Option<SettingsComputeSnapshot>,error:anyhow::Error)->anyhow::Error{
+    let Some(snapshot)=snapshot else{return error;};
+    let file=app.data.join("compute-fallback.json");
+    let persisted=match snapshot.file{Some(bytes)=>crate::changes::replace(&file,&bytes),None=>match std::fs::remove_file(&file){Ok(())=>Ok(()),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(()),Err(e)=>Err(e.into())}};
+    {let mut runtime=app.compute.lock().await;runtime.fallback_key=snapshot.key;runtime.last_error=snapshot.error;}
+    app.model_stores.lock().await.clear();
+    let restored=crate::compute::ensure(app,previous).await;
+    let mut details=format!("Настройки не сохранены: {error:#}");
+    if let Err(e)=persisted{details.push_str(&format!("; восстановление состояния fallback не завершено: {e:#}"));}
+    if let Err(e)=restored{details.push_str(&format!("; прежний движок пока недоступен: {e:#}"));app.compute.lock().await.last_error=Some(details.clone());}
+    anyhow::anyhow!(details)
 }
 async fn compute_info(State(app): State<Shared>) -> Json<Value> {
     Json(crate::compute::info(&app, false).await)

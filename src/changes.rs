@@ -52,53 +52,41 @@ pub fn snapshot(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
-/// Replace a file without first deleting the old file (also on Windows).
-pub fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let parent = path.parent().context("Нет родительской папки")?;
-    fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(".local-gemma-{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
+/// A fully written replacement that has not yet changed the destination.
+/// Dropping it after failed validation/reconfiguration releases only its own temporary file.
+pub struct PreparedReplacement { path:PathBuf, temporary:PathBuf }
+impl Drop for PreparedReplacement {
+    fn drop(&mut self){let _=fs::remove_file(&self.temporary);}
+}
+impl PreparedReplacement {
+    pub fn new(path:&Path,bytes:&[u8])->Result<Self>{
+        use std::io::Write;
+        let parent=path.parent().context("Нет родительской папки")?;fs::create_dir_all(parent)?;
+        let staged=Self{path:path.to_owned(),temporary:parent.join(format!(".local-gemma-{}.tmp",uuid::Uuid::new_v4()))};
+        let mut file=fs::OpenOptions::new().write(true).create_new(true).open(&staged.temporary)?;
         file.write_all(bytes)?;
         #[cfg(unix)]
-        match fs::metadata(path) {
-            Ok(metadata) => file.set_permissions(metadata.permissions())?,
-            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
-            Err(error)=>return Err(error.into()),
-        }
-        file.sync_all()?;
-        drop(file);
-        #[cfg(windows)]
-        {
+        match fs::metadata(path){Ok(metadata)=>file.set_permissions(metadata.permissions())?,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},Err(error)=>return Err(error.into())}
+        file.sync_all()?;drop(file);Ok(staged)
+    }
+    pub fn commit(self)->Result<()> {
+        #[cfg(windows)]{
             use std::os::windows::ffi::OsStrExt;
-            #[link(name = "kernel32")]
-            extern "system" {
-                fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
-            }
-            let from: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
-            let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-            anyhow::ensure!(
-                unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 1 | 8) } != 0,
-                "Не удалось заменить файл: {}",
-                std::io::Error::last_os_error()
-            );
+            #[link(name="kernel32")]
+            extern "system"{fn MoveFileExW(from:*const u16,to:*const u16,flags:u32)->i32;}
+            let from:Vec<u16>=self.temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+            let to:Vec<u16>=self.path.as_os_str().encode_wide().chain(Some(0)).collect();
+            anyhow::ensure!(unsafe{MoveFileExW(from.as_ptr(),to.as_ptr(),1|8)}!=0,"Не удалось заменить файл: {}",std::io::Error::last_os_error());
         }
-        #[cfg(not(windows))]
-        {
-            fs::rename(&tmp, path)?;
-            fs::File::open(parent)?.sync_all()?;
+        #[cfg(not(windows))]{
+            fs::rename(&self.temporary,&self.path)?;
+            fs::File::open(self.path.parent().context("Нет родительской папки")?)?.sync_all()?;
         }
         Ok(())
-    })();
-    if tmp.exists() {
-        let _ = fs::remove_file(tmp);
     }
-    result
 }
+/// Replace a file without first deleting the old file (also on Windows).
+pub fn replace(path:&Path,bytes:&[u8])->Result<()> {PreparedReplacement::new(path,bytes)?.commit()}
 
 pub struct Mutation {
     pub path: PathBuf,

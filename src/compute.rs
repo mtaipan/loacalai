@@ -427,11 +427,14 @@ async fn start_private(app: &Shared, config: &Config, key: &str) -> Result<()> {
     let _ = child.kill().await;
     anyhow::bail!("Встроенный движок не запустился за 20 секунд")
 }
-pub async fn reconfigure(app: &Shared, config: &Config) -> Result<()> {
+pub async fn validate_reconfiguration(app: &Shared, config: &Config) -> Result<()> {
     if std::env::var_os("LOCAL_GEMMA_OLLAMA").is_some() {
         anyhow::ensure!(["auto","cpu"].contains(&config.backend.as_str()),"При подключении внешней Ollama выбор конкретной видеокарты настраивается на её сервере");
     }
-    validate(app, config).await?;
+    validate(app, config).await
+}
+pub async fn reconfigure(app: &Shared, config: &Config) -> Result<()> {
+    validate_reconfiguration(app,config).await?;
     app.model_stores.lock().await.clear();
     clear_fallback(app).await;
     ensure(app, config).await?;
