@@ -47,3 +47,5 @@
 .file-location{display:flex;flex-wrap:wrap;gap:6px;padding:6px 0}.file-location p{width:100%;font-size:11px;overflow-wrap:anywhere;margin:4px}.project-pages{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
 
 .file-current{width:100%;font-size:12px;font-weight:500;overflow-wrap:anywhere;margin:4px 0 8px}
+
+.history-window{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 24px}.history-window>span{color:var(--muted);font-size:12px}

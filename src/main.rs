@@ -4,6 +4,7 @@ mod artifacts;
 mod api;
 mod changes;
 mod chat_headers;
+mod chat_pages;
 mod compute;
 mod context;
 mod documents;

@@ -229,9 +229,9 @@ pub struct Conversation {
 }
 /// Browser transport omits the model's private working history entirely.
 #[derive(Serialize,Deserialize)]
-pub struct ConversationView{pub id:String,pub title:String,pub updated:String,pub mode:String,pub messages:Vec<Message>}
+pub struct ConversationView{pub id:String,pub title:String,pub updated:String,pub mode:String,pub messages:Vec<crate::chat_pages::VisibleMessage>}
 impl From<Conversation> for ConversationView{
-    fn from(chat:Conversation)->Self{Self{id:chat.id,title:chat.title,updated:chat.updated,mode:chat.mode,messages:chat.messages}}
+    fn from(chat:Conversation)->Self{Self{id:chat.id,title:chat.title,updated:chat.updated,mode:chat.mode,messages:chat.messages.into_iter().map(Into::into).collect()}}
 }
 pub struct Run {
     pub cancel: CancellationToken,
@@ -436,6 +436,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/compute/retry", post(compute_retry))
         .route("/api/compute/install", post(compute_install))
         .route("/api/chats", get(chats).post(new_chat))
+        .route("/api/chats/{id}/messages",get(chat_messages))
         .route(
             "/api/chats/{id}",
             get(chat).patch(rename).delete(delete_chat),
@@ -880,6 +881,16 @@ async fn new_chat(State(app): State<Shared>, Json(value): Json<Value>) -> ApiRes
 }
 async fn chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<ConversationView> {
     Ok(Json(app.load_view(&id).await?))
+}
+#[derive(Deserialize)]
+struct MessageQuery{before:Option<u64>,#[serde(default="message_limit")]limit:u64,revision:Option<String>}
+fn message_limit()->u64{24}
+async fn chat_messages(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(query):axum::extract::Query<MessageQuery>)->ApiResult<Value>{
+    let guard=app.storage.clone().lock_owned().await;
+    if app.tasks.is_deleted(id.clone()).await?{return Err(ApiError::status(StatusCode::NOT_FOUND,"Чат удалён"));}
+    let path=app.chat_path(&id)?;
+    let result=tokio::task::spawn_blocking(move||{let _guard=guard;crate::chat_pages::page(&path,query.before,query.limit,query.revision.as_deref())}).await?;
+    match result{Ok(value)=>Ok(Json(value)),Err(error) if error.is::<crate::chat_pages::Changed>()=>Err(ApiError::status(StatusCode::CONFLICT,&error.to_string())),Err(error)=>Err(error.into())}
 }
 async fn rename(
     State(app): State<Shared>,

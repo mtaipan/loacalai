@@ -78,12 +78,34 @@ async function initializeWorkspace(){
     await handleRunEvent(event,false,session,id);
   },{persistent:true,cursor:snapshot.cursor}).catch(error=>{workspaceStreamStarted=false;toast('Соединение с задачами потеряно: '+error.message,true);});
 }
+async function fetchChat(id,options={}){
+  const query=new URLSearchParams({limit:'24'});if(options.before!==undefined)query.set('before',String(options.before));if(options.revision)query.set('revision',options.revision);
+  return api('/api/chats/'+encodeURIComponent(id)+'/messages?'+query);
+}
+function historyWindowHtml(){
+  const p=state.chat?.message_page;if(!p||p.total<=p.limit&&p.at_latest)return '';
+  return `<nav class="history-window" aria-label="Страницы диалога">${p.start>0?'<button class="button" data-message-page="older">Раньше</button>':''}<span tabindex="-1" data-history-position>Сообщения ${p.start+1}–${p.end} из ${p.total}</span>${!p.at_latest?'<button class="button" data-message-page="newer">Позже</button><button class="button" data-message-page="latest">Последние</button>':''}</nav>`;
+}
+let historyPageRequest=0;
+async function pageConversation(direction){
+  const chat=state.chat,p=chat?.message_page;if(!p)return;
+  const version=navigationVersion,request=++historyPageRequest,id=chat.id;
+  document.querySelectorAll('[data-message-page]').forEach(button=>button.disabled=true);
+  try{
+    const options=direction==='latest'?{}:{before:direction==='older'?p.start:Math.min(p.total,p.end+p.limit),revision:p.revision};
+    const next=await fetchChat(id,options);
+    if(request!==historyPageRequest||version!==navigationVersion||state.chat!==chat)return;
+    state.chat=next;if(currentSession().busy)currentSession().chat=next;state.scrollFollow=false;renderMessages();
+    document.getElementById('scroll').scrollTop=0;
+    (document.querySelector('[data-message-page="'+direction+'"]')||document.querySelector('[data-history-position]')||document.getElementById('conversation')).focus({preventScroll:true});
+  }finally{if(request===historyPageRequest&&version===navigationVersion)document.querySelectorAll('[data-message-page]').forEach(button=>button.disabled=false);}
+}
 async function finishConversationRun(session,id,run=session.run){
   // Keep admission blocked until the final view loads: a late fetch must not
   // clear the stream of the next run in this conversation.
   if(!run||session.run!==run)return;
   let finished= session.chat;
-  if(visibleConversation()===id)try{finished=await api('/api/chats/'+id);}catch(error){
+  if(visibleConversation()===id)try{finished=await fetchChat(id,state.chat?.message_page?.at_latest===false?{before:state.chat.message_page.end}:{});}catch(error){
     toast('Не удалось загрузить сохранённую историю. Показана полученная часть ответа: '+error.message,true);
     const chat=session.chat||state.chat;
     if(chat?.id===id)finished={...chat,messages:[...chat.messages,{id:run+'-local',role:'assistant',content:session.streamText,tools:session.streamTools,created:new Date().toISOString(),diagnostics:{recovery_pending:true}}]};
@@ -99,7 +121,7 @@ async function finishConversationRun(session,id,run=session.run){
 async function switchConversation(id){
   if(state.sending)return;
   const previous=visibleConversation(),version=++navigationVersion;captureDraft();
-  const chat=await api('/api/chats/'+id);if(version!==navigationVersion)return;
+  const chat=await fetchChat(id);if(version!==navigationVersion)return;
   const session=currentSession(id);state.chat=session.busy&&session.chat?session.chat:chat;
   if(session.busy)session.chat=state.chat;
   localStorage.setItem('gemma.lastChat',id);
@@ -122,6 +144,7 @@ async function submitMessage(retry=false){
   if(state.sending||state.uploading||state.pendingInput)return;if(state.busy)return stopRun();
   const raw=document.getElementById('prompt').value;
   let content=raw.trim(),attachments=[...state.pending];
+  if(retry&&state.chat?.message_page?.at_latest===false){toast('Откройте последние сообщения для повторной генерации.',true);return;}
   if(retry){const previous=[...(state.chat?.messages||[])].reverse().find(m=>m.role==='user');if(!previous)return;content=previous.content;attachments=previous.attachments||[];}
   if(!content&&!attachments.length)return;
   captureDraft();const session=currentSession();const previousSubmission=session.submission;session.sending=true;
@@ -133,6 +156,7 @@ async function submitMessage(retry=false){
       if(!state.chats.some(c=>c.id===id))state.chats.unshift(chat);
       if(persistDraft(id,session))localStorage.removeItem(draftStorageKey('new'));
     }
+    if(state.chat?.message_page?.at_latest===false){state.chat=await fetchChat(id);session.chat=state.chat;renderMessages();}
     await connectWorkspace();
     localStorage.setItem('gemma.lastChat',id);
     const payload={conversation:id,expected_workspace:state.settings.workspace,content,attachments:attachments.map(a=>a.id),mode:state.mode,source:document.getElementById('source').value,target:document.getElementById('target').value,retry,thinking:thinkingChoice,web:state.mode==='search'&&searchOptions().focus!=='materials'?'search':webChoice,...(state.mode!=='translate'?{search:searchOptions()}:{} )};
@@ -154,7 +178,7 @@ async function submitMessage(retry=false){
     }catch(error){
       let accepted=false;
       if(!error.status)try{const run=await api('/api/runs/'+payload.request_id);accepted=true;if(!['running','queued','awaiting_approval','stopping'].includes(run.status)){session.ignoreThrough=Math.max(session.ignoreThrough||0,run.last_sequence||0);await finishConversationRun(session,id,payload.request_id);}}catch{}
-      if(!accepted){session.busy=false;session.run=null;try{session.chat=await api('/api/chats/'+id);}catch{}if(visibleConversation()===id){state.chat=session.chat||state.chat;renderMessages();}await refreshChats();}
+      if(!accepted){session.busy=false;session.run=null;try{session.chat=await fetchChat(id);}catch{}if(visibleConversation()===id){state.chat=session.chat||state.chat;renderMessages();}await refreshChats();}
       if(!accepted&&error.status===409)try{const fresh=await api('/api/bootstrap');if((fresh.settings.revision||0)>=(state.settings.revision||0))state.settings=fresh.settings;updateWorkspace();renderActiveModel();}catch{}
       toast(error.message,true);
     }
