@@ -115,16 +115,17 @@ fn memory_bounds(total:u64,available:u64,cgroup:Option<(u64,u64)>)->Value{
     let effective_available=cgroup.map_or(available,|(_,free)|available.min(free)).min(effective_total);
     json!({"total_bytes":effective_total,"available_bytes":effective_available,"host_total_bytes":total,"host_available_bytes":available,"cgroup_limit_bytes":cgroup.map(|v|v.0),"scope":if cgroup.is_some(){"host_and_cgroup"}else{"host"}})
 }
-pub fn thread_plan(requested:usize,local:bool,available:Option<usize>,physical:Option<usize>)->Result<Value>{
-    if !local{return Ok(json!({"policy":if requested==0{"server_auto"}else{"manual"},"requested_threads":requested,"effective_threads":if requested==0{None}else{Some(requested)},"available_logical_cpus":null,"physical_cores":null}));}
+/// Client CPU/affinity facts apply only to an engine owned by this app.
+pub fn thread_plan(requested:usize,owned:bool,available:Option<usize>,physical:Option<usize>)->Result<Value>{
+    if !owned{return Ok(json!({"policy":if requested==0{"server_auto"}else{"manual"},"requested_threads":requested,"effective_threads":if requested==0{None}else{Some(requested)},"available_logical_cpus":null,"physical_cores":null}));}
     let available=available.filter(|n|*n>0);let physical=physical.filter(|n|*n>0);
     if let Some(available)=available{anyhow::ensure!(requested<=available,"Указано {requested} потоков CPU, процессу доступно {available}. Уменьшите ручное значение или выберите Авто; запрос сохранён");}
     let cores=physical.or(available).unwrap_or(1).min(available.unwrap_or(usize::MAX)).max(1);
     let threads=if requested==0{cores.saturating_sub(1).max(1)}else{requested};
     Ok(json!({"policy":if requested==0{"auto_reduced_threads"}else{"manual"},"requested_threads":requested,"effective_threads":threads,"available_logical_cpus":available,"physical_cores":physical,"estimated":available.is_none()||physical.is_none(),"note":"Число вычислительных потоков, передаваемое движку; ядра не закрепляются, служебные потоки и планирование ОС независимы"}))
 }
-pub fn cpu_threads(requested:usize,local:bool)->Result<Value>{
-    if !local{return thread_plan(requested,false,None,None);}
+pub fn cpu_threads(requested:usize,owned:bool)->Result<Value>{
+    if !owned{return thread_plan(requested,false,None,None);}
     thread_plan(requested,true,std::thread::available_parallelism().ok().map(|n|n.get()),sysinfo::System::physical_core_count().ok())
 }
 /// Conservative f16 KV estimate for ordinary attention. Missing architecture

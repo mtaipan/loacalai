@@ -192,13 +192,14 @@ pub async fn configure_payload(
     let mut config = settings.context.clone();
     config.validate()?;
     let show = crate::thinking::show(app, model).await?;
-    let memory = tokio::task::spawn_blocking(crate::resources::memory).await?;
-    let local=crate::engine::local_inference();
-    let mut resources=if local{crate::resources::fit_context(
-        &mut config,&show,&memory,settings.compute.backend=="cpu"||crate::compute::force_cpu(app,&settings.compute).await,
-    )?}else{json!({"estimated":false,"reason":"remote_engine_memory_unknown"})};
+    let owned=crate::engine::owns_engine();
+    let mut resources=if owned{
+        let memory=tokio::task::spawn_blocking(crate::resources::memory).await?;
+        crate::resources::fit_context(&mut config,&show,&memory,settings.compute.backend=="cpu"||crate::compute::force_cpu(app,&settings.compute).await)?
+    }else{json!({"estimated":false,"reason":"external_engine_resources_unknown"})};
+    resources["engine_owned"]=json!(owned);
     let requested=settings.compute.cpu_threads;
-    let cpu=tokio::task::spawn_blocking(move||crate::resources::cpu_threads(requested,local)).await??;
+    let cpu=tokio::task::spawn_blocking(move||crate::resources::cpu_threads(requested,owned)).await??;
     if let Some(threads)=cpu["effective_threads"].as_u64(){payload["options"]["num_thread"]=json!(threads);}
     resources["cpu_threads"]=cpu;
     let definitions=payload["tools"].clone();let thinking=thinking_enabled(&payload["think"],&show);

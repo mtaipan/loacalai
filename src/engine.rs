@@ -34,6 +34,11 @@ pub fn ollama_url() -> String {
     std::env::var("LOCAL_GEMMA_OLLAMA")
         .unwrap_or_else(|_| format!("http://127.0.0.1:{}", crate::compute::engine_port()))
 }
+/// A loopback connection may point at a user-managed server, container or tunnel.
+/// Only the app-managed engine has hardware facts measured in this process scope.
+pub fn owns_engine() -> bool {
+    std::env::var_os("LOCAL_GEMMA_OLLAMA").is_none()
+}
 pub fn local_inference() -> bool {
     reqwest::Url::parse(&ollama_url())
         .ok()

@@ -609,7 +609,7 @@ async fn guard(State(app): State<Shared>, req: Request<Body>, next: Next) -> Res
 }
 async fn bootstrap(State(app): State<Shared>) -> Json<Value> {
     Json(
-        json!({"app":"Local Gemma Studio","root":app.root.to_string_lossy(),"version":env!("CARGO_PKG_VERSION"),"token":app.token,"settings":app.settings.lock().await.clone(),"platform":std::env::consts::OS,"local_inference":engine::local_inference(),"catalog":crate::models::catalog()}),
+        json!({"app":"Local Gemma Studio","root":app.root.to_string_lossy(),"version":env!("CARGO_PKG_VERSION"),"token":app.token,"settings":app.settings.lock().await.clone(),"platform":std::env::consts::OS,"local_inference":engine::local_inference(),"engine_owned":engine::owns_engine(),"catalog":crate::models::catalog()}),
     )
 }
 async fn activate(State(app):State<Shared>)->Json<Value>{

@@ -78,7 +78,7 @@ function buildShell() {
     </aside>
     <main class="main"><header class="topbar"><button class="icon-button" data-action="sidebar" title="Боковая панель" aria-label="Боковая панель">${icon('panel')}</button>
       <div class="breadcrumbs"><span class="space-name">Личное пространство</span><span class="slash">/</span><span id="chat-title">Новый чат</span></div>
-      <div class="topbar-right"><span class="local-badge"><i class="dot"></i>${state.localInference===false?"Внешний движок":"Локальная модель"}</span><span class="divider"></span>
+      <div class="topbar-right"><span class="local-badge"><i class="dot"></i>${state.engineOwned?"Движок приложения":"Внешний движок"}</span><span class="divider"></span>
       <button class="icon-button" data-action="tasks" title="Цель и план задачи" aria-label="Цель и план задачи">${icon('paste')}</button><button class="icon-button" data-action="projects" title="Открыть проект" aria-label="Открыть проект">${icon('code')}</button><button class="icon-button" data-action="changes" title="Изменения файлов и восстановление" aria-label="Изменения файлов">${icon('refresh')}</button><button class="icon-button" data-action="export" title="Экспорт чата в Markdown" aria-label="Экспорт в Markdown">${icon('download')}</button>
       <button class="icon-button" data-action="files" title="Файлы проекта" aria-label="Файлы проекта">${icon('folder')}</button></div></header>
       <div class="conversation-scroll" id="scroll"><section id="conversation" class="conversation"></section></div>
@@ -416,7 +416,7 @@ function bindEvents(){
   });
 }
 async function boot(){try{
-  const bootstrap=await api('/api/bootstrap');state.token=bootstrap.token;state.localInference=bootstrap.local_inference;state.platform=bootstrap.platform;state.settings=bootstrap.settings;state.catalog=bootstrap.catalog||[];
+  const bootstrap=await api('/api/bootstrap');state.token=bootstrap.token;state.localInference=bootstrap.local_inference;state.engineOwned=bootstrap.engine_owned===true;state.platform=bootstrap.platform;state.settings=bootstrap.settings;state.catalog=bootstrap.catalog||[];
   state.chats=await api('/api/chats');const last=localStorage.getItem('gemma.lastChat');state.chat=last&&state.chats.some(chat=>chat.id===last)?await api('/api/chats/'+last):null;
   state.mode=state.chat?.mode||localStorage.getItem('gemma.mode')||'agent';if(!modes[state.mode])state.mode='agent';
   buildShell();updateWorkspace();renderChats();renderMessages();if(state.chat)$('#chat-title').textContent=state.chat.title;

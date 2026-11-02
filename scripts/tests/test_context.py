@@ -78,6 +78,13 @@ try:
             assert json.load(error)['code']=='not_found'
         else:raise AssertionError('missing resource must return typed 404')
     config=read('/api/bootstrap')['settings']
+    assert read('/api/bootstrap')['engine_owned'] is False
+    auto=turn('External server Auto policy','chat')
+    assert 'num_thread' not in requests[-1]['options']
+    resource=auto['messages'][-1]['diagnostics']['context']['resources']
+    assert resource['reason']=='external_engine_resources_unknown' and resource['engine_owned'] is False
+    assert resource['cpu_threads']['policy']=='server_auto' and resource['cpu_threads']['available_logical_cpus'] is None
+    config['compute']['cpu_threads']=1
     config['assistant']['chat_instructions']='CHAT_PERSONA_FIXTURE'
     config['assistant']['agent_instructions']='AGENT_PERSONA_FIXTURE'
     config['assistant']['chat_temperature']=.63
@@ -86,7 +93,7 @@ try:
     history=turn('Remember CONTEXT_URL_MARKER','chat')
     history=turn('Explain http://example.com/article','chat',chat=history,web='auto')
     body=requests[-1]
-    assert body['options']['num_thread']>=1
+    assert body['options']['num_thread']==1
     assert history['messages'][-1]['diagnostics']['context']['resources']['cpu_threads']['effective_threads']==body['options']['num_thread']
     assert any('CONTEXT_URL_MARKER' in m.get('content','') for m in body['messages']),body
     assert 'CHAT_PERSONA_FIXTURE' in body['messages'][0]['content']
@@ -95,7 +102,7 @@ try:
     locations=root/'data/model-locations.json';locations.write_text(json.dumps({model:str(root/'old-private-models')}))
     try:turn('External endpoint must ignore the old private model path','chat')
     finally:locations.unlink()
-    print('PASS local CPU thread allocation is sent and recorded; external Ollama ignores retained private store paths')
+    print('PASS external loopback Auto leaves resource decisions to server; explicit threads are sent and recorded; retained private store paths ignored')
     turn('Explain the bug and fix it','agent')
     assert requests[-1]['tools'] and requests[-1]['options']['temperature']==.17
     turn('Объясни ошибку и почини проект','agent')
