@@ -170,12 +170,7 @@ pub async fn validate(app: &Shared, config: &Config) -> Result<()> {
         ["auto", "cpu", "cuda", "rocm", "vulkan", "metal"].contains(&config.backend.as_str()),
         "Неизвестный вычислительный движок"
     );
-    let hardware = hardware(app, false).await;
-    let max = hardware["logical_cpus"].as_u64().unwrap_or(1).max(1) as usize;
-    anyhow::ensure!(
-        config.cpu_threads <= max,
-        "Число потоков CPU: 0 (авто) или от 1 до {max}"
-    );
+    if crate::engine::local_inference(){crate::resources::cpu_threads(config.cpu_threads,true)?;}
     anyhow::ensure!(
         config.device.len() <= 100,
         "Неверный идентификатор устройства"
@@ -192,6 +187,7 @@ pub async fn validate(app: &Shared, config: &Config) -> Result<()> {
             "Модуль {} не установлен. Скачайте его в разделе «Вычисления».",
             config.backend
         );
+        let hardware=hardware(app,false).await;
         let devices = hardware["devices"].as_array().cloned().unwrap_or_default();
         let found = if config.backend == "rocm" {
             devices.iter().any(|d| d["vendor"] == "AMD")
@@ -501,8 +497,12 @@ pub async fn summary(app: &Shared) -> Value {
             }
         }
     }
+    let requested=config.cpu_threads;let local=crate::engine::local_inference();
+    let (cpu_thread_policy,cpu_thread_error)=match tokio::task::spawn_blocking(move||crate::resources::cpu_threads(requested,local)).await{
+        Ok(Ok(policy))=>(Some(policy),None),Ok(Err(error))=>(None,Some(error.to_string())),Err(error)=>(None,Some(error.to_string()))
+    };
     let (installing,package_cleanup_error)={let runtime=app.compute.lock().await;(runtime.installing,runtime.package_cleanup_error.clone())};
-    json!({"requested":config,"forced_cpu":fallback,"fallback_error":error,"loaded_models":models,"installing":installing,"memory":crate::resources::memory(),"inference_busy":app.resources.gate.try_lock().is_err(),"release_after_inference":true,"cleanup_error":app.resources.failure.lock().unwrap().clone(),"package_cleanup_error":package_cleanup_error})
+    json!({"requested":config,"forced_cpu":fallback,"fallback_error":error,"loaded_models":models,"installing":installing,"memory":crate::resources::memory(),"inference_busy":app.resources.gate.try_lock().is_err(),"release_after_inference":true,"cleanup_error":app.resources.failure.lock().unwrap().clone(),"package_cleanup_error":package_cleanup_error,"cpu_thread_policy":cpu_thread_policy,"cpu_thread_error":cpu_thread_error})
 }
 pub async fn model_on_gpu(app: &Shared, model: &str) -> Option<bool> {
     let value = app

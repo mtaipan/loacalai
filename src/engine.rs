@@ -198,12 +198,9 @@ async fn model_once(
     if crate::models::valid(model, "translate") {
         payload["options"]["temperature"] = json!(0);
     }
-    let config = app.settings.lock().await.compute.clone();
+    let config=app.settings.lock().await.compute.clone();
     if force_cpu {
         payload["options"]["num_gpu"] = json!(0);
-    }
-    if config.cpu_threads > 0 {
-        payload["options"]["num_thread"] = json!(config.cpu_threads);
     }
 
     let definitions = if let InferenceMode::Agent(d) = &mode {

@@ -84,12 +84,18 @@ try:
     config['assistant']['agent_temperature']=.17
     read('/api/settings',config)
     history=turn('Remember CONTEXT_URL_MARKER','chat')
-    turn('Explain http://example.com/article','chat',chat=history,web='auto')
+    history=turn('Explain http://example.com/article','chat',chat=history,web='auto')
     body=requests[-1]
+    assert body['options']['num_thread']>=1
+    assert history['messages'][-1]['diagnostics']['context']['resources']['cpu_threads']['effective_threads']==body['options']['num_thread']
     assert any('CONTEXT_URL_MARKER' in m.get('content','') for m in body['messages']),body
     assert 'CHAT_PERSONA_FIXTURE' in body['messages'][0]['content']
     assert 'AGENT_PERSONA_FIXTURE' not in body['messages'][0]['content']
     assert body['options']['temperature']==.63,body
+    locations=root/'data/model-locations.json';locations.write_text(json.dumps({model:str(root/'old-private-models')}))
+    try:turn('External endpoint must ignore the old private model path','chat')
+    finally:locations.unlink()
+    print('PASS local CPU thread allocation is sent and recorded; external Ollama ignores retained private store paths')
     turn('Explain the bug and fix it','agent')
     assert requests[-1]['tools'] and requests[-1]['options']['temperature']==.17
     turn('Объясни ошибку и почини проект','agent')

@@ -99,7 +99,9 @@ async fn run(
     drop(listener);
     let key = uuid::Uuid::new_v4().to_string();
     let url = format!("http://127.0.0.1:{port}");
-    let threads = app.settings.lock().await.compute.cpu_threads;
+    let requested=app.settings.lock().await.compute.cpu_threads;
+    let policy=tokio::task::spawn_blocking(move||crate::resources::cpu_threads(requested,true)).await??;
+    let threads=policy["effective_threads"].as_u64().context("Не определены потоки реранкера")?;
     let mut command = tokio::process::Command::new(binary);
     command
         .args(["--model"])
@@ -133,7 +135,10 @@ async fn run(
         .stderr(std::process::Stdio::null());
     #[cfg(windows)]
     command.creation_flags(0x08000000);
-    let mut child = command.spawn()?;
+    let _inference=app.resources.acquire(app.client.clone(),MODEL,cancel).await?;
+    let mut group=crate::process_group::Group::prepare(&mut command)?;
+    let mut child=command.spawn()?;
+    if let Err(error)=group.attach(&child){group.terminate();let _=child.kill().await;return Err(error);}
     let job = async {
         loop {
             if let Some(code) = child.try_wait()? {
@@ -174,6 +179,7 @@ async fn run(
         reorder(results, &value)
     };
     let result=tokio::select! {_=cancel.cancelled()=>Err(anyhow::anyhow!("Переранжирование остановлено")),result=job=>result};
+    group.terminate();
     let _ = child.kill().await;
     let _ = child.wait().await;
     result

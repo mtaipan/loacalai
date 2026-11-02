@@ -193,13 +193,19 @@ pub async fn configure_payload(
     config.validate()?;
     let show = crate::thinking::show(app, model).await?;
     let memory = tokio::task::spawn_blocking(crate::resources::memory).await?;
-    let resources = crate::resources::fit_context(
-        &mut config,
-        &show,
-        &memory,
-        settings.compute.backend == "cpu"
-            || crate::compute::force_cpu(app, &settings.compute).await,
-    )?;
+    let local=crate::engine::local_inference();
+    let mut resources=if local{crate::resources::fit_context(
+        &mut config,&show,&memory,settings.compute.backend=="cpu"||crate::compute::force_cpu(app,&settings.compute).await,
+    )?}else{json!({"estimated":false,"reason":"remote_engine_memory_unknown"})};
+    let requested=settings.compute.cpu_threads;
+    let cpu=tokio::task::spawn_blocking(move||crate::resources::cpu_threads(requested,local)).await??;
+    if let Some(threads)=cpu["effective_threads"].as_u64(){payload["options"]["num_thread"]=json!(threads);}
+    resources["cpu_threads"]=cpu;
+    let definitions=payload["tools"].clone();let thinking=thinking_enabled(&payload["think"],&show);
+    if let Some(messages)=payload.get_mut("messages").and_then(Value::as_array_mut){
+        let(mut p,_)=prepare(messages,&definitions,&config,&show,thinking,base)?;p.resources=Some(resources);
+        payload["options"]["num_ctx"]=json!(p.window_tokens);payload["options"]["num_predict"]=json!(p.output_tokens);return Ok(p);
+    }
     let tools = tools_tokens(&payload["tools"]);
     let input = if let Some(s) = payload["prompt"].as_str() {
         text_tokens(s)

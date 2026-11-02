@@ -59,6 +59,7 @@ pub fn forget(app: &Shared, model: &str) -> Result<()> {
     Ok(())
 }
 pub async fn endpoint(app: &Shared, model: &str) -> Result<String> {
+    if std::env::var_os("LOCAL_GEMMA_OLLAMA").is_some(){crate::engine::ensure_ollama(app).await?;return Ok(crate::engine::ollama_url());}
     let Some(path) = locations(app)?.get(model).cloned() else {
         crate::engine::ensure_ollama(app).await?;
         return Ok(crate::engine::ollama_url());
