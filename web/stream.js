@@ -27,6 +27,7 @@ function paintStream(){
   syncCards(document.getElementById('stream-tools'),toolsHtml(state.streamTools),'data-tool-key');
   const reason=document.getElementById('stream-reasoning');if(reason){reason.hidden=!state.streamThinking;const pre=reason.querySelector('pre'),text=state.streamThinking||'';if(pre._text!==text&&!selectionInside(pre)){if(pre.firstChild?.nodeType===Node.TEXT_NODE&&pre.childNodes.length===1&&text.startsWith(pre._text||''))pre.firstChild.appendData(text.slice((pre._text||'').length));else pre.textContent=text;pre._text=text;}}
   syncCards(document.getElementById('approvals'),state.approvals.map(approvalHtml).join(''),'data-approval-card');
+  const history=document.getElementById('stream-history');if(history){const html=runHistoryLinks(state.run,currentSession());if(history._source!==html){history.innerHTML=html;history._source=html;}}
   const notice=document.querySelector('#stream-notice span:last-child');if(notice)notice.textContent=state.notice||'Подготовка модели';
   followScroll();streamRenderCost=performance.now()-began;
 }

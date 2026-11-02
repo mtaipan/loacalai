@@ -2,7 +2,7 @@
 // Conversation state is independent of the currently visible conversation.
 const viewSessions=new Map();
 let navigationVersion=0,workspaceStreamStarted=false,workspaceConnecting=null;
-const sessionDefaults=()=>({busy:false,run:null,runMode:null,streamText:'',streamThinking:'',streamTools:[],approvals:[],notice:'',scrollFollow:true,uploading:0,pendingInput:0,nextTask:false,selectedTask:null,pending:[],sending:false,startedAt:0,submitting:false,cancelRequested:false,draft:'',submission:null,chat:null});
+const sessionDefaults=()=>({busy:false,run:null,runMode:null,streamText:'',streamThinking:'',streamTools:[],toolsTotal:0,textOffset:0,thinkingOffset:0,approvals:[],notice:'',scrollFollow:true,uploading:0,pendingInput:0,nextTask:false,selectedTask:null,pending:[],sending:false,startedAt:0,submitting:false,cancelRequested:false,draft:'',submission:null,chat:null});
 const visibleConversation=()=>state.chat?.id||'new';
 function draftStorageKey(id){return 'gemma.draft.v1.'+id;}
 function readDraft(id){
@@ -91,7 +91,7 @@ async function finishConversationRun(session,id,run=session.run){
   session.chat=finished;
   session.busy=false;session.run=null;session.submitting=false;session.approvals=[];
   if(visibleConversation()===id){clearTimeout(renderTimer);renderTimer=null;paintStream();if(session.chat){state.chat=session.chat;document.getElementById('chat-title').textContent=state.chat.title;}renderCompletedConversation();updateSend();}
-  session.streamText='';session.streamThinking='';session.streamTools=[];session.chat=null;
+  session.streamText='';session.streamThinking='';session.streamTools=[];session.toolsTotal=0;session.textOffset=0;session.thinkingOffset=0;session.chat=null;
   if(visibleConversation()!==id)prunePreviousSession(id);
   stopResponseTimer();await refreshChats();
 }
@@ -143,7 +143,7 @@ async function submitMessage(retry=false){
     session.submission={...payload,submittedDraft:raw};persistDraft(id,session);
     if(retry){if(state.chat.messages.at(-1)?.role==='assistant')state.chat.messages.pop();if(state.chat.messages.at(-1)?.role==='user')state.chat.messages.pop();}
     if(!state.chat.messages.some(message=>message.id===payload.request_id))state.chat.messages.push({id:payload.request_id,role:'user',content,attachments,tools:[],created:new Date().toISOString()});session.chat=state.chat;
-    Object.assign(session,{busy:true,run:payload.request_id,runMode:payload.mode,streamText:'',streamThinking:'',streamTools:[],approvals:[],notice:'Отправка запроса…',scrollFollow:true,startedAt:Date.now(),submitting:true,cancelRequested:false});
+    Object.assign(session,{busy:true,run:payload.request_id,runMode:payload.mode,streamText:'',streamThinking:'',streamTools:[],toolsTotal:0,textOffset:0,thinkingOffset:0,approvals:[],notice:'Отправка запроса…',scrollFollow:true,startedAt:Date.now(),submitting:true,cancelRequested:false});
     renderMessages();updateSend();startResponseTimer();
     try{
       const accepted=await api('/api/runs',{method:'POST',body:payload});

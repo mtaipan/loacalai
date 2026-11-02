@@ -402,6 +402,8 @@ pub fn router(app: Shared) -> Router {
         .route("/api/events", get(workspace_events))
         .route("/api/runs/{id}", get(run_snapshot))
         .route("/api/runs/{id}/events", get(run_events))
+        .route("/api/runs/{id}/tools", get(run_tool_page))
+        .route("/api/runs/{id}/text", get(run_text_page))
         .route("/api/chats/{id}/tasks", get(conversation_tasks))
         .route("/api/tasks/{id}", get(task_state))
         .route("/api/tasks/{id}/requests/{sequence}", get(task_request))
@@ -1285,6 +1287,15 @@ async fn run_events(
 async fn changes(State(app): State<Shared>) -> ApiResult<Value> {
     let _guard = app.file_changes.lock().await;
     Ok(Json(crate::changes::list(&app.data)?))
+}
+async fn run_tool_page(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
+    Uuid::parse_str(&id)?;
+    let before=q.get("before").map(|value|value.parse::<i64>()).transpose()?;
+    Ok(Json(app.tasks.tool_page(id,before).await?))
+}
+async fn run_text_page(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
+    Uuid::parse_str(&id)?;let before=q.get("before").map(|value|value.parse::<i64>()).transpose()?;
+    Ok(Json(app.tasks.text_page(id,q.get("kind").cloned().unwrap_or_else(||"thinking".into()),before).await?))
 }
 async fn restore_change(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     require(

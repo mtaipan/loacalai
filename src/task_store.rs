@@ -38,11 +38,9 @@ impl Store {
             let mut runs=vec![];
             for row in rows {
                 let(id,conversation,status,input,created)=row?;
-                let mut state=Fold::default();
-                let mut events=tx.prepare("SELECT payload FROM events WHERE run=?1 AND sequence<=?2 ORDER BY sequence")?;
-                for event in events.query_map(params![id,cursor],|r|r.get::<_,String>(0))? {let mut event=serde_json::from_str::<Value>(&event?)?;crate::tools::public_event(&mut event);state.consume(&event);}
+                let state=crate::timeline::snapshot(&tx,&id,cursor)?;
                 let input:Value=serde_json::from_str(&input)?;
-                runs.push(json!({"id":id,"conversation":conversation,"status":status,"input":input,"created":created,"state":state.value()}));
+                runs.push(json!({"id":id,"conversation":conversation,"status":status,"input":input,"created":created,"state":state}));
             }
             Ok(json!({"cursor":cursor,"runs":runs}))
         }).await
@@ -51,7 +49,7 @@ impl Store {
         let mut conn = Connection::open(data.join("tasks.sqlite3"))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 4,
+            version <= 5,
             "База задач создана более новой версией приложения; исходный файл сохранён"
         );
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -70,7 +68,8 @@ impl Store {
         )?;
         crate::task_state::install(&mut conn,version<3)?;
         crate::artifacts::install(&mut conn)?;
-        conn.pragma_update(None,"user_version",4)?;
+        crate::timeline::install(&conn)?;
+        conn.pragma_update(None,"user_version",5)?;
         // A crash leaves effects with unknown outcome. Never replay mutations automatically.
         conn.execute(
             "UPDATE runs SET status='interrupted', updated=?1 WHERE status IN ('running','queued','awaiting_approval','stopping')",
@@ -154,6 +153,9 @@ impl Store {
         self.access(move |conn| {
             let tx = conn.transaction()?;
             tx.execute("INSERT INTO events(run,payload) VALUES (?1,?2)", params![id,event.to_string()])?;
+            let sequence=tx.last_insert_rowid();
+            crate::timeline::record(&tx,&id,&event)?;
+            crate::timeline::checkpoint(&tx,&id,sequence,&event)?;
             let status = if event["type"]=="done" {Some(event["status"].as_str().unwrap_or("completed"))} else if event["type"]=="error" {Some(if event["cancelled"]==true {"cancelled"} else {"failed"})} else if event["type"]=="approval" {Some("awaiting_approval")} else if event["type"]=="approval_closed" {Some("running")} else {None};
             if let Some(status) = status {
                 tx.execute("UPDATE runs SET status=CASE WHEN status='failed' THEN status ELSE ?1 END, updated=?2 WHERE id=?3", params![status,crate::api::now(),id])?;
@@ -215,32 +217,40 @@ impl Store {
     }
 }
 
-#[derive(Default)]
-struct Fold {
+#[derive(Default,serde::Serialize,serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct Fold {
     text: String,
     thinking: String,
+    text_offset:usize,
+    thinking_offset:usize,
+    tools_total:u64,
     notice: String,
     tools: Vec<Value>,
     approvals: Vec<Value>,
 }
 impl Fold {
-    fn consume(&mut self, event: &Value) {
+    pub(crate) fn consume(&mut self, event: &Value) {
         let text = event["text"].as_str().unwrap_or("");
         match event["type"].as_str().unwrap_or("") {
             "token"=>self.text.push_str(text),
-            "replace_content"=>self.text=text.into(),
+            "replace_content"=>{self.text=text.into();self.text_offset=0;},
             "thinking"=>self.thinking.push_str(text),
             "notice"|"progress"=>self.notice=event["message"].as_str().unwrap_or("").into(),
-            "tool_start"=>self.tools.push(json!({"id":event["id"],"name":event["name"],"arguments":event["arguments"],"status":"running"})),
-            "tool_result"=>{if let Some(tool)=self.tools.iter_mut().find(|t|t["id"]==event["tool"]["id"]){*tool=event["tool"].clone();}else{self.tools.push(event["tool"].clone());}},
+            "tool_start"=>self.tools.push(json!({"id":event["id"],"name":event["name"],"arguments":event["arguments"],"arguments_artifact":event["arguments_artifact"],"status":"running"})),
+            "tool_result"=>{if let Some(tool)=self.tools.iter_mut().find(|t|t["id"]==event["tool"]["id"]){*tool=event["tool"].clone();}else{self.tools_total+=1;self.tools.push(event["tool"].clone());}},
             "approval"=>{self.approvals.push(event.clone());if let Some(tool)=self.tools.iter_mut().find(|t|t["id"]==event["tool_id"]){tool["status"]=json!("awaiting_approval");}},
             "approval_closed"=>{self.approvals.retain(|a|a["id"]!=event["id"]);if let Some(tool)=self.tools.iter_mut().find(|t|t["id"]==event["tool_id"]){tool["status"]=event["status"].clone();}},
             "extracted"=>self.tools.push(json!({"name":event["name"],"arguments":{"file":event["name"]},"result":text,"status":"succeeded"})),
             _=>{}
         }
+        if matches!(event["type"].as_str(),Some("tool_start"|"extracted")){self.tools_total+=1;}
+        crate::timeline::window(&mut self.tools);
+        self.text_offset+=crate::timeline::tail(&mut self.text,65536);
+        self.thinking_offset+=crate::timeline::tail(&mut self.thinking,16384);
     }
-    fn value(self) -> Value {
-        json!({"streamText":self.text,"streamThinking":self.thinking,"streamTools":self.tools,"approvals":self.approvals,"notice":self.notice})
+    pub(crate) fn value(self) -> Value {
+        json!({"streamText":self.text,"streamThinking":self.thinking,"streamTools":self.tools,"approvals":self.approvals,"notice":self.notice,"textOffset":self.text_offset,"thinkingOffset":self.thinking_offset,"toolsTotal":self.tools_total})
     }
 }
 

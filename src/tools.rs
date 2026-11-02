@@ -463,6 +463,14 @@ pub async fn execute(
     args=arguments(name,args)?;
     let root = PathBuf::from(app.settings.lock().await.workspace.clone());
     match name {
+        "read_run_log"=>{
+            let current=crate::permissions::TASK.try_with(Clone::clone).context("Нет активного запуска")?;
+            let target=args["run"].as_str().unwrap_or(&current).to_string();
+            let own=current.clone();let check=target.clone();
+            let allowed=app.tasks.access(move|conn|Ok(conn.query_row("SELECT ?1=?2 OR EXISTS(SELECT 1 FROM task_runs a JOIN task_runs b ON a.task=b.task WHERE a.run=?1 AND b.run=?2)",rusqlite::params![own,check],|r|r.get::<_,bool>(0))?)).await?;
+            anyhow::ensure!(allowed,"Журнал недоступен этой задаче");
+            Ok(app.tasks.tool_page(target,args["before"].as_i64()).await?.to_string())
+        },
         "read_artifact"=>{
             let run=crate::permissions::TASK.try_with(Clone::clone).context("Нет активного запуска")?;let id=string(&args,"id")?.to_string();
             anyhow::ensure!(app.tasks.artifact_owned(id.clone(),run).await?,"Материал недоступен этой задаче");
@@ -909,6 +917,7 @@ pub fn definitions() -> Value {
         f("poll_process","Read the state and paged stdout/stderr of this task's process. Use the returned per-stream next_offset for subsequent reads; full raw logs remain on disk. wait_ms waits for a state change or returns a partial snapshot. Running and exit_code=0 are not proof of project correctness.",json!({"execution_id":s,"wait_ms":{"type":"integer","minimum":0},"stdout_offset":{"type":"integer","minimum":0},"stderr_offset":{"type":"integer","minimum":0}}),&["execution_id"]),
         f("write_stdin","Write exact text to a managed process in this task, with confirmation. Include an actual newline when needed. Does not infer success of the operation; read subsequent output with poll_process.",json!({"execution_id":s,"text":s}),&["execution_id","text"]),
         f("stop_process","Stop this task's managed process and its owned descendants. Preserve logs and wait for process cleanup. Does not undo completed side effects.",json!({"execution_id":s}),&["execution_id"]),
+        f("read_run_log","Read original action status and saved result references from this task's durable run journal. Default is the current run; read_task lists previous runs of the same task. Pages contain 32 actions in chronological order; use next_before to read earlier pages. A succeeded action does not verify overall completion. Do not replay a mutation merely to recover its result.",json!({"run":s,"before":{"type":"integer","minimum":1}}),&[]),
         f("read_task","Read the persistent current task goal, user requests, current plan and run states. Plans are agent claims, not verified completion. Requests have stable sequence IDs; use request and offset for full text, after for the next request-index page. Observations are newest first; before_artifact pages older saved results. search_artifacts searches observations, read_artifact reads full text. Reconcile interrupted run effects before repeating mutations.",json!({"request":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"after":{"type":"integer","minimum":0},"before_artifact":{"type":"integer","minimum":1}}),&[]),
         f("security_analyze","Ask the locally installed Foundation-Sec specialist to analyze supplied evidence, such as code, logs, or actual page/tool results. Pass the relevant text and the user's question. Does not run a live exploit or verify findings. No automatic model download.",json!({"question":s,"evidence":s}),&["question","evidence"]),
         f("get_system_paths","Get actual OS user Desktop, Documents, Downloads and home paths. These are not the workspace or a drive root. Resolve these instead of guessing. @desktop/file.txt is a supported path alias.",json!({}),&[]),

@@ -111,7 +111,7 @@ fn compact_value(value:&Value,budget:&mut usize)->Value {
 }
 pub async fn archive_record(app:&crate::api::Shared,run:&str,mut record:Value)->Result<Value>{
     let name=record["name"].as_str().unwrap_or("").to_string();let text=record["result"].as_str().unwrap_or("").to_string();
-    let derived=["read_task","search_artifacts","update_plan","security_analyze","translate_text"].contains(&name.as_str());
+    let derived=["read_task","read_run_log","search_artifacts","update_plan","security_analyze","translate_text"].contains(&name.as_str());
     let source=if name=="read_artifact"&&record["status"]=="succeeded" {app.tasks.artifact(record["arguments"]["id"].as_str().unwrap_or("").into()).await?}else{
         let parsed=serde_json::from_str::<Value>(&text).ok();
         let coverage=parsed.as_ref().map(|value|json!({"start_line":value["start_line"],"end_line":value["end_line"],"has_more":value["has_more"],"next_start_line":value["next_start_line"],"next_offset":value["next_offset"],"complete":value["complete"],"start_page":value["start_page"],"end_page":value["end_page"],"total_pages":value["total_pages"]}));
@@ -122,6 +122,10 @@ pub async fn archive_record(app:&crate::api::Shared,run:&str,mut record:Value)->
         let preview=if let Ok(value)=serde_json::from_str::<Value>(&text){let mut budget=2500;let mut value=compact_value(&value,&mut budget);if let Some(object)=value.as_object_mut(){object.insert("preview_only".into(),json!(true));}value.to_string()}else{crate::tools::truncate(&text,4000)};
         record["result"]=json!(preview);record["result_preview_only"]=json!(true);
     }
+    archive_arguments(app,run,record).await
+}
+pub async fn archive_arguments(app:&crate::api::Shared,run:&str,mut record:Value)->Result<Value>{
+    let name=record["name"].as_str().unwrap_or("").to_string();
     let arguments=record["arguments"].to_string();
     if arguments.len()>8192 {
         if !["browser_action","write_stdin"].contains(&name.as_str()){

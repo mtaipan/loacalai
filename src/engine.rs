@@ -943,6 +943,7 @@ pub async fn run(
         tools: extracted,
         created: now(),
     };
+    let mut evidence=crate::timeline::Evidence::default();
     // Store partial streamed text even when cancellation or inference fails.
     let result:Result<()>=async {
         tokio::select!{_=cancel.cancelled()=>anyhow::bail!("Cancelled"),value=ensure_ollama(&app)=>value?};
@@ -953,7 +954,7 @@ pub async fn run(
             let generated=crate::api::store_upload(&app,&format!("{stem}-translated.{extension}"),&bytes).await.map_err(|error|error.0)?;
             answer.attachments.push(generated);
             answer.content=format!("Готово. Обработано {}: {}. Переведено моделью: {}.{}\n\n{}",if report["unit_kind"]=="paragraph" {"абзацев"} else {"страниц"},report["processed_units"],report["translated_units"],if report["format"]=="pdf"{format!(" Страницы {}–{} из {}.",report["start_page"],report["end_page"],report["total_pages"])}else{String::new()},report["warnings"].as_array().map(|a|a.iter().filter_map(|v|v.as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default());
-            answer.tools.push(json!({"name":"translate_document","status":"succeeded","result":report.to_string()}));
+            let tool=json!({"name":"translate_document","status":"succeeded","result":report.to_string()});evidence.observe(&tool);answer.tools.push(tool);
             emit(tx,json!({"type":"token","text":answer.content})).await?;
             chat.history.clear();
         }else if input.mode=="translate"{
@@ -1035,7 +1036,7 @@ pub async fn run(
             history.push(json!({"role":"user","content":context}));
             let mut budget = crate::agent::Budget::new(settings.agent_max_actions);
             let deadline = crate::lifecycle::deadline(settings.agent_timeout_seconds)?;
-            let turn_tools_start=answer.tools.len();
+            // Evidence counters and last relevant facts survive UI window eviction.
             let mut grounding_retry=false;
             let mut browser_claim_retry=false;
             let mut completion_retry=false;
@@ -1051,9 +1052,9 @@ pub async fn run(
                 let (_,reduced)=crate::context::prepare(&mut history,&definitions,&settings.context,&model_show,crate::context::thinking_enabled(&thinking,&model_show),if use_tools {16384}else{8192})?;
                 if reduced { emit(tx,json!({"type":"notice","message":"Старый контекст сокращён. Текущая задача и статусы действий сохранены."})).await?; }
                 let mode = if use_tools { InferenceMode::Agent(definitions) } else if simple_reply { InferenceMode::Reply } else { InferenceMode::Chat };
-                let team_evidence=crate::specialists::team_evidence(&answer.tools[turn_tools_start..]);
+                let team_evidence=crate::specialists::team_evidence(&answer.tools);
                 let mut response = if initial_task {initial_task=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_task","arguments":{}}}]})} else if let Some(url)=initial_browser.take() {json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_open","arguments":{"url":url}}}]})} else if team && !team_consulted && !team_evidence.is_empty() {crate::specialists::consultation(&input.content,&team_evidence)} else if refresh_browser {refresh_browser=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_read","arguments":{"offset":0}}}]})} else if initial_search { initial_search=false; json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"web_search","arguments":{"query":input.content,"count":5}}}]}) } else { crate::lifecycle::bounded(deadline, model(&app,&selected,&history,InferenceMode::Configured(Box::new(mode),thinking.clone(),team,["agent","team"].contains(&input.mode.as_str())),tx,&cancel)).await? };
-                if let Some(reason)=response["thinking"].as_str(){if let Some(d)=answer.diagnostics.as_mut(){let old=d["thinking"].as_str().unwrap_or("");d["thinking"]=json!(format!("{old}{reason}\n"));}}
+                if let Some(reason)=response["thinking"].as_str(){if let Some(d)=answer.diagnostics.as_mut(){let old=d["thinking"].as_str().unwrap_or("");let mut text=format!("{old}{reason}\n");let removed=crate::timeline::tail(&mut text,16384);d["thinking"]=json!(text);if removed>0{d["thinking_partial"]=json!(true);}}}
                 if let Some(d)=answer.diagnostics.as_mut(){
                     if !response["context"].is_null(){d["context"]=response["context"].clone();d["usage"]=response["usage"].clone();}
                     if response["length_limited"]==true{d["length_limited"]=json!(true);}
@@ -1073,7 +1074,7 @@ pub async fn run(
                 if calls.is_empty() {
                     let text=response["content"].as_str().unwrap_or("");
                     let browser_context=!web.last_page.is_empty() || (scope.web_only && !scope.urls.is_empty()) || chat.messages.iter().rev().take(12).any(|m|m.tools.iter().any(|t|crate::web_tools::is_web_tool(t["name"].as_str().unwrap_or(""))));
-                    if let Some(issue)=crate::agent::browser_claim_issue(text,&answer.tools[turn_tools_start..],browser_context) {
+                    if let Some(issue)=crate::agent::browser_claim_counted(text,browser_context,evidence.opened,evidence.read,evidence.browser_actions) {
                         if !browser_claim_retry && use_tools {
                             browser_claim_retry=true;
                             if let Some(d)=answer.diagnostics.as_mut(){d["browser_claim_retry"]=json!(true);d["unverified_browser_reply"]=json!(text);}
@@ -1105,7 +1106,7 @@ pub async fn run(
                         break;
                     }
                     if use_tools {
-                        if let Some(issue)=scope.completion_issue(&answer.tools[turn_tools_start..]) {
+                        if let Some(issue)=scope.completion_issue(&evidence.mutation) {
                             if !completion_retry {
                                 completion_retry=true;
                                 if let Some(d)=answer.diagnostics.as_mut(){d["completion_retry"]=json!(true);d["unverified_reply"]=json!(text);}
@@ -1120,14 +1121,14 @@ pub async fn run(
                             break;
                         }
                     }
-                    if use_tools && !grounding_retry && crate::agent::needs_grounding(text,&answer.tools[turn_tools_start..]) {
+                    if use_tools && !grounding_retry && crate::agent::needs_grounding(text,&evidence.file) {
                         grounding_retry=true;
                         if let Some(d)=answer.diagnostics.as_mut(){d["grounding_retry"]=json!(true);d["discarded_reply"]=json!(text);}
                         history[0]["content"]=json!(format!("{}\nExecution correction for this turn: read the successful tool results already in this conversation. They contain actual file data or verified changes. Explain the concrete result and any actual errors. Do not ask the user to repeat an operation that already succeeded. Do not repeat completed tool calls just to restate their result.",history[0]["content"].as_str().unwrap_or("")));
                         emit(tx,json!({"type":"notice","message":"Перепроверяю ответ модели по фактическим результатам инструментов…"})).await?;
                         continue;
                     }
-                    if use_tools && grounding_retry && crate::agent::needs_grounding(text,&answer.tools[turn_tools_start..]) {
+                    if use_tools && grounding_retry && crate::agent::needs_grounding(text,&evidence.file) {
                         if let Some(d)=answer.diagnostics.as_mut(){d["grounding_warning"]=json!(true);}
                     }
                     answer.content.push_str(text);
@@ -1159,7 +1160,9 @@ pub async fn run(
                     history[assistant_index]["tool_calls"][index]["function"]["arguments"]=tools::public_arguments(name,&args);
                     let id=uuid::Uuid::new_v4().to_string();
                     let action_started=std::time::Instant::now();
-                    emit(tx,json!({"type":"tool_start","id":id,"name":name,"arguments":tools::public_arguments(name,&args),"status":"running"})).await?;
+                    let run=crate::permissions::TASK.try_with(Clone::clone).context("Нет источника журнала инструмента")?;
+                    let start=crate::artifacts::archive_arguments(&app,&run,json!({"type":"tool_start","id":id,"name":name,"arguments":tools::public_arguments(name,&args),"status":"running"})).await?;
+                    emit(tx,start).await?;
                     if team && name=="security_analyze" {emit(tx,json!({"type":"notice","message":"Foundation-Sec анализирует переданные материалы…"})).await?;}
                     let allowed = if deadline.is_some_and(|at|tokio::time::Instant::now() >= at) { Err("Истёк заданный срок задачи. Новые действия остановлены.") } else { budget.reserve(name,&args) };
                     let result = match allowed {
@@ -1198,14 +1201,14 @@ pub async fn run(
                     let record=json!({"id":id,"name":name,"arguments":tools::public_arguments(name,&args),"status":status,"result":text,"exit_code":exit_code,"duration_ms":action_started.elapsed().as_millis().min(u64::MAX as u128) as u64});
                     let run=crate::permissions::TASK.try_with(Clone::clone).context("Нет источника журнала инструмента")?;
                     let record=crate::artifacts::archive_record(&app,&run,record).await?;
-                    answer.tools.push(record.clone());
+                    app.tasks.persist_tool(run.clone(),record.clone()).await?;evidence.observe(&record);answer.tools.push(record.clone());crate::timeline::window(&mut answer.tools);
                     emit(tx,json!({"type":"tool_result","tool":record})).await?;
                     history.push(json!({"role":"tool","tool_name":name,"content":crate::artifacts::context_reference(crate::agent::tool_context(name,status,&text,exit_code),&record["result_artifact"])}));
                     if stale_ref {
                         for pending in calls.iter().skip(index+1){
                             let pending_name=pending["function"]["name"].as_str().unwrap_or("");
                             let skipped=json!({"id":uuid::Uuid::new_v4().to_string(),"name":pending_name,"arguments":tools::public_arguments(pending_name,&pending["function"]["arguments"]),"status":"skipped","result":"Не выполнялось: страница изменилась, требуется новое чтение."});
-                            answer.tools.push(skipped.clone());emit(tx,json!({"type":"tool_result","tool":skipped})).await?;
+                            app.tasks.persist_tool(run.clone(),skipped.clone()).await?;evidence.observe(&skipped);answer.tools.push(skipped.clone());crate::timeline::window(&mut answer.tools);emit(tx,json!({"type":"tool_result","tool":skipped})).await?;
                             history.push(json!({"role":"tool","tool_name":pending_name,"content":"Skipped: stale page refs. Read the current page and reassess; do not replay the old batch."}));
                         }
                         if stale_retries>=2{answer.content="Страница несколько раз менялась во время действий. Выполнение остановлено; оставшиеся нажатия и ввод не выполнялись. Уточните следующий шаг или продолжите вручную в браузере.".into();emit(tx,json!({"type":"replace_content","text":answer.content})).await?;break 'agent_loop;}
@@ -1219,7 +1222,7 @@ pub async fn run(
                         for pending in calls.iter().skip(index+1) {
                             let pending_name=pending["function"]["name"].as_str().unwrap_or("");
                             let skipped=json!({"id":uuid::Uuid::new_v4().to_string(),"name":pending_name,"arguments":tools::public_arguments(pending_name,&pending["function"]["arguments"]),"status":"skipped","result":if status=="needs_input"{"Не выполнялось: для заполнения формы нужны данные пользователя."}else{"Не выполнялось: цепочка остановлена после отказа или отмены."}});
-                            answer.tools.push(skipped.clone());
+                            app.tasks.persist_tool(run.clone(),skipped.clone()).await?;evidence.observe(&skipped);answer.tools.push(skipped.clone());crate::timeline::window(&mut answer.tools);
                             emit(tx,json!({"type":"tool_result","tool":skipped})).await?;
                             history.push(json!({"role":"tool","tool_name":pending_name,"content":json!({"status":"skipped","result":"Не выполнялось"}).to_string()}));
                         }
@@ -1259,9 +1262,9 @@ pub async fn run(
             answer.content.push_str(&format!("\n\n⚠ {error:#}"));
         }
     }
-    if let Some(diagnostics) = answer.diagnostics.as_mut() {
-        diagnostics["execution"] = crate::agent::execution_report(&answer.tools);
-    }
+    let run=crate::permissions::TASK.try_with(Clone::clone).unwrap_or_default();
+    answer.diagnostics.get_or_insert_with(||json!({}))["execution"]=evidence.report(&answer.tools,&run);
+
     answer.duration_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
     chat.messages.push(answer);
     chat.updated = now();

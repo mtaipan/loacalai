@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -100,6 +99,7 @@ pub fn needs_grounding(text: &str, tools: &[serde_json::Value]) -> bool {
 /// A bounded check for categorical browser claims. Browser actions and page
 /// text do not independently verify authentication or an exploited weakness.
 /// Describe observed evidence instead; never promote a click to a login proof.
+#[cfg(test)]
 pub fn browser_claim_issue(
     text: &str,
     tools: &[serde_json::Value],
@@ -117,6 +117,25 @@ pub fn browser_claim_issue(
     if !browser_context && browser_tools.is_empty() {
         return None;
     }
+    let opened = browser_tools
+        .iter()
+        .filter(|t| t["status"] == "succeeded" && t["name"] == "browser_open")
+        .count();
+    let read = browser_tools
+        .iter()
+        .filter(|t| {
+            t["status"] == "succeeded"
+                && matches!(t["name"].as_str(), Some("browser_read" | "fetch_url"))
+        })
+        .count();
+    let actions = browser_tools
+        .iter()
+        .filter(|t| t["status"] == "succeeded" && t["name"] == "browser_action")
+        .count();
+    browser_claim_counted(text,browser_context,opened,read,actions)
+}
+pub fn browser_claim_counted(text:&str,browser_context:bool,opened:usize,read:usize,actions:usize)->Option<String>{
+    if !browser_context&&opened+read+actions==0{return None;}
     let lower = text.to_lowercase();
     let claims = [
         "авторизация выполнена",
@@ -162,21 +181,6 @@ pub fn browser_claim_issue(
     if !unsupported_claim {
         return None;
     }
-    let opened = browser_tools
-        .iter()
-        .filter(|t| t["status"] == "succeeded" && t["name"] == "browser_open")
-        .count();
-    let read = browser_tools
-        .iter()
-        .filter(|t| {
-            t["status"] == "succeeded"
-                && matches!(t["name"].as_str(), Some("browser_read" | "fetch_url"))
-        })
-        .count();
-    let actions = browser_tools
-        .iter()
-        .filter(|t| t["status"] == "succeeded" && t["name"] == "browser_action")
-        .count();
     Some(format!("Подтверждения входа в аккаунт или взлома нет. За этот запрос выполнено: открытий страницы — {opened}, чтений — {read}, действий в браузере — {actions}. Успешный вызов инструмента не доказывает авторизацию или уязвимость. Нужны конкретные наблюдения и проверка результата; непроведённые проверки нельзя считать успешными."))
 }
 
@@ -274,28 +278,22 @@ pub fn tool_context(name: &str, status: &str, text: &str, exit_code: Option<i32>
 pub struct Budget {
     pub used: usize,
     limit: usize,
-    attempts: HashMap<String, usize>,
 }
 impl Budget {
     pub fn new(limit: usize) -> Self {
         Self {
             used: 0,
             limit,
-            attempts: HashMap::new(),
         }
     }
-    pub fn reserve(&mut self, name: &str, args: &serde_json::Value) -> Result<(), &'static str> {
+    pub fn reserve(&mut self, _name: &str, _args: &serde_json::Value) -> Result<(), &'static str> {
         if self.limit != 0 && self.used >= self.limit {
             return Err("Достигнут лимит действий. Продолжите новой репликой.");
         }
-        let key = format!("{name}:{}", args);
-        *self.attempts.entry(key).or_default() += 1;
         self.used += 1;
         Ok(())
     }
-    pub fn files_changed(&mut self) {
-        self.attempts.clear();
-    }
+    pub fn files_changed(&mut self) {}
 }
 
 pub fn attachment_review_request(text: &str) -> bool {
@@ -493,6 +491,24 @@ pub fn fit_history(history: &mut Vec<serde_json::Value>, limit: usize) -> anyhow
             item["content"] = serde_json::json!(reduced);
             shortened = true;
             continue;
+        }
+        // Old completed tool rounds are recoverable from the durable run log.
+        // Keep the user's complete current request, never leave orphan replies,
+        // and keep one checkpoint instead of growing a chain of summaries.
+        if let Some(start)=history.iter().position(|m|m["role"]=="assistant"&&m["tool_calls"].as_array().is_some_and(|calls|!calls.is_empty())){
+            let calls=history[start]["tool_calls"].as_array().unwrap();
+            let end=(start+1..history.len()).find(|i|history[*i]["role"]!="tool").unwrap_or(history.len());
+            let complete=end-start-1==calls.len()&&calls.iter().zip(&history[start+1..end]).all(|(call,result)|call["function"]["name"]==result["tool_name"]);
+            if complete{
+                let count=calls.len() as u64;
+                history.drain(start..end);
+                if let Some(old)=history.iter_mut().find(|m|m["_run_checkpoint"]==true){
+                    old["rounds_archived"]=serde_json::json!(old["rounds_archived"].as_u64().unwrap_or(0)+count);
+                }else{
+                    history.insert(start,serde_json::json!({"role":"assistant","_run_checkpoint":true,"rounds_archived":count,"content":"Earlier completed tool calls were moved out of the model context. Their exact status, arguments and result references remain in read_run_log; read_task lists run IDs. Saved observations are accessible through search_artifacts/read_artifact. Do not repeat mutations to recover their output. This checkpoint is not evidence that the project is complete."}));
+                }
+                shortened=true;continue;
+            }
         }
         anyhow::bail!("Обязательный текущий контекст не помещается в выбранное окно ({limit} токенов по оценке); текущий запрос не сокращён.");
     }
@@ -931,6 +947,21 @@ mod tests {
         for _ in 0..100 {
             assert!(unlimited.reserve("read_file", &args).is_ok());
         }
+    }
+    #[test]
+    fn daylong_tool_context_uses_one_recoverable_checkpoint(){
+        use serde_json::json;
+        let original="Original task 🦀 must survive every checkpoint";
+        let mut history=vec![json!({"role":"system","content":"Use the saved task and actual evidence"}),json!({"role":"user","content":original})];
+        for index in 0..500{
+            history.push(json!({"role":"assistant","tool_calls":[{"function":{"name":"read_artifact","arguments":{"id":format!("source-{index}")}}}]}));
+            history.push(json!({"role":"tool","tool_name":"read_artifact","content":json!({"status":"succeeded","artifact":{"id":format!("source-{index}")},"result":"a short saved observation"}).to_string()}));
+            fit_history(&mut history,1500).unwrap();
+            assert!(crate::context::history_tokens(&history)<=1500);assert_eq!(history[1]["content"],original);
+            assert!(history.iter().filter(|item|item["_run_checkpoint"]==true).count()<=1);
+            for (i,item) in history.iter().enumerate(){if item["role"]=="tool"{assert_eq!(history[i-1]["role"],"assistant");assert!(history[i-1]["tool_calls"].is_array());}}
+        }
+        assert!(history.iter().any(|item|item["rounds_archived"].as_u64().is_some_and(|count|count>400)));
     }
     #[test]
     fn context_keeps_current_task_and_whole_rounds() {
