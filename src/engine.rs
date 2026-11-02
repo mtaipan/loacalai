@@ -905,7 +905,7 @@ pub async fn run(
         created: now(),
     });
     chat.updated = now();
-    app.save(&chat).await?;
+    chat=app.save(chat).await?;
     let mut context = input.content.clone();
     let mut extracted = vec![];
     let mut translation_input = input.content.clone();
@@ -957,7 +957,7 @@ pub async fn run(
     if let Some(user) = chat.messages.last_mut() {
         user.material = Some(context.clone());
     }
-    app.save(&chat).await?;
+    chat=app.save(chat).await?;
     let mut answer = Message {
         material: None,
         diagnostics: None,
@@ -1347,7 +1347,7 @@ pub async fn run(
     answer.duration_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
     chat.messages.push(answer);
     chat.updated = now();
-    app.save(&chat).await?;
+    chat=app.save(chat).await?;
     emit(tx, json!({"type":"saved","conversation_id":chat.id,"updated":chat.updated,"message_count":chat.messages.len(),"ref_only":true})).await?;
     result
 }

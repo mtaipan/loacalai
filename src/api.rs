@@ -253,7 +253,7 @@ pub struct App {
     pub runs: Mutex<HashMap<String, Run>>,
     pub approvals: Mutex<HashMap<String, crate::permissions::Pending>>,
     pub grants: Mutex<crate::permissions::Grants>,
-    pub storage: Mutex<()>,
+    pub storage: Arc<Mutex<()>>,
     pub file_changes: Mutex<()>,
     pub startup: Mutex<()>,
     pub compute: Mutex<crate::compute::Runtime>,
@@ -339,7 +339,7 @@ impl App {
             settings: Mutex::new(settings),
             runs: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
-            storage: Mutex::new(()),
+            storage: Arc::new(Mutex::new(())),
             file_changes: Mutex::new(()),
             startup: Mutex::new(()),
             compute: Mutex::new(compute),
@@ -358,6 +358,10 @@ impl App {
         Ok(self.data.join("chats").join(format!("{id}.json")))
     }
     pub async fn load(&self, id: &str) -> anyhow::Result<Conversation> {
+        let _storage=self.storage.lock().await;
+        self.load_locked(id).await
+    }
+    async fn load_locked(&self,id:&str)->anyhow::Result<Conversation>{
         if self.tasks.is_deleted(id.into()).await? {
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Чат удалён").into());
         }
@@ -381,17 +385,42 @@ impl App {
         }).await??;
         for message in &mut chat.messages{for tool in &mut message.tools{crate::tools::public_record(tool);}}Ok(chat)
     }
-    pub async fn save(&self, chat: &Conversation) -> anyhow::Result<()> {
-        let _guard = self.storage.lock().await;
+    pub async fn save(&self, chat:Conversation) -> anyhow::Result<Conversation> {
+        let guard=self.storage.clone().lock_owned().await;
         anyhow::ensure!(!self.tasks.is_deleted(chat.id.clone()).await?, "Чат удалён");
-        let path = self.chat_path(&chat.id)?;
-        let bytes = serde_json::to_vec_pretty(chat)?;
-        tokio::task::spawn_blocking(move || crate::changes::replace(&path, &bytes)).await??;
-        Ok(())
+        let path=self.chat_path(&chat.id)?;
+        tokio::task::spawn_blocking(move||->anyhow::Result<Conversation>{
+            // Ownership avoids cloning history; keep exclusion even if the async caller is cancelled.
+            let _guard=guard;
+            crate::changes::PreparedReplacement::write(&path,|file|{
+                let mut writer=std::io::BufWriter::with_capacity(64*1024,file);
+                serde_json::to_writer_pretty(&mut writer,&chat)?;
+                std::io::Write::flush(&mut writer)?;Ok(())
+            })?.commit()?;Ok(chat)
+        }).await?
     }
 }
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+#[cfg(test)]
+mod storage_tests{
+    use super::*;
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn cancelled_save_worker_cannot_resurrect_a_deleted_conversation(){
+        let root=std::env::temp_dir().join(format!("chat-save-{}",Uuid::new_v4()));let app=Arc::new(App::new(root.clone()).unwrap());
+        let id=Uuid::new_v4().to_string();let chat=Conversation{id:id.clone(),title:"fixture".into(),updated:now(),mode:"chat".into(),messages:vec![],history:vec![],history_model:String::new(),history_workspace:String::new(),history_task:String::new()};
+        let mut chat=app.save(chat).await.unwrap();chat.messages.push(Message{id:"large".into(),role:"user".into(),content:"\0".repeat(16*1024*1024),created:now(),material:None,diagnostics:None,duration_ms:None,model:None,attachments:vec![],tools:vec![]});
+        let writer=app.clone();let save=tokio::spawn(async move{writer.save(chat).await});
+        let staged=tokio::time::timeout(std::time::Duration::from_secs(10),async{loop{
+            if std::fs::read_dir(app.data.join("chats")).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().starts_with(".local-gemma-")){break;}
+            assert!(!save.is_finished(),"Fixture serialization ended before cancellation could be injected");tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }}).await;assert!(staged.is_ok());
+        save.abort();assert!(matches!(save.await,Err(error) if error.is_cancelled()));
+        assert!(delete_chat(State(app.clone()),Path(id.clone())).await.is_ok());
+        assert!(!app.chat_path(&id).unwrap().exists());assert!(app.tasks.is_deleted(id).await.unwrap());
+        assert_eq!(std::fs::read_dir(app.data.join("chats")).unwrap().count(),0);drop(app);std::fs::remove_dir_all(root).unwrap();
+    }
 }
 pub fn router(app: Shared) -> Router {
     Router::new()
@@ -846,7 +875,7 @@ async fn new_chat(State(app): State<Shared>, Json(value): Json<Value>) -> ApiRes
         messages: vec![],
         history: vec![],
     };
-    app.save(&chat).await?;
+    let chat=app.save(chat).await?;
     Ok(Json(chat.into()))
 }
 async fn chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<ConversationView> {
@@ -869,7 +898,7 @@ async fn rename(
         .chars()
         .take(100)
         .collect();
-    app.save(&chat).await?;
+    let chat=app.save(chat).await?;
     Ok(Json(chat.into()))
 }
 async fn delete_chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
@@ -1201,7 +1230,7 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
     if header.count>0&&input.mode!="translate"&&!crate::agent::reply_only(&input.content)&&app.tasks.needs_legacy_import(input.conversation.clone()).await?{
         // Do not hold the runs mutex while reading a large legacy file: Stop must stay responsive.
         // Deletion/save use the storage guard, so a late import cannot resurrect a deleted chat.
-        let _storage=app.storage.lock().await;let legacy=app.load(&input.conversation).await?;
+        let _storage=app.storage.lock().await;let legacy=app.load_locked(&input.conversation).await?;
         app.tasks.import_legacy_requests(&legacy,app.settings.lock().await.workspace.clone()).await?;
     }
     {
@@ -1305,8 +1334,9 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
                         created: now(),
                     });
                     chat.updated = now();
-                    let _ = worker.save(&chat).await;
-                    let _ = tx.send(json!({"type":"saved","conversation_id":chat.id,"updated":chat.updated,"message_count":chat.messages.len(),"ref_only":true})).await;
+                    if let Ok(chat)=worker.save(chat).await{
+                        let _ = tx.send(json!({"type":"saved","conversation_id":chat.id,"updated":chat.updated,"message_count":chat.messages.len(),"ref_only":true})).await;
+                    }
                 }
             }
             eprintln!("Chat {conversation}: {diagnostic}");

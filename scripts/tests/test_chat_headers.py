@@ -20,8 +20,8 @@ fixture=ThreadingHTTPServer(('127.0.0.1',0),Engine);threading.Thread(target=fixt
 with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
 base=f'http://127.0.0.1:{port}';http=urllib.request.build_opener(urllib.request.ProxyHandler({}));token='';log=(root/'test.log').open('w')
 process=subprocess.Popen([os.environ.get('LOCAL_GEMMA_TEST_EXE',str(project/'target/release/local-gemma-studio.exe')),'--server'],cwd=root,env={**os.environ,'LOCAL_GEMMA_HOME':str(root),'LOCAL_GEMMA_PORT':str(port),'LOCAL_GEMMA_OLLAMA':f'http://127.0.0.1:{fixture.server_port}'},stdout=log,stderr=log)
-def call(path,body=None):
-    with http.open(urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),headers={'Content-Type':'application/json','X-Studio-Token':token}),timeout=30) as response:return json.load(response)
+def call(path,body=None,method=None):
+    with http.open(urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),headers={'Content-Type':'application/json','X-Studio-Token':token},method=method),timeout=30) as response:return json.load(response)
 def peak():
     if os.name!='nt':return None
     class Counters(ctypes.Structure):_fields_=[('cb',ctypes.c_uint32),('faults',ctypes.c_uint32)]+[(key,ctypes.c_size_t) for key in ['peak','working','page_peak','page','nonpage_peak','nonpage','pagefile','pagefile_peak']]
@@ -46,6 +46,14 @@ try:
     assert len(view['messages'][0]['content'])==32*1024*1024 and view['messages'][1]['content']=='second'
     assert path.stat().st_size>64*1024*1024
     print('PASS browser conversation view excludes working model history while retaining full visible messages and original file')
+    renamed=call('/api/chats/'+id,{'title':'Streaming save 🦀'},method='PATCH')
+    assert renamed['title']=='Streaming save 🦀' and len(renamed['messages'][0]['content'])==32*1024*1024
+    with path.open(encoding='utf-8') as file:persisted=json.load(file)
+    assert persisted['title']==renamed['title'] and len(persisted['history'][0]['content'])==32*1024*1024
+    assert len(persisted['messages'][0]['content'])==32*1024*1024 and persisted['messages'][1]['content']=='second'
+    assert not list(path.parent.glob('.local-gemma-*.tmp'))
+    print('PASS large legacy rename streams atomic serialization, preserves full model history and visible messages, removes its temporary')
+    del persisted,renamed,view
     new=call('/api/chats',{});assert len(call('/api/chats'))==2
     request=urllib.request.Request(base+'/api/chats/'+id,method='DELETE',headers={'X-Studio-Token':token})
     with http.open(request):pass

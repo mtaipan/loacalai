@@ -67,10 +67,13 @@ impl Drop for PreparedReplacement {
 impl PreparedReplacement {
     pub fn new(path:&Path,bytes:&[u8])->Result<Self>{
         use std::io::Write;
+        Self::write(path,|file|{file.write_all(bytes)?;Ok(())})
+    }
+    pub fn write<F>(path:&Path,write:F)->Result<Self> where F:FnOnce(&mut fs::File)->Result<()>{
         let parent=path.parent().context("Нет родительской папки")?;fs::create_dir_all(parent)?;
         let staged=Self{path:path.to_owned(),temporary:parent.join(format!(".local-gemma-{}.tmp",uuid::Uuid::new_v4()))};
         let mut file=fs::OpenOptions::new().write(true).create_new(true).open(&staged.temporary)?;
-        file.write_all(bytes)?;
+        write(&mut file)?;
         #[cfg(unix)]
         match fs::metadata(path){Ok(metadata)=>file.set_permissions(metadata.permissions())?,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},Err(error)=>return Err(error.into())}
         file.sync_all()?;drop(file);Ok(staged)
@@ -317,6 +320,15 @@ pub fn preview_encoded(before:Option<&[u8]>,after:Option<&[u8]>,encoding:&str)->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn streaming_serialization_failure_leaves_original_and_removes_its_temporary(){
+        use std::io::Write;
+        let root=std::env::temp_dir().join(format!("stream-save-{}",uuid::Uuid::new_v4()));fs::create_dir_all(&root).unwrap();let path=root.join("chat.json");fs::write(&path,b"original").unwrap();
+        let failure=PreparedReplacement::write(&path,|file|{file.write_all(b"partially serialized")?;anyhow::bail!("fixture serializer failed")});
+        assert!(failure.is_err());assert_eq!(fs::read(&path).unwrap(),b"original");assert_eq!(fs::read_dir(&root).unwrap().count(),1);
+        PreparedReplacement::write(&path,|file|{let mut writer=std::io::BufWriter::new(file);serde_json::to_writer(&mut writer,&json!({"content":"text 🦀\r\n\"quoted\""}))?;writer.flush()?;Ok(())}).unwrap().commit().unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap()["content"],"text 🦀\r\n\"quoted\"");fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn encoded_edits_preserve_bom_endianness_crlf_and_legacy_bytes(){
         let source="строка\r\nстарое значение 🦀\r\n";
