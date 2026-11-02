@@ -105,7 +105,7 @@ function buildShell() {
   if(innerWidth<761)document.body.classList.add('sidebar-hidden');
   setupTeamUI();setupSearchUI();setupUI();setupStreamSelection();bindEvents();setMode(state.mode);setTheme();
 }
-document.addEventListener('change',event=>{if(event.target.id==='recent-projects'&&event.target.value){$('#project-path').value=event.target.value;projectRequest++;$('#project-overview').innerHTML='';$('#project-git-output').textContent='';}if(event.target.id==='project-path'){projectRequest++;$('#project-overview').innerHTML='';$('#project-git-output').textContent='';}});
+document.addEventListener('change',event=>{if(event.target.id==='recent-projects'&&event.target.value){$('#project-path').value=event.target.value;projectReset();$('#project-overview').innerHTML='';$('#project-git-output').textContent='';}if(event.target.id==='project-path'){projectReset();$('#project-overview').innerHTML='';$('#project-git-output').textContent='';}});
 function setTheme(){const theme=state.settings.theme;document.body.classList.toggle('light',theme==='light'||theme==='system'&&matchMedia('(prefers-color-scheme: light)').matches);}
 function setMode(mode){closeModelMenu();if(!modes[mode])return;state.mode=mode;document.querySelectorAll('[data-mode]').forEach(button=>{button.classList.toggle('selected',button.dataset.mode===mode);button.setAttribute('aria-selected',button.dataset.mode===mode);button.tabIndex=button.dataset.mode===mode?0:-1;});$('#languages').classList.toggle('visible',mode==='translate');$('#model-name').textContent=modelName(state.settings[modelField(mode)]);renderActiveModel();renderTeamMode();renderSearchMode();$('#prompt').placeholder=modes[mode].placeholder;localStorage.setItem('gemma.mode',mode);}
 function renderChats(){const query=$('#chat-search').value.toLocaleLowerCase();const chats=state.chats.filter(chat=>chat.title.toLocaleLowerCase().includes(query));const html=chats.length?chats.map(chat=>`<div data-chat-row="${chat.id}" class="chat-row ${state.chat?.id===chat.id?'active':''}"><button data-chat="${chat.id}" title="${escapeHtml(chat.title)}">${icon(modes[chat.mode]?.icon||'chat')}<span>${escapeHtml(chat.title)}</span>${viewSessions.get(chat.id)?.busy?`<small class="chat-run-state">${viewSessions.get(chat.id).approvals.length?"Нужно решение":"В работе"}</small>`:""}</button><button class="chat-more" data-chat-menu="${chat.id}" aria-label="Действия с чатом">⋯</button></div>`).join(''):`<p class="empty-list">${query?'Ничего не найдено':'Здесь появятся ваши диалоги.<br>Начните с первого сообщения.'}</p>`;const focus=document.activeElement;const key=focus?.dataset.chat||focus?.dataset.chatMenu;syncCards($('#chat-list'),html,'data-chat-row');if(key)document.querySelector('[data-chat="'+key+'"],[data-chat-menu="'+key+'"]')?.focus({preventScroll:true});}
@@ -128,23 +128,35 @@ function actionStatus(tool,pending=false){
   if(/^Остановлено пользователем/.test(text))return 'cancelled';
   return 'legacy';
 }
-let projectRequest=0;
+let projectRequest=0,projectPage=null,projectController=null;
+function projectReset(){projectRequest++;projectController?.abort();projectController=null;projectPage=null;}
 async function showProjects(){
- const fresh=await api('/api/bootstrap');state.settings=fresh.settings;
+ projectReset();const fresh=await api('/api/bootstrap');state.settings=fresh.settings;
  $('#project-path').value=state.settings.workspace;
  $('#recent-projects').innerHTML='<option value="">Выбрать недавний проект…</option>'+(state.settings.recent_projects||[]).map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
  $('#project-overview').innerHTML='';$('#project-git-output').textContent='';$('#projects-dialog').showModal();
 }
-async function inspectProject(){
- const request=++projectRequest,path=$('#project-path').value.trim();$('#project-overview').textContent='Чтение структуры проекта…';
- try{const project=await api('/api/project/inspect',{method:'POST',body:{path}});if(request!==projectRequest)return;
- $('#project-overview').innerHTML=`<div class="project-overview"><strong>${escapeHtml(project.root)}</strong><p>${escapeHtml(project.technologies.join(' · ')||'Тип проекта не определён')} · ${project.files.length} путей в обзоре</p><p class="form-help">Это ограниченный обзор: зависимости и артефакты сборки пропускаются. Предложенные команды ещё не выполнялись.</p><div class="project-checks">${project.suggested_checks.map(c=>`<div><code>${escapeHtml(c.command)}</code><span>${escapeHtml(c.reason)}</span><button class="button" data-project-command="${escapeHtml(c.command)}" data-project-directory="${escapeHtml(project.root)}">Вставить в запрос</button></div>`).join('')}</div><details><summary>Структура проекта</summary><pre>${escapeHtml(project.files.map(f=>(f.directory?'▸ ':'  ')+f.path).join('\n'))}</pre></details><details><summary>Файлы конфигурации</summary>${project.manifests.map(m=>`<h4>${escapeHtml(m.path)}${m.truncated?' · сокращено':''}</h4><pre>${escapeHtml(m.text)}</pre>`).join('')}</details></div>`;
- }catch(error){if(request===projectRequest)$('#project-overview').textContent=error.message;}
+function renderProject(project){
+ $('#project-overview').innerHTML=`<div class="project-overview"><strong>${escapeHtml(project.root)}</strong><p>${escapeHtml(project.technologies.join(' · ')||'Тип проекта не определён')} · ${project.files.length} путей в этом пакете</p><p class="form-help">${project.has_more?'Есть следующие пакеты.':project.complete?'Обход завершён.':'Обход завершён с пропусками.'} Проверено записей: ${project.checked_entries}. Пропусков: ${project.inaccessible_or_excluded}. Каталоги читаются последовательно; файлы могут измениться во время обхода. Предложенные команды ещё не выполнялись.</p><div class="project-checks">${project.suggested_checks.map(c=>`<div><code>${escapeHtml(c.command)}</code><span>${escapeHtml(c.reason)}</span><button class="button" data-project-command="${escapeHtml(c.command)}" data-project-directory="${escapeHtml(project.root)}">Вставить в запрос</button></div>`).join('')}</div><pre>${escapeHtml(project.files.map(f=>(f.directory?'▸ ':'  ')+f.path).join('\n'))}</pre><div class="project-pages">${project.previous_cursor?`<button class="button" data-project-cursor="${escapeHtml(project.previous_cursor)}">Назад</button>`:''}${project.next_cursor?`<button class="button" data-project-cursor="${escapeHtml(project.next_cursor)}">Далее</button>`:''}</div><div role="status" id="project-page-status"></div>${project.errors?.length?`<pre>${escapeHtml(project.errors.map(e=>`${e.path||e.path_display||''}: ${e.error}`).join('\n'))}</pre>`:''}<details><summary>Файлы конфигурации</summary>${project.manifests.map(m=>`<h4>${escapeHtml(m.path)}${m.truncated?' · сокращено':''}</h4><pre>${escapeHtml(m.text)}</pre>`).join('')}</details></div>`;
 }
+async function inspectProject(cursor=null){
+ projectController?.abort();const controller=new AbortController();projectController=controller;
+ const request=++projectRequest,path=cursor&&projectPage?projectPage.root:$('#project-path').value.trim();
+ if(!cursor){projectPage=null;$('#project-overview').textContent='Чтение структуры проекта…';}
+ else{$('#project-page-status').textContent='Чтение следующего пакета…';$('#project-overview').querySelectorAll('[data-project-cursor]').forEach(b=>b.disabled=true);}
+ try{const project=await api('/api/project/inspect',{method:'POST',body:{path,...(cursor?{cursor}:{})},signal:controller.signal});if(request!==projectRequest||!$('#projects-dialog').open)return;
+ projectPage=project;renderProject(project);
+ }catch(error){if(request!==projectRequest||error.name==='AbortError')return;
+ if(projectPage){renderProject(projectPage);$('#project-page-status').textContent=error.message;const retry=document.createElement('button');retry.className='button';retry.textContent='Повторить';retry.dataset.projectCursor=cursor;$('#project-page-status').append(retry);}
+ else $('#project-overview').textContent=error.message;
+ }finally{if(request===projectRequest)projectController=null;}
+}
+document.addEventListener('click',event=>{const button=event.target.closest('[data-project-cursor]');if(button)inspectProject(button.dataset.projectCursor);});
+document.addEventListener('close',event=>{if(event.target.id==='projects-dialog')projectReset();},true);
 async function useProject(){
  if(state.busy){toast('Сначала остановите текущую задачу.');return;}
- const path=$('#project-path').value.trim();await api('/api/project/inspect',{method:'POST',body:{path}});
- const fresh=await api('/api/bootstrap');state.settings=await api('/api/settings',{method:'POST',body:{...fresh.settings,workspace:path}});
+ const path=$('#project-path').value.trim(),project=await api('/api/project/inspect',{method:'POST',body:{path}});
+ const fresh=await api('/api/bootstrap');state.settings=await api('/api/settings',{method:'POST',body:{...fresh.settings,workspace:project.root}});
  updateWorkspace();$('#projects-dialog').close();toast('Открыт проект: '+state.settings.workspace);
  if($('#file-panel').classList.contains('visible'))await refreshTree();
 }

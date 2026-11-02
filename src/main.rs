@@ -9,6 +9,7 @@ mod documents;
 mod engine;
 mod executions;
 mod filesystem;
+mod discovery;
 mod lifecycle;
 mod legacy;
 mod instance;

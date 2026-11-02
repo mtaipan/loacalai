@@ -834,6 +834,8 @@ async fn delete_chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
     tokio::fs::metadata(&path).await?;
     let task_ids=app.tasks.work_task_ids(id.clone()).await?;
     app.grants.lock().await.forget_work_tasks(&app.data,&task_ids)?;
+    let run_ids=app.tasks.conversation_run_ids(id.clone()).await?;
+    crate::discovery::forget(app.data.clone(),task_ids,run_ids).await?;
     app.tasks.delete_conversation(id).await?;
     tokio::fs::remove_file(path).await?;
     Ok(Json(json!({"ok":true})))
@@ -968,11 +970,9 @@ async fn tree(State(app): State<Shared>) -> ApiResult<Value> {
     Ok(Json(json!(tools::file_tree(&root)?)))
 }
 async fn inspect_project(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<Value> {
-    let root = crate::projects::directory(&app, value["path"].as_str()).await?;
-    let cancel = app.shutdown.child_token();
-    Ok(Json(
-        tokio::task::spawn_blocking(move || crate::projects::inspect(&root, &cancel)).await??,
-    ))
+    let cancel=app.shutdown.child_token();
+    let _cancel_on_disconnect=cancel.clone().drop_guard();
+    Ok(Json(crate::discovery::tool(&app,"inspect_project",value,&cancel).await?))
 }
 async fn project_git(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<Value> {
     let root = crate::projects::directory(&app, value["path"].as_str()).await?;

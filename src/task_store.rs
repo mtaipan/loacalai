@@ -85,6 +85,13 @@ impl Store {
     pub async fn is_deleted(&self, id: String) -> Result<bool> {
         self.access(move |conn| Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM deleted_conversations WHERE id=?1)", [id], |r|r.get(0))?)).await
     }
+    pub async fn conversation_run_ids(&self, id:String)->Result<Vec<String>> {
+        self.access(move|conn|{
+            let mut query=conn.prepare("SELECT id FROM runs WHERE conversation=?1")?;
+            let rows=query.query_map([id],|r|r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+        }).await
+    }
     /// A persistent tombstone closes the JSON/SQLite crash window. It contains only an ID.
     pub async fn delete_conversation(&self, id: String) -> Result<()> {
         self.access(move |conn| {

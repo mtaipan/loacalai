@@ -1,9 +1,8 @@
-//! Bounded project discovery and explicitly read-only Git inspection.
+//! Project metadata and explicitly read-only Git inspection.
 use crate::{api::Shared, tools};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::{
-    collections::VecDeque,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -33,79 +32,7 @@ fn excerpt(root: &Path, relative: &str, max: u64) -> Option<Value> {
     Some(json!({"path":relative,"text":String::from_utf8_lossy(&bytes),"truncated":size>max}))
 }
 
-pub fn inspect(root: &Path, cancel: &CancellationToken) -> Result<Value> {
-    let mut queue = VecDeque::from([(root.to_path_buf(), 0)]);
-    let mut files = vec![];
-    let mut omitted = 0usize;
-    let mut complete = true;
-    let started = std::time::Instant::now();
-    while let Some((dir, depth)) = queue.pop_front() {
-        if cancel.is_cancelled() {
-            anyhow::bail!("Обзор проекта остановлен");
-        }
-        if files.len() >= 350 || started.elapsed().as_secs() >= 5 {
-            complete = false;
-            break;
-        }
-        let entries = match std::fs::read_dir(dir) {
-            Ok(v) => v,
-            Err(_) => {
-                omitted += 1;
-                continue;
-            }
-        };
-        for entry in entries {
-            if cancel.is_cancelled() {
-                anyhow::bail!("Обзор проекта остановлен");
-            }
-            if files.len() >= 350 {
-                complete = false;
-                break;
-            }
-            let Ok(entry) = entry else {
-                omitted += 1;
-                continue;
-            };
-            let Ok(kind) = entry.file_type() else {
-                omitted += 1;
-                continue;
-            };
-            if kind.is_symlink() {
-                omitted += 1;
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if kind.is_dir()
-                && [
-                    ".git",
-                    "node_modules",
-                    "target",
-                    ".venv",
-                    "venv",
-                    "__pycache__",
-                    "dist",
-                    "build",
-                    ".next",
-                ]
-                .contains(&name.as_str())
-            {
-                omitted += 1;
-                continue;
-            }
-            let Ok(path) = tools::checked_path(root, &entry.path().to_string_lossy()) else {
-                omitted += 1;
-                continue;
-            };
-            files.push(json!({"path":path.strip_prefix(root)?.to_string_lossy(),"directory":kind.is_dir()}));
-            if kind.is_dir() {
-                if depth < 3 {
-                    queue.push_back((path, depth + 1));
-                } else {
-                    omitted += 1;
-                }
-            }
-        }
-    }
+pub fn overview(root:&Path,mut files:Vec<Value>,complete:bool,omitted:usize)->Result<Value>{
     files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
     let mut manifests = vec![];
     let mut technologies = vec![];
@@ -253,13 +180,8 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("Cargo.toml"), "[package]\nname='fixture'").unwrap();
-        let result = inspect(&root, &CancellationToken::new()).unwrap();
+        let result = overview(&root, vec![], true, 0).unwrap();
         assert_eq!(result["suggested_checks"].as_array().unwrap().len(), 4);
-        assert!(!result["files"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|f| f["path"].as_str().unwrap().contains("node_modules")));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
