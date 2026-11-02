@@ -3,7 +3,8 @@ function webSettingsHtml(){return `<div class="settings-section"><label class="f
 const thinkingCache=new Map();
 let controlsModel='',thinkingChoice='off';
 let webChoice=localStorage.getItem('gemma.webMode')||'auto';
-const webLabels={off:'Выключена',auto:'Авто',search:'Поиск',research:'Исследование'};
+const webLabels={off:'Выключена',auto:'Авто',search:'Искать'};
+if(webChoice==='research')webChoice='search';
 const thoughtLabel=v=>v===false?'Выкл':v===true?'Вкл':({low:'Низкий',medium:'Средний',high:'Высокий',max:'Максимальный',xhigh:'Очень высокий'}[v]||v);
 const thoughtValue=v=>v===false?'off':v===true?'on':String(v);
 function controlMenu(id,label,items){return `<details class="tool-control" id="${id}"><summary>${label}<span aria-hidden="true">⌄</span></summary><div class="tool-control-options">${items}</div></details>`;}
@@ -17,13 +18,14 @@ function renderToolControls(values=[false],loading=false){
   values.map(v=>`<button type="button" data-thinking="${escapeHtml(thoughtValue(v))}" ${state.busy||loading?'disabled':''}>${escapeHtml(thoughtLabel(v))}${thinkingChoice===thoughtValue(v)?icon('check'):''}</button>`).join('')+
   (values.length>1?`<button type="button" data-thinking="auto" ${state.busy?'disabled':''}>Авто · как задано моделью${thinkingChoice==='auto'?icon('check'):''}</button>`:''));
  const network=controlMenu('web-menu',icon('globe')+'Сеть: '+webLabels[webChoice],Object.entries(webLabels).map(([v,label])=>`<button type="button" data-web-mode="${v}" ${state.busy?'disabled':''}>${label}${v===webChoice?icon('check'):''}</button>`).join('')+'<span class="tool-control-caption">Поиск отправляет запрос поисковику. Локальные сайты доступны без интернета.</span>');
- box.innerHTML=network+reasoning;
+ box.innerHTML=(state.mode==='search'?'':network)+(state.mode==='search'&&searchOptions().depth==='results'?'':reasoning);
  box.querySelectorAll('[data-thinking]').forEach(b=>b.onclick=()=>{thinkingChoice=b.dataset.thinking;localStorage.setItem('gemma.thinking.'+model,thinkingChoice);renderToolControls(values);});
  box.querySelectorAll('[data-web-mode]').forEach(b=>b.onclick=()=>{webChoice=b.dataset.webMode;localStorage.setItem('gemma.webMode',webChoice);renderToolControls(values);});
 }
 async function refreshToolControls(){
  const model=state.settings[modelField()];
  if(state.mode==='translate'){document.getElementById('tool-controls')?.setAttribute('hidden','');return;}
+ if(state.mode==='search'&&searchOptions().depth==='results'){renderToolControls([false]);return;}
  if(controlsModel!==model){controlsModel=model;thinkingChoice=localStorage.getItem('gemma.thinking.'+model)||'off';}
  if(thinkingCache.has(model)){renderToolControls(thinkingCache.get(model));return;}
  renderToolControls([false],true);

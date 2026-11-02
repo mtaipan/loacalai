@@ -24,7 +24,7 @@ pub fn install(conn: &mut Connection, backfill:bool) -> Result<()> {
 }
 pub fn associate(tx:&Transaction<'_>,run:&str,conversation:&str,input:&Value,project:&str)->Result<()> {
     if !matches!(input["mode"].as_str(),Some("agent"|"team"|"search"|"chat")) {return Ok(());}
-    if crate::agent::reply_only(input["content"].as_str().unwrap_or("")) {return Ok(());}
+    if input["mode"]!="search"&&crate::agent::reply_only(input["content"].as_str().unwrap_or("")) {return Ok(());}
     anyhow::ensure!(input["new_task"]!=true || input["task_id"].is_null(),"Выберите существующую или новую задачу");
     let existing:Option<String>=if let Some(id)=input["task_id"].as_str() {
         let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM work_tasks WHERE id=?1 AND conversation=?2)",params![id,conversation],|r|r.get(0))?;
@@ -35,7 +35,7 @@ pub fn associate(tx:&Transaction<'_>,run:&str,conversation:&str,input:&Value,pro
     };
     let task=existing.unwrap_or_else(||uuid::Uuid::new_v4().to_string());
     let old_project:Option<String>=tx.query_row("SELECT project FROM work_tasks WHERE id=?1",[&task],|r|r.get(0)).optional()?;
-    anyhow::ensure!(input["mode"]=="chat" || old_project.is_none_or(|old|old.is_empty()||project.is_empty()||old==project),"Рабочая папка отличается от сохранённой задачи. Верните её в настройках или начните новую задачу в чате");
+    anyhow::ensure!(matches!(input["mode"].as_str(),Some("chat"|"search")) || old_project.is_none_or(|old|old.is_empty()||project.is_empty()||old==project),"Рабочая папка отличается от сохранённой задачи. Верните её в настройках или начните новую задачу в чате");
     let now=crate::api::now();
     tx.execute("INSERT OR IGNORE INTO work_tasks VALUES (?1,?2,?3,?4,'open',?5,?5)",params![task,conversation,project,input["content"].as_str().unwrap_or(""),now])?;
     tx.execute("UPDATE work_tasks SET project=CASE WHEN project='' THEN ?1 ELSE project END,updated=?2 WHERE id=?3",params![project,now,task])?;

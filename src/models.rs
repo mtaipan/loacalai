@@ -29,7 +29,7 @@ pub fn validate_settings(settings: &crate::api::Settings) -> anyhow::Result<()> 
         "Неизвестная модель перевода выделения"
     );
     anyhow::ensure!(
-        valid(&settings.agent_model, "assistant") && valid(&settings.chat_model, "assistant"),
+        valid(&settings.agent_model, "assistant") && valid(&settings.chat_model, "assistant") && valid(&settings.search_model,"assistant"),
         "Выберите модель с поддержкой инструментов для агента и чата"
     );
     Ok(())

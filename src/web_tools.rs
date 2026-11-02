@@ -100,6 +100,7 @@ impl std::fmt::Display for StaleRef {
 }
 impl std::error::Error for StaleRef {}
 pub struct Session {
+    pub search_options:crate::search::Options,
     worker: Option<Worker>,
     pub user_urls: Vec<String>,
     observed: Vec<reqwest::Url>,
@@ -113,6 +114,7 @@ impl Session {
     pub fn new(text: &str, enabled: bool) -> Self {
         let observed = crate::task_scope::urls(text);
         Self {
+            search_options:crate::search::Options::default(),
             user_urls: observed.iter().map(ToString::to_string).collect(),
             observed,
             enabled,
@@ -194,9 +196,15 @@ impl Session {
         cancel: &CancellationToken,
     ) -> Result<Value> {
         self.authorize(name, args)?;
+        if name=="web_search"{
+            if let Some(id)=args["page_source"].as_str(){
+                let run=crate::permissions::TASK.try_with(Clone::clone)?;
+                let result=crate::search::saved_page(app,&run,id,args["query"].as_str().unwrap_or(""),usize::try_from(args["result_offset"].as_u64().unwrap_or(0))?,usize::try_from(args["count"].as_u64().unwrap_or(5))?,cancel).await?;self.observe(&result);return Ok(result);
+            }
+        }
         self.start(app).await?;
         let config = app.settings.lock().await.web.clone();
-        let request = json!({"name":name,"args":args,"user_urls":self.user_urls,"user_texts":self.user_texts,"audit_urls":self.audit_urls,"config":config});
+        let request = json!({"name":name,"args":args,"search":self.search_options,"user_urls":self.user_urls,"user_texts":self.user_texts,"audit_urls":self.audit_urls,"config":config});
         let worker = self.worker.as_mut().unwrap();
         let call = async {
             worker
@@ -233,6 +241,13 @@ impl Session {
             }
             anyhow::bail!("{error}");
         }
+        if name=="web_search"{
+            if let Some(rows)=value.as_object_mut().and_then(|object|object.remove("page_results")){
+                let run=crate::permissions::TASK.try_with(Clone::clone)?;let mut saved=value.clone();saved["results"]=rows;
+                let descriptor=app.tasks.put_artifact(run,"search_results".into(),saved.to_string(),json!({"query":args["query"],"page":value["page"],"provider":value["provider"],"requested_filters":value["requested_filters"],"origin":"provider_results","full_pages_read":false})).await?;
+                value["page_result_count"]=json!(saved["results"].as_array().map_or(0,Vec::len));value["page_source"]=descriptor;
+            }
+        }
         if let Some(encoded) = value
             .as_object_mut()
             .and_then(|o| o.remove("_screenshot"))
@@ -246,7 +261,7 @@ impl Session {
             value["screenshot"] =
                 json!({"id":a.id,"url":format!("/api/files/{}",a.id),"name":a.name});
         }
-        if name == "web_search" {
+        if name == "web_search" && self.search_options.depth!="results" {
             crate::reranker::apply(
                 app,
                 args["query"].as_str().unwrap_or(""),

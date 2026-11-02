@@ -640,7 +640,8 @@ pub fn reply_only(text: &str) -> bool {
         t.split(|c: char| !c.is_alphanumeric())
             .any(|token| token == *word)
     });
-    if has_new_task {
+    let russian_operation=t.split(|c:char|!c.is_alphanumeric()).any(|token|["созда","сохран","запуст","выполн","прочит","найд","удал","измен","исправ","провер","откро","откры","обнов","установ","перепиш","перепис"].iter().any(|stem|token.starts_with(stem)));
+    if has_new_task || russian_operation {
         return false;
     }
     if (t.contains("в чат") || t.contains("in chat"))
@@ -833,6 +834,9 @@ mod tests {
             "thanks, run the tests",
             "Объясни ошибку и исправь её",
             "Explain the bug and fix it",
+            "Что означает ошибка? Исправьте её в проекте",
+            "Ты знаешь этот проект? Обнови зависимости",
+            "Что такое это исключение? Проверьте исходники",
         ] {
             assert!(!reply_only(text), "{text}");
         }

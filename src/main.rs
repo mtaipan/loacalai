@@ -40,6 +40,7 @@ mod text_source;
 mod tools;
 mod tool_schema;
 mod tool_catalog;
+mod search;
 mod web_tools;
 
 use anyhow::Result;

@@ -50,3 +50,7 @@ button,input,select,textarea{font:inherit}
 .run-history-dialog{max-width:900px}.run-history-content{min-width:0;overflow-wrap:anywhere}.run-history-content .artifact-content{max-height:none}.run-history-links{margin:12px 0}
 
 .material-list{display:grid;gap:8px}.material-list .button{white-space:normal;overflow-wrap:anywhere;text-align:left}
+
+.search-preferences{margin:8px 0;color:var(--text)}.search-preferences summary{cursor:pointer;font-size:13px}.search-preferences[open]{padding:12px;border:1px solid var(--line2);border-radius:12px}.search-preferences .form-row{display:flex;flex-wrap:wrap;gap:12px}.search-preferences .form-row>div{flex:1;min-width:100px}.search-preferences select{width:100%}.search-result{padding:16px 0;border-bottom:1px solid var(--line2);overflow-wrap:anywhere}.search-result small{display:block;opacity:.7;margin-top:5px}.search-result p{white-space:pre-wrap;margin:8px 0}.search-results pre{white-space:pre-wrap;overflow-wrap:anywhere}
+
+#search-preferences-body{max-height:min(45vh,360px);overflow:auto;padding-right:4px}.mode-row{flex-wrap:wrap}.mode-tabs{flex-wrap:wrap}.search-preferences input{max-width:100%}

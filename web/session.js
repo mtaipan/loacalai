@@ -2,7 +2,7 @@
 // Conversation state is independent of the currently visible conversation.
 const viewSessions=new Map();
 let navigationVersion=0,workspaceStreamStarted=false,workspaceConnecting=null;
-const sessionDefaults=()=>({busy:false,run:null,runMode:null,streamText:'',streamThinking:'',streamTools:[],toolsTotal:0,textOffset:0,thinkingOffset:0,approvals:[],notice:'',scrollFollow:true,uploading:0,pendingInput:0,nextTask:false,selectedTask:null,pending:[],sending:false,startedAt:0,submitting:false,cancelRequested:false,draft:'',submission:null,chat:null});
+const sessionDefaults=()=>({busy:false,run:null,runMode:null,streamText:'',streamThinking:'',streamTools:[],toolsTotal:0,textOffset:0,thinkingOffset:0,approvals:[],notice:'',scrollFollow:true,uploading:0,pendingInput:0,nextTask:false,selectedTask:null,pending:[],searchOptions:null,sending:false,startedAt:0,submitting:false,cancelRequested:false,draft:'',submission:null,chat:null});
 const visibleConversation=()=>state.chat?.id||'new';
 function draftStorageKey(id){return 'gemma.draft.v1.'+id;}
 function readDraft(id){
@@ -16,7 +16,7 @@ function readDraft(id){
 function currentSession(id=visibleConversation()){
   if(!viewSessions.has(id)){
     const session=sessionDefaults(),draft=readDraft(id);
-    if(draft){session.draft=typeof draft.text==='string'?draft.text:'';session.pending=Array.isArray(draft.attachments)?draft.attachments:[];session.submission=draft.submission||null;session.draftMode=draft.mode;session.nextTask=!!draft.newTask;session.selectedTask=draft.taskId||null;}
+    if(draft){session.draft=typeof draft.text==='string'?draft.text:'';session.pending=Array.isArray(draft.attachments)?draft.attachments:[];session.submission=draft.submission||null;session.draftMode=draft.mode;session.nextTask=!!draft.newTask;session.selectedTask=draft.taskId||null;session.searchOptions=draft.searchOptions||null;}
     viewSessions.set(id,session);
   }
   return viewSessions.get(id);
@@ -28,8 +28,8 @@ function setupSessionState(){
 }
 function persistDraft(id=visibleConversation(),session=currentSession(id)){
   try{
-    const value={text:session.draft,attachments:session.pending,submission:session.submission,newTask:session.nextTask,taskId:session.selectedTask,mode:id===visibleConversation()?state.mode:session.draftMode};
-    if(!value.text&&!value.attachments.length&&!value.submission&&!value.newTask&&!value.taskId)localStorage.removeItem(draftStorageKey(id));
+    const value={searchOptions:session.searchOptions,text:session.draft,attachments:session.pending,submission:session.submission,newTask:session.nextTask,taskId:session.selectedTask,mode:id===visibleConversation()?state.mode:session.draftMode};
+    if(!value.text&&!value.attachments.length&&!value.submission&&!value.newTask&&!value.taskId&&!value.searchOptions)localStorage.removeItem(draftStorageKey(id));
     else localStorage.setItem(draftStorageKey(id),JSON.stringify(value));
     session.draftError=false;return true;
   }catch(error){if(!session.draftError){toast('Не удалось сохранить черновик на этом устройстве: '+error.message,true);session.draftError=true;}return false;}
@@ -134,7 +134,7 @@ async function submitMessage(retry=false){
     }
     await connectWorkspace();
     localStorage.setItem('gemma.lastChat',id);
-    const payload={conversation:id,content,attachments:attachments.map(a=>a.id),mode:state.mode,source:document.getElementById('source').value,target:document.getElementById('target').value,retry,thinking:thinkingChoice,web:webChoice};
+    const payload={conversation:id,content,attachments:attachments.map(a=>a.id),mode:state.mode,source:document.getElementById('source').value,target:document.getElementById('target').value,retry,thinking:thinkingChoice,web:state.mode==='search'&&searchOptions().focus!=='materials'?'search':webChoice,...(state.mode!=='translate'?{search:searchOptions()}:{} )};
     if(session.nextTask&&!retry)payload.new_task=true;else if(session.selectedTask)payload.task_id=session.selectedTask;
     if((payload.new_task||payload.task_id)&&!['agent','team'].includes(payload.mode))payload.mode='agent';
     const previous=previousSubmission;

@@ -12,6 +12,7 @@ pub fn install(conn:&mut Connection)->Result<()> {
         CREATE TABLE IF NOT EXISTS artifacts(sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,run TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,kind TEXT NOT NULL,metadata TEXT NOT NULL,hash TEXT NOT NULL REFERENCES artifact_bodies(hash),created TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS artifacts_run ON artifacts(run,created);
         CREATE INDEX IF NOT EXISTS artifacts_hash ON artifacts(hash);
+        CREATE INDEX IF NOT EXISTS artifacts_derived_tool ON artifacts(json_extract(metadata,'$.tool_name'),sequence) WHERE kind='derived_result';
         CREATE VIRTUAL TABLE IF NOT EXISTS artifact_fts USING fts5(text,content='artifact_chunks',content_rowid='id',tokenize='unicode61');
         CREATE TRIGGER IF NOT EXISTS artifact_insert AFTER INSERT ON artifact_chunks BEGIN INSERT INTO artifact_fts(rowid,text) VALUES(new.id,new.text); END;
         CREATE TRIGGER IF NOT EXISTS artifact_delete AFTER DELETE ON artifact_chunks BEGIN INSERT INTO artifact_fts(artifact_fts,rowid,text) VALUES('delete',old.id,old.text); END;")?;
@@ -122,7 +123,7 @@ pub fn context_preview(value:&Value,budget:usize)->Value{let mut budget=budget;c
 pub async fn archive_record(app:&crate::api::Shared,run:&str,mut record:Value)->Result<Value>{
     let name=record["name"].as_str().unwrap_or("").to_string();let text=record["result"].as_str().unwrap_or("").to_string();
     if name=="ingest_file"&&record["status"]=="succeeded"{if let Ok(value)=serde_json::from_str::<Value>(&text){record["material_artifact"]=value["material"].clone();}}
-    let derived=["discover_tools","read_task","read_run_log","search_artifacts","update_plan","security_analyze","translate_text"].contains(&name.as_str());
+      let derived=["discover_tools","read_task","read_run_log","search_artifacts","update_plan","update_search_plan","read_search_plan","security_analyze","translate_text"].contains(&name.as_str());
     let source=if name=="read_artifact"&&record["status"]=="succeeded" {app.tasks.artifact(record["arguments"]["id"].as_str().unwrap_or("").into()).await?}else{
         let parsed=serde_json::from_str::<Value>(&text).ok();
         let coverage=parsed.as_ref().map(|value|json!({"start_line":value["start_line"],"end_line":value["end_line"],"has_more":value["has_more"],"next_start_line":value["next_start_line"],"next_offset":value["next_offset"],"complete":value["complete"],"start_page":value["start_page"],"end_page":value["end_page"],"total_pages":value["total_pages"],"encoding":value["encoding"],"revision":value["revision"],"start_byte":value["start_byte"],"end_byte":value["end_byte"],"total_bytes":value["total_bytes"],"partial_line":value["partial_line"]}));

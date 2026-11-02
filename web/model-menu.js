@@ -10,11 +10,12 @@ function closeModelMenu(restoreFocus=false){
 }
 function renderActiveModel(){
   const trigger=$('#model-name');if(!trigger)return;
-  const name=modelName(state.settings[modelField()]);
+  const resultsOnly=state.mode==='search'&&searchOptions().depth==='results';
+  const name=resultsOnly?'Без модели':modelName(state.settings[modelField()]);
   renderTeamMode();
   trigger.innerHTML=`<span>${escapeHtml(name)}</span>${modelCaret()}`;
   trigger.setAttribute('aria-label','Выбрать модель: '+name);
-  trigger.disabled=state.busy||modelMenuSaving;
+  trigger.disabled=state.busy||modelMenuSaving||resultsOnly;
   if(trigger.disabled)closeModelMenu();
   if(typeof refreshToolControls==='function')refreshToolControls();
 }

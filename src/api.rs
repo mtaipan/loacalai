@@ -123,6 +123,8 @@ pub struct Settings {
     pub team_model: String,
     #[serde(default = "crate::models::default_assistant")]
     pub chat_model: String,
+    #[serde(default = "crate::models::default_assistant")]
+    pub search_model:String,
     pub workspace: String,
     #[serde(default)]
     pub recent_projects: Vec<String>,
@@ -268,6 +270,7 @@ impl App {
             agent_model: crate::models::default_assistant(),
             team_model: crate::models::default_assistant(),
             chat_model: crate::models::default_assistant(),
+            search_model:crate::models::default_assistant(),
             workspace: data.join("workspace").to_string_lossy().into(),
             recent_projects: vec![],
             source: "en".into(),
@@ -650,6 +653,7 @@ async fn settings(
                 && value.agent_model == previous.agent_model
                 && value.team_model == previous.team_model
                 && value.chat_model == previous.chat_model
+                && value.search_model == previous.search_model
                 && value.web == previous.web
                 && value.assistant == previous.assistant
                 && value.context == previous.context),
@@ -995,6 +999,8 @@ async fn execution_log(State(app):State<Shared>,Path((id,stream)):Path<(String,S
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChatInput {
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub search:Option<crate::search::Options>,
     #[serde(default,skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     #[serde(default,skip_serializing_if = "Option::is_none")]
@@ -1065,7 +1071,7 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
     let _settings_guard = app.settings_write.lock().await;
     let _chat = app.load(&input.conversation).await?;
     require(
-        ["agent", "team", "translate", "chat"].contains(&input.mode.as_str()),
+        ["agent", "team", "translate", "chat", "search"].contains(&input.mode.as_str()),
         "Неизвестный режим работы",
     )?;
     require(["agent","team"].contains(&input.mode.as_str()) || (input.new_task!=Some(true)&&input.task_id.is_none()),"Выбор рабочей задачи доступен в режиме агента или команды")?;
@@ -1078,6 +1084,8 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
         "Неизвестный режим сети",
     )?;
     require(input.thinking.len() <= 32, "Некорректный режим рассуждений")?;
+    if let Some(options)=&input.search{options.validate()?;require(input.mode!="translate","Настройки поиска не применяются к переводу")?;require(options.depth!="results"||input.mode=="search","Выдача без модели доступна в режиме поиска")?;}
+    if input.mode=="search"{require(input.web!="off"||input.search.as_ref().is_some_and(|options|options.focus=="materials"),"Включите сеть или выберите сохранённые материалы")?;}
     require(
         input.content.len() <= crate::context::MAX_REQUEST_TEXT_BYTES,
         "Текст сообщения превышает 512 КиБ; приложите его файлом или разделите",

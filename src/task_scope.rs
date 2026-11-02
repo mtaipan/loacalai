@@ -9,11 +9,13 @@ pub struct TaskScope {
     pub searching: bool,
     pub web_enabled: bool,
     pub read_only: bool,
+    pub research:bool,
     pub urls: Vec<reqwest::Url>,
     names: BTreeSet<String>,
     desktop: bool,
     creating_desktop: bool,
     workspace_files: bool,
+    local_work: bool,
 }
 pub fn urls(text: &str) -> Vec<reqwest::Url> {
     let mut found = Vec::new();
@@ -67,6 +69,10 @@ impl TaskScope {
             "рабочей папке",
             "workspace",
             "project",
+            "проект",
+            "репозитор",
+            "repository",
+            "исходн",
             "source code",
             "исходник",
             "local file",
@@ -207,6 +213,7 @@ impl TaskScope {
             searching: crate::web_tools::search_requested(text),
             web_enabled: true,
             read_only:false,
+            research:false,
             urls,
             names,
             desktop,
@@ -219,11 +226,20 @@ impl TaskScope {
             ]
             .iter()
             .any(|s| local_text.contains(s)),
+            local_work:local||creating_desktop||explicit_file_mutation,
         }
+    }
+    pub fn local_work(&self)->bool{self.local_work}
+    pub fn network_choice(&mut self,choice:&str){
+        self.web_enabled=choice!="off";
+        if matches!(choice,"search"|"research"){self.searching=true;}
+        // Network preference chooses retrieval, never replaces the user's mode
+        // or narrows a mixed local task to web-only capabilities.
     }
     pub fn allows(&self, name: &str) -> bool {
         if name=="discover_tools"{return !self.read_only;}
         if ["read_task","read_artifact","search_artifacts","read_run_log"].contains(&name) {return true;}
+        if matches!(name,"update_search_plan"|"read_search_plan"){return self.research;}
         if self.read_only{return self.web_enabled&&["web_search","fetch_url","browser_open","browser_read"].contains(&name);}
         if crate::web_tools::is_web_tool(name) && !self.web_enabled {
             return false;
@@ -411,6 +427,13 @@ impl TaskScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retrieval_preference_preserves_mixed_work_and_chat_permissions(){
+        for text in ["Погугли документацию и исправь проект","Посмотри https://example.org/docs и обнови исходники","Search the web and fix the project"]{
+            for network in ["auto","off","search","research"]{let mut scope=TaskScope::new(text);scope.network_choice(network);assert!(!scope.web_only,"{text}: {network}");assert!(scope.allows("write_file"));assert_eq!(scope.allows("web_search"),network!="off");scope.read_only=true;assert!(!scope.allows("write_file"));assert!(!scope.allows("run_command"));}
+        }
+        let mut website=TaskScope::new("Погугли свежие новости");website.network_choice("research");assert!(website.web_only);assert!(!website.allows("write_file"));
+    }
     #[test]
     fn web_task_does_not_open_unrelated_workspace() {
         let s = TaskScope::new("http://127.0.0.1:1111/ посмотри мой сайт");
