@@ -7,15 +7,26 @@ use tokio_util::sync::CancellationToken;
 
 pub async fn tool(app:&crate::api::Shared,kind:&str,args:Value,cancel:&CancellationToken)->Result<Value>{
     let settings=app.settings.lock().await.clone();
-    let project=dunce::canonicalize(&settings.workspace)?;
-    let supplied=if kind=="list_files"||kind=="inspect_project"{args["path"].as_str()}else{args["directory"].as_str()};
-    let root=crate::filesystem::writable_path(&project,supplied.filter(|s|!s.is_empty()).unwrap_or("."),settings.computer_access)?;
-    let root=dunce::canonicalize(root)?;anyhow::ensure!(root.is_dir(),"Ожидается каталог");
     let owner=if let Ok(run)=crate::permissions::TASK.try_with(Clone::clone){
-        app.tasks.permission_task(run.clone()).await?.map(|(id,_)|format!("task:{id}")).unwrap_or(format!("run:{run}"))
-    }else{format!("project:{}",project.to_string_lossy())};
+        Some(app.tasks.permission_task(run.clone()).await?.map(|(id,_)|format!("task:{id}")).unwrap_or(format!("run:{run}")))
+    }else{None};
     let data=app.data.clone();let kind=kind.to_owned();let cancel=cancel.clone();
-    tokio::task::spawn_blocking(move||page(&data,&owner,&project,&root,&kind,&args,&cancel)).await?
+    tokio::task::spawn_blocking(move||{
+        let project=dunce::canonicalize(&settings.workspace)?;
+        let supplied=if kind=="list_files"||kind=="inspect_project"{args["path"].as_str()}else{args["directory"].as_str()};
+        let root=crate::filesystem::writable_path(&project,supplied.filter(|s|!s.is_empty()).unwrap_or("."),settings.computer_access)?;
+        let root=dunce::canonicalize(root)?;anyhow::ensure!(root.is_dir(),"Ожидается каталог");
+        let owner=owner.unwrap_or_else(||format!("project:{}",project.to_string_lossy()));
+        page(&data,&owner,&project,&root,&kind,&args,&cancel)
+    }).await?
+}
+/// Authenticated UI inspection can select a new root without granting tools access to it.
+pub async fn project_view(app:&crate::api::Shared,args:Value,cancel:&CancellationToken)->Result<Value>{
+    let workspace=app.settings.lock().await.workspace.clone();let data=app.data.clone();let cancel=cancel.clone();
+    tokio::task::spawn_blocking(move||{
+        let project=dunce::canonicalize(workspace)?;let root=crate::projects::chosen_directory(&project,args["path"].as_str())?;
+        let owner=format!("project:{}",project.to_string_lossy());page(&data,&owner,&project,&root,"inspect_project",&args,&cancel)
+    }).await?
 }
 
 fn connection(data:&Path)->Result<Connection>{

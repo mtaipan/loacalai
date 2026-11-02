@@ -135,7 +135,7 @@ async function submitMessage(retry=false){
     }
     await connectWorkspace();
     localStorage.setItem('gemma.lastChat',id);
-    const payload={conversation:id,content,attachments:attachments.map(a=>a.id),mode:state.mode,source:document.getElementById('source').value,target:document.getElementById('target').value,retry,thinking:thinkingChoice,web:state.mode==='search'&&searchOptions().focus!=='materials'?'search':webChoice,...(state.mode!=='translate'?{search:searchOptions()}:{} )};
+    const payload={conversation:id,expected_workspace:state.settings.workspace,content,attachments:attachments.map(a=>a.id),mode:state.mode,source:document.getElementById('source').value,target:document.getElementById('target').value,retry,thinking:thinkingChoice,web:state.mode==='search'&&searchOptions().focus!=='materials'?'search':webChoice,...(state.mode!=='translate'?{search:searchOptions()}:{} )};
     if(session.nextTask&&!retry)payload.new_task=true;else if(session.selectedTask)payload.task_id=session.selectedTask;
     if((payload.new_task||payload.task_id)&&!['agent','team'].includes(payload.mode))payload.mode='agent';
     const previous=previousSubmission;
@@ -155,6 +155,7 @@ async function submitMessage(retry=false){
       let accepted=false;
       if(!error.status)try{const run=await api('/api/runs/'+payload.request_id);accepted=true;if(!['running','queued','awaiting_approval','stopping'].includes(run.status)){session.ignoreThrough=Math.max(session.ignoreThrough||0,run.last_sequence||0);await finishConversationRun(session,id,payload.request_id);}}catch{}
       if(!accepted){session.busy=false;session.run=null;try{session.chat=await api('/api/chats/'+id);}catch{}if(visibleConversation()===id){state.chat=session.chat||state.chat;renderMessages();}await refreshChats();}
+      if(!accepted&&error.status===409)try{const fresh=await api('/api/bootstrap');if((fresh.settings.revision||0)>=(state.settings.revision||0))state.settings=fresh.settings;updateWorkspace();renderActiveModel();}catch{}
       toast(error.message,true);
     }
   }catch(error){toast(error.message,true);}

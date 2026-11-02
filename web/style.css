@@ -45,3 +45,5 @@
 .team-description{margin:0 4px 10px;font-size:11px}.team-description[hidden]{display:none}.team-settings{margin-top:14px}.team-settings select{width:100%}@media(max-width:650px){.mode-row{flex-wrap:wrap;gap:8px}.mode-row .model-name{margin-left:auto}.mode-tabs{max-width:100%}}
 
 .file-location{display:flex;flex-wrap:wrap;gap:6px;padding:6px 0}.file-location p{width:100%;font-size:11px;overflow-wrap:anywhere;margin:4px}.project-pages{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+
+.file-current{width:100%;font-size:12px;font-weight:500;overflow-wrap:anywhere;margin:4px 0 8px}

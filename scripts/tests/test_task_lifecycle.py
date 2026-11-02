@@ -112,7 +112,8 @@ try:
             break
     assert first['type'] == 'start'
     assert first['accepted']['model']==model and first['accepted']['web']==body['web']
-    assert 'content' not in first['accepted'] and 'workspace' not in first['accepted']
+    assert not {'content','attachments','history','assistant'}&first['accepted'].keys()
+    assert Path(first['accepted']['workspace']).resolve()==(root/'data/workspace').resolve()
     response.close()  # Subscriber disappears while inference is still running.
     replay = events(f'/api/runs/{rid}/events?after={first["sequence"]}')
     assert replay[-1]['type'] == 'done', replay
@@ -215,13 +216,15 @@ try:
         # A second client may have different draft preferences. They must not describe this run.
         accepted=page.evaluate('currentSession().acceptedOptions')
         assert accepted['model']==model,accepted
-        page.evaluate("""()=>{window.priorDraftModel=state.settings[modelField()];state.settings[modelField()]='different-next-model';webChoice='off';currentSession().searchOptions={depth:'deep',focus:'news'};renderActiveModel();renderSearchMode();}""")
+        assert Path(accepted['workspace']).resolve()==(root/'data/workspace').resolve(),accepted
+        page.evaluate("""()=>{window.priorDraftModel=state.settings[modelField()];window.priorDraftWorkspace=state.settings.workspace;state.settings.workspace='DIFFERENT_NEXT_WORKSPACE';updateWorkspace();state.settings[modelField()]='different-next-model';webChoice='off';currentSession().searchOptions={depth:'deep',focus:'news'};renderActiveModel();renderSearchMode();}""")
         assert page.evaluate('activeModelId()')==model
+        assert page.locator('#workspace-label').inner_text()==accepted['workspace']
         assert page.evaluate('searchOptions().depth')==accepted['search']['depth']
         assert page.evaluate('searchOptions().focus')==accepted['search']['focus']
         assert 'Авто' in page.locator('#web-menu summary').inner_text()
         assert page.evaluate('currentSession().searchOptions.focus')=='news'
-        page.evaluate('()=>{state.settings[modelField()]=priorDraftModel;renderActiveModel();}')
+        page.evaluate('()=>{state.settings[modelField()]=priorDraftModel;state.settings.workspace=priorDraftWorkspace;updateWorkspace();renderActiveModel();}')
         page.wait_for_function('()=>!state.busy', timeout=15000)
         assert 'DURABLE_RESULT' in page.locator('#conversation').inner_text()
         assert page.evaluate('currentSession().acceptedOptions') is None

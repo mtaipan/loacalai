@@ -82,6 +82,9 @@ impl Store {
         )?;
         Ok(Self(Arc::new(Mutex::new(conn))))
     }
+    pub async fn has_run(&self,id:String)->Result<bool>{
+        self.access(move|conn|Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1)",[id],|row|row.get(0))?)).await
+    }
     pub async fn is_deleted(&self, id: String) -> Result<bool> {
         self.access(move |conn| Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM deleted_conversations WHERE id=?1)", [id], |r|r.get(0))?)).await
     }

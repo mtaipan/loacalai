@@ -109,6 +109,21 @@ try:
         read('/api/changes/'+result['change_id']+'/restore',{})
         assert file.read_bytes()==original
     print('PASS approved UTF BOM/endianness and explicit legacy edits preserve CRLF; unrepresentable text never reaches approval; undo restores original bytes')
+    for endpoint,args in [('/api/project/inspect',{'path':42}),('/api/project/inspect',{'limit':0}),('/api/project/git',{'action':42})]:
+        try:read(endpoint,args);raise AssertionError('Malformed inspection arguments accepted')
+        except urllib.error.HTTPError as error:assert error.code==400
+    chosen=read('/api/project/inspect',{'path':str(outside)})
+    assert any(item['path']=='outside.txt' for item in chosen['files'])
+    assert not read('/api/bootstrap')['settings']['computer_access']
+    (workspace/'package.json').write_text(json.dumps({'scripts':{'test':'echo OWN_NEVER_RUN'}}))
+    replay_chat=read('/api/chats',{'mode':'search'})
+    original_scope=read('/api/bootstrap')['settings']['workspace']
+    replay_body={'request_id':str(uuid.uuid4()),'conversation':replay_chat['id'],'expected_workspace':original_scope,'content':'OWN_SCOPE_ONLY','mode':'search','web':'off','source':'en','target':'ru','attachments':[],'search':{'depth':'results','focus':'materials'}}
+    accepted=read('/api/runs',replay_body)
+    with call('/api/runs/'+accepted['run_id']+'/events') as response:
+        for line in response:
+            if line.startswith(b'data:'):assert json.loads(line[5:])['type']!='error',line
+    assert read('/api/runs/'+accepted['run_id'])['status']=='completed'
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         browser=pw.chromium.launch(channel='msedge',headless=True)
@@ -131,26 +146,77 @@ try:
         page.locator('[data-project-cursor]').first.click()
         page.wait_for_function('(value)=>document.querySelector(".project-overview>pre").textContent===value',arg=initial)
         assert page.locator('.project-overview>pre').inner_text()==initial
+        assert page.evaluate('()=>document.activeElement.matches("[data-project-cursor]")')
         for button in page.locator('[data-project-cursor]').all():
             bounds=button.bounding_box();assert bounds['x']>=0 and bounds['x']+bounds['width']<=320,bounds
         page.screenshot(path=str(root/'project-inspector-mobile.png'),full_page=True)
-        page.locator('[data-close="projects-dialog"]').click()
+        page.locator('[data-project-command]').first.click()
+        assert not page.locator('#projects-dialog').evaluate('(dialog)=>dialog.open')
+        assert page.evaluate('()=>document.activeElement.id==="prompt"')
+        assert 'Запусти проверку' in page.locator('#prompt').input_value()
         page.set_viewport_size({'width':1280,'height':900})
         page.locator('header [data-action="files"]').click()
         for directory in ['a','a/b','a/b/c','a/b/c/d','a/b/c/d/e','a/b/c/d/e/f','a/b/c/d/e/f/g','a/b/c/d/e/f/g/h']:
             page.locator('[data-tree-directory="'+directory+'"]').click()
         page.wait_for_selector('[data-tree-path]');initial_files=page.locator('[data-tree-path]').all_text_contents()
         assert len(initial_files)==64
+        assert page.evaluate('()=>document.activeElement.matches(".file-current")')
         page.locator('[data-tree-cursor]').last.click()
         page.wait_for_function('()=>document.querySelectorAll("[data-tree-cursor]").length===2')
         page.locator('[data-tree-cursor]').first.click()
         page.wait_for_function('(expected)=>JSON.stringify([...document.querySelectorAll("[data-tree-path]")].map(b=>b.textContent))===JSON.stringify(expected)',arg=initial_files)
         selected=page.locator('[data-tree-path]').first.get_attribute('data-tree-path')
-        page.locator('[data-tree-path]').first.click();assert selected in page.locator('#prompt').input_value()
+        page.locator('#prompt').fill('')
+        page.locator('[data-tree-path]').first.click()
+        assert Path(json.loads(page.locator('#prompt').input_value())).resolve()==(workspace/selected).resolve()
         assert page.locator('[data-tree-path]').count()==64
+        page.route('**/api/tree?*',lambda route:route.fulfill(status=503,content_type='application/json',body=json.dumps({'error':'OWN_FOLDER_RETRY'})),times=1)
+        page.locator('#file-tree .file-location [data-tree-directory=""]').click()
+        page.wait_for_function("()=>document.querySelector('#file-page-status')?.textContent.includes('OWN_FOLDER_RETRY')")
+        assert page.locator('[data-tree-path]').count()==64
+        page.locator('#file-page-status button').click();page.wait_for_function("()=>document.querySelector('.file-current')?.textContent==='Корень проекта'")
+        assert page.evaluate("()=>document.activeElement.matches('.file-current')")
+        page.locator('#prompt').fill('до 🦀 после')
+        page.evaluate("()=>{const prompt=document.getElementById('prompt');prompt.setSelectionRange(prompt.value.indexOf(' после'),prompt.value.indexOf(' после'));window.originalRead=navigator.clipboard.read;Object.defineProperty(navigator.clipboard,'read',{configurable:true,value:async()=>[{types:['text/plain'],getType:async()=>new Blob(['X\\r\\nY'])}]});}")
+        page.locator('[data-action="paste"]').click()
+        page.wait_for_function("()=>document.getElementById('prompt').value.includes('X\\nY')")
+        assert page.locator('#prompt').input_value()=='до 🦀X\nY после'
+        assert page.evaluate("()=>document.activeElement.id==='prompt'&&document.activeElement.selectionStart===document.activeElement.value.indexOf(' после')")
+        page.keyboard.insert_text('!');assert page.locator('#prompt').input_value()=='до 🦀X\nY! после'
+        page.evaluate("()=>Object.defineProperty(navigator.clipboard,'read',{configurable:true,value:()=>new Promise(resolve=>window.resolveOwnClipboard=resolve)})")
+        page.locator('[data-action="paste"]').click();page.locator('#prompt').fill('changed draft');page.evaluate("()=>document.getElementById('prompt').setSelectionRange(2,2)")
+        page.evaluate("()=>resolveOwnClipboard([{types:['text/plain'],getType:async()=>new Blob(['LATE_TEXT'])}])")
+        page.wait_for_function("()=>document.getElementById('prompt').value.includes('LATE_TEXT')")
+        assert page.evaluate("()=>document.activeElement.id==='prompt'&&document.activeElement.selectionStart===2")
+        page.evaluate("()=>Object.defineProperty(navigator.clipboard,'read',{configurable:true,value:originalRead})")
+        if page.locator('body').evaluate("(body)=>body.classList.contains('sidebar-hidden')"):page.locator('header [data-action="sidebar"]').click()
+        page.locator('.sidebar [data-action="projects"]').click();page.wait_for_selector('#projects-dialog[open]')
+        pending=[];page.route('**/api/settings',lambda route:pending.append(route),times=1)
+        page.locator('[data-action="use-project"]').click()
+        for _ in range(100):
+            if pending:break
+            page.wait_for_timeout(20)
+        assert pending
+        page.locator('#project-path').fill(str(outside));pending[0].continue_()
+        page.wait_for_function("()=>!document.querySelector('#projects-dialog [data-action=use-project]').disabled")
+        assert page.locator('#projects-dialog').evaluate('(dialog)=>dialog.open')
+        assert page.locator('#project-path').input_value()==str(outside)
+        assert Path(read('/api/bootstrap')['settings']['workspace']).resolve()==workspace.resolve()
+        page.locator('[data-action="use-project"]').click()
+        page.wait_for_function("()=>!document.getElementById('projects-dialog').open")
+        assert Path(read('/api/bootstrap')['settings']['workspace']).resolve()==outside.resolve()
+        assert page.evaluate("()=>document.activeElement.id==='prompt'")
         assert not errors,errors
         browser.close()
-    print('PASS Edge320 inspector changes packets, replays previous packet and retains page on failed request/retry')
+    assert read('/api/runs',replay_body)['run_id']==accepted['run_id']
+    stale_body={**replay_body,'request_id':str(uuid.uuid4())}
+    try:read('/api/runs',stale_body);raise AssertionError('Stale workspace accepted')
+    except urllib.error.HTTPError as error:assert error.code==409
+    try:read('/api/runs/'+stale_body['request_id']);raise AssertionError('Rejected workspace created a run')
+    except urllib.error.HTTPError as error:assert error.code==404
+    assert read('/api/runs/'+accepted['run_id'])['status']=='completed'
+    print('PASS stale project scope creates no Run; accepted idempotent replay retains original project after settings change')
+    print('PASS Edge320 paging/focus/retry, CRLF/Unicode and delayed paste caret, modal insertion, late project edits and explicit root selection without agent grant expansion')
     if os.environ.get('LOCAL_GEMMA_SLOW_PROTOCOL')=='1':
         (root/'runtime').mkdir()
         subprocess.run(['powershell.exe','-NoProfile','-Command','New-Item -ItemType Junction -Path $env:TEST_PY_LINK -Target $env:TEST_PY_TARGET | Out-Null'],env={**os.environ,'TEST_PY_LINK':str(root/'runtime/python'),'TEST_PY_TARGET':str(project/'runtime/python')},check=True)

@@ -77,7 +77,7 @@ function handleGlobalShortcut(event){
     const menu=document.querySelector('.context-menu');if(menu){event.preventDefault();menu.remove();return;}
     const details=document.querySelector('#tool-controls details[open]');if(details){event.preventDefault();details.open=false;details.querySelector('summary')?.focus();return;}
     if(innerWidth<761&&!document.body.classList.contains('sidebar-hidden')){event.preventDefault();setSidebarOpen(false);return;}
-    const panel=document.getElementById('file-panel');if(panel.classList.contains('visible')){event.preventDefault();panel.classList.remove('visible');document.querySelector('[data-action="files"]')?.focus();}return;
+    const panel=document.getElementById('file-panel');if(panel.classList.contains('visible')){event.preventDefault();closeFiles();document.querySelector('header [data-action="files"]')?.focus();}return;
   }
   const editable=event.target.closest('input,textarea,[contenteditable="true"]');
   if(!editable&&(event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='k'){event.preventDefault();setSidebarOpen(true);document.getElementById('chat-search').focus();}

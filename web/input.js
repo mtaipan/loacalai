@@ -4,22 +4,25 @@ function inputDestination(){
   captureDraft();const id=visibleConversation(),session=currentSession(id),prompt=document.getElementById('prompt');
   session.pendingInput=(session.pendingInput||0)+1;
   updateSend();
-  return {id,session,text:session.draft,start:prompt.selectionStart,end:prompt.selectionEnd,released:false};
+  return {id,session,focus:document.activeElement,text:session.draft,start:prompt.selectionStart,end:prompt.selectionEnd,released:false};
 }
 function releaseInput(target){
   if(target.released)return;target.released=true;target.session.pendingInput--;
   if(visibleConversation()===target.id)updateSend();else prunePreviousSession(target.id);
 }
 function deliverInput(target,text='',attachments=[]){
+  text=text.replace(/\r\n?/g,'\n');
   const {id,session}=target,visible=visibleConversation()===id;
-  if(visible)session.draft=document.getElementById('prompt').value;
+  const prompt=visible?document.getElementById('prompt'):null,selection=prompt?{start:prompt.selectionStart,end:prompt.selectionEnd}:null;
+  if(visible)session.draft=prompt.value;
+  const unchanged=session.draft===target.text;
   if(text){
-    if(session.draft===target.text){session.draft=session.draft.slice(0,target.start)+text+session.draft.slice(target.end);target.start+=text.length;target.end=target.start;}
-    else session.draft+=(session.draft&&!session.draft.endsWith('\n')?'\n':'')+text;
+    if(unchanged){session.draft=session.draft.slice(0,target.start)+text+session.draft.slice(target.end);target.start+=text.length;target.end=target.start;}
+    else{session.draft+=(session.draft&&!session.draft.endsWith('\n')?'\n':'')+text;target.start=session.draft.length;target.end=target.start;}
     target.text=session.draft;
   }
   session.pending.push(...attachments);persistDraft(id,session);
-  if(visible){const prompt=document.getElementById('prompt');prompt.value=session.draft;resizeInput();renderPending();}
+  if(visible){prompt.value=session.draft;if(text)prompt.setSelectionRange(unchanged?target.start:selection.start,unchanged?target.end:selection.end);resizeInput();renderPending();}
 }
 async function pasteNative(target){
   const own=!target;target ||= inputDestination();
@@ -42,7 +45,7 @@ async function pasteClipboard(){
     }
     if(!pasted)await pasteNative(target);
   }catch(error){toast('Не удалось вставить из буфера: '+error.message+'. Используйте Ctrl / ⌘ + V в поле сообщения.',true);}
-  finally{releaseInput(target);}
+  finally{releaseInput(target);if(visibleConversation()===target.id&&document.activeElement===target.focus&&!document.querySelector('dialog[open]'))focusComposer();}
 }
 
 let voiceView=null;
@@ -111,4 +114,4 @@ async function closeVoice(){
   if(view)releaseInput(view.target);
   if(voice){voice.abort.abort();voice.stream?.getTracks().forEach(track=>track.stop());if(voice.recorder?.state==='recording')voice.recorder.stop();clearInterval(voice.timer);voice.chunks=[];if(voice.job)try{await api('/api/stop/'+voice.job,{method:'POST',body:{}});}catch(error){toast('Не удалось подтвердить остановку распознавания: '+error.message,true);}}
 }
-async function useVoice(){if(!voiceView)return;deliverInput(voiceView.target,document.getElementById('voice-result').value);await closeVoice();}
+async function useVoice(){if(!voiceView)return;const target=voiceView.target;deliverInput(target,document.getElementById('voice-result').value);const closing=closeVoice();if(visibleConversation()===target.id)focusComposer();await closing;}

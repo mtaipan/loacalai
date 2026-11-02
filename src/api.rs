@@ -150,7 +150,7 @@ impl Settings {
     pub fn accepted_options(&self,input:&ChatInput)->Value {
         let search=input.search_options();
         let results=input.mode=="search"&&search.depth=="results";
-        json!({"mode":input.mode,"model":if results{None}else{Some(self.model_for(&input.mode))},"web":input.web,"thinking":input.thinking,"search":search,"egress":input.egress(),"settings_revision":self.revision})
+        json!({"mode":input.mode,"workspace":self.workspace,"model":if results{None}else{Some(self.model_for(&input.mode))},"web":input.web,"thinking":input.thinking,"search":search,"egress":input.egress(),"settings_revision":self.revision})
     }
 }
 fn default_true() -> bool {
@@ -1021,10 +1021,12 @@ async fn file(State(app): State<Shared>, Path(id): Path<String>) -> Result<Respo
 }
 async fn tree(State(app):State<Shared>,axum::extract::Query(query):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
     let workspace=app.settings.lock().await.workspace.clone();
-    let project=dunce::canonicalize(&workspace)?;
+    let requested=query.get("path").cloned().unwrap_or(".".into());
     // The file panel is project-scoped, even when tools may access other explicit roots.
-    let directory=tools::checked_path(&project,query.get("path").map(String::as_str).unwrap_or("."))?;
-    let relative=directory.strip_prefix(&project)?.components().map(|part|part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+    let(project,directory,relative)=tokio::task::spawn_blocking(move||->anyhow::Result<(PathBuf,PathBuf,String)>{
+        let project=dunce::canonicalize(workspace)?;let directory=tools::checked_path(&project,&requested)?;
+        let relative=directory.strip_prefix(&project)?.components().map(|part|part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");Ok((project,directory,relative))
+    }).await??;
     let mut args=json!({"path":directory,"limit":64});
     if let Some(cursor)=query.get("cursor"){args["cursor"]=json!(cursor);}
     let cancel=app.shutdown.child_token();let _guard=cancel.clone().drop_guard();
@@ -1033,12 +1035,14 @@ async fn tree(State(app):State<Shared>,axum::extract::Query(query):axum::extract
     Ok(Json(page))
 }
 async fn inspect_project(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<Value> {
+    let value=tools::arguments("inspect_project",value)?;
     let cancel=app.shutdown.child_token();
     let _cancel_on_disconnect=cancel.clone().drop_guard();
-    Ok(Json(crate::discovery::tool(&app,"inspect_project",value,&cancel).await?))
+    Ok(Json(crate::discovery::project_view(&app,value,&cancel).await?))
 }
 async fn project_git(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<Value> {
-    let root = crate::projects::directory(&app, value["path"].as_str()).await?;
+    let value=tools::arguments("git_info",value)?;
+    let root = crate::projects::user_directory(&app, value["path"].as_str()).await?;
     let cancel=app.shutdown.child_token();let _guard=cancel.clone().drop_guard();
     Ok(Json(
         crate::projects::git(
@@ -1076,6 +1080,8 @@ async fn execution_log(State(app):State<Shared>,Path((id,stream)):Path<(String,S
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChatInput {
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub expected_workspace:Option<String>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub search:Option<crate::search::Options>,
     #[serde(default,skip_serializing_if = "Option::is_none")]
@@ -1178,25 +1184,30 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
         input.content.len() <= crate::context::MAX_REQUEST_TEXT_BYTES,
         "Текст сообщения превышает 512 КиБ; приложите его файлом или разделите",
     )?;
-    let model_guard = app.model_lifecycle.clone().try_read_owned().map_err(|_| {
-        anyhow::anyhow!("Движок обновляется или меняет устройство. Дождитесь завершения операции.")
-    })?;
-    let cancel = app.shutdown.child_token();
-    let run_id = input
-        .request_id
-        .clone()
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-    Uuid::parse_str(&run_id)?;
-    if app.tasks.get(run_id.clone()).await.is_err() {
-        for id in &input.attachments {
-            let file=attachment(&app,id).await?;
-            require(tokio::fs::metadata(&file.path).await?.is_file(),"Вложение больше не доступно")?;
-        }
+    let run_id=input.request_id.clone().unwrap_or_else(||Uuid::new_v4().to_string());Uuid::parse_str(&run_id)?;
+    // An accepted request belongs to its original scope, even when preferences later change.
+    if app.tasks.has_run(run_id.clone()).await?{
+        let _runs=app.runs.lock().await;
+        require(!app.tasks.is_deleted(input.conversation.clone()).await?,"Чат удалён")?;
+        app.tasks.begin(run_id.clone(),input.conversation.clone(),serde_json::to_value(&input)?).await?;return Ok(run_id);
+    }
+    if let Some(expected)=&input.expected_workspace{
+        if expected!=&app.settings.lock().await.workspace{return Err(ApiError::status(StatusCode::CONFLICT,"Папка проекта изменилась. Запрос не запущен; проверьте папку и отправьте сообщение снова."));}
+    }
+    let model_guard=app.model_lifecycle.clone().try_read_owned().map_err(|_|anyhow::anyhow!("Движок обновляется или меняет устройство. Дождитесь завершения операции."))?;
+    let cancel=app.shutdown.child_token();
+    for id in &input.attachments{let file=attachment(&app,id).await?;require(tokio::fs::metadata(&file.path).await?.is_file(),"Вложение больше не доступно")?;}
+    require(!app.runs.lock().await.values().any(|run|run.conversation==input.conversation),"В этом чате уже идёт ответ")?;
+    if header.count>0&&input.mode!="translate"&&!crate::agent::reply_only(&input.content)&&app.tasks.needs_legacy_import(input.conversation.clone()).await?{
+        // Do not hold the runs mutex while reading a large legacy file: Stop must stay responsive.
+        // Deletion/save use the storage guard, so a late import cannot resurrect a deleted chat.
+        let _storage=app.storage.lock().await;let legacy=app.load(&input.conversation).await?;
+        app.tasks.import_legacy_requests(&legacy,app.settings.lock().await.workspace.clone()).await?;
     }
     {
         let mut runs = app.runs.lock().await;
         require(!app.tasks.is_deleted(input.conversation.clone()).await?,"Чат удалён")?;
-        if app.tasks.get(run_id.clone()).await.is_ok() {
+        if app.tasks.has_run(run_id.clone()).await? {
             // Reconnecting an accepted request must not execute it twice.
             app.tasks
                 .begin(
@@ -1211,10 +1222,6 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
             !runs.values().any(|r| r.conversation == input.conversation),
             "В этом чате уже идёт ответ",
         )?;
-        if header.count>0&&input.mode!="translate"&&!crate::agent::reply_only(&input.content)&&app.tasks.needs_legacy_import(input.conversation.clone()).await?{
-            let legacy=app.load(&input.conversation).await?;
-            app.tasks.import_legacy_requests(&legacy,app.settings.lock().await.workspace.clone()).await?;
-        }
         app.tasks
             .begin_in_project(
                 run_id.clone(),
