@@ -41,6 +41,8 @@ mod tools;
 mod tool_schema;
 mod tool_catalog;
 mod search;
+mod source_index;
+mod citations;
 mod web_tools;
 
 use anyhow::Result;

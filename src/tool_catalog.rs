@@ -1,7 +1,7 @@
 //! Schema selection changes prompt size, never the server permission boundary.
 use anyhow::Result;
 use serde_json::{json,Value};
-const CORE:&[&str]=&["update_search_plan","read_search_plan","discover_tools","read_task","read_file","ingest_file","inspect_project","search_files","read_artifact","search_artifacts","read_run_log","update_plan"];
+const CORE:&[&str]=&["read_sources","update_search_plan","read_search_plan","discover_tools","read_task","read_file","ingest_file","inspect_project","search_files","read_artifact","search_artifacts","read_run_log","update_plan"];
 pub const GROUPS:&[&str]=&["core","project","files","processes","web","browser","materials","analysis","system"];
 fn member(group:&str,name:&str)->bool{match group{
     "core"=>CORE.contains(&name),

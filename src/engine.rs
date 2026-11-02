@@ -1301,7 +1301,19 @@ pub async fn run(
         }
     }
     let run=crate::permissions::TASK.try_with(Clone::clone).unwrap_or_default();
+    if result.is_ok()&&(answer.diagnostics.as_ref().is_some_and(|value|!value["search"].is_null())||answer.content.contains("[cite:")||answer.tools.iter().any(|tool|crate::web_tools::is_web_tool(tool["name"].as_str().unwrap_or("")))){
+        match crate::citations::validate(&app,&run,&answer.content,&cancel).await{
+            Ok((text,report))=>{
+                let mut summary=crate::citations::summary(&report);
+                if report["structured_markers"].as_u64().unwrap_or(0)>0||report["links"].as_u64().unwrap_or(0)>0{match app.tasks.put_artifact(run.clone(),"derived_result".into(),report.to_string(),json!({"origin":"citation_provenance","semantic_support_verified":false})).await{Ok(source)=>summary["artifact"]=source,Err(error)=>{summary["status"]=json!("unavailable");summary["error"]=json!(format!("{error:#}"));}}}
+                answer.diagnostics.get_or_insert_with(||json!({}))["citations"]=summary;
+                if text!=answer.content{answer.content=text;if let Some(last)=chat.history.last_mut().filter(|message|message["role"]=="assistant"){last["content"]=json!(answer.content);}emit(tx,json!({"type":"replace_content","text":answer.content})).await?;}
+            },
+            Err(error)=>{answer.diagnostics.get_or_insert_with(||json!({}))["citations"]=json!({"status":"unavailable","error":format!("{error:#}"),"semantic_support_verified":false});}
+        }
+    }
     answer.diagnostics.get_or_insert_with(||json!({}))["execution"]=evidence.report(&answer.tools,&run);
+    if app.tasks.has_web_sources(run.clone()).await.unwrap_or(false){answer.diagnostics.as_mut().unwrap()["source_index"]=json!({"run":run,"coverage":"saved_web_artifacts"});}
     if !material_sources.is_empty(){answer.diagnostics.as_mut().unwrap()["material_sources"]=json!(material_sources);answer.diagnostics.as_mut().unwrap()["material_previews"]=json!(material_previews);}
 
     answer.duration_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);

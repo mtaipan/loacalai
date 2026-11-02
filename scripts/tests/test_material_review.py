@@ -32,7 +32,7 @@ class Fixture(BaseHTTPRequestHandler):
             else:answer='Merged partial notes; cross-fragment relations unverified.'
             return self.reply({'message':{'role':'assistant','content':answer},'done':True})
         if 'QUESTION_REGISTRY_FIXTURE' in request:
-            names={d['function']['name'] for d in body.get('tools',[])};assert names<=set(['read_task','read_run_log','read_artifact','search_artifacts']),names;chat_tools.append(names)
+            names={d['function']['name'] for d in body.get('tools',[])};assert names<=set(['read_task','read_run_log','read_artifact','search_artifacts','read_sources']),names;chat_tools.append(names)
             if not tools:call=('search_artifacts',{'query':'BUG_NEEDLE'})
             else:
                 reads=[m for m in tools if m.get('tool_name')=='read_artifact']

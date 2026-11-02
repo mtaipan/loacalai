@@ -1,7 +1,7 @@
 """Isolated providers/inference: search packets, filters and independent mode rights."""
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-import json,os,socket,subprocess,threading,time,urllib.request,urllib.parse,urllib.error,uuid
+import json,os,socket,subprocess,threading,time,urllib.request,urllib.parse,urllib.error,uuid,sqlite3,hashlib
 project=Path(__file__).resolve().parents[2];root=project/'build-tools'/('search-test-'+uuid.uuid4().hex[:8]);(root/'data/workspace').mkdir(parents=True);(root/'data/workspace/fixture.txt').write_text('LOCAL_PROJECT_EVIDENCE')
 model='qwen2.5:3b';foundation='hf.co/DevQuasar/huihui-ai.Foundation-Sec-8B-abliterated-GGUF:Q4_K_M';provider_calls=[];inferences=[];shows=[];provider_fails=False;waiting=threading.Event();release_wait=threading.Event()
 class Fixture(BaseHTTPRequestHandler):
@@ -37,7 +37,10 @@ class Fixture(BaseHTTPRequestHandler):
                 if not any(m.get('tool_name')=='update_search_plan' for m in tools):return call('update_search_plan',{'steps':[{'title':'Compare primary sources','status':'in_progress'}]})
             if 'HOSTILE_CHAT' in text and not any(m.get('tool_name')=='read_file' for m in tools):return call('read_file',{'path':'fixture.txt'})
             if 'HOSTILE_CHAT' not in text and not any(m.get('tool_name')=='fetch_url' for m in tools):return call('fetch_url',{'url':site+'/page?number=0'})
-        self.reply({'message':{'role':'assistant','content':'SEARCH_FLOW_DONE. Actual source '+site+'/page?number=0'},'done':True})
+        if 'CITATION_CASE' in text:
+            source=json.loads(next(m['content'] for m in tools if m.get('tool_name')=='fetch_url'))['source_id'];content=f'Actual claim [cite:{source}]. Missing [cite:S-'+('0'*64)+']. Unobserved [reference](https://unobserved.invalid/reference).'
+        else:content='SEARCH_FLOW_DONE. Actual source '+site+'/page?number=0'
+        self.reply({'message':{'role':'assistant','content':content},'done':True})
 fixture=ThreadingHTTPServer(('127.0.0.1',0),Fixture);site=f'http://127.0.0.1:{fixture.server_port}';threading.Thread(target=fixture.serve_forever,daemon=True).start()
 with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
 base=f'http://127.0.0.1:{port}';http=urllib.request.build_opener(urllib.request.ProxyHandler({}));token=''
@@ -90,10 +93,22 @@ try:
         assert any(tool['name']=='read_file' and tool['status']=='succeeded' for tool in turn(text,mode='agent',network='off')['messages'][-1]['tools'])
     print('PASS Agent/Team search/research retains project actions, Russian operation forms retain tools')
     for depth in ['quick','detailed','deep']:
-        answer=turn('Read primary fixture sources',options={'depth':depth,'focus':'web'})['messages'][-1];assert 'SEARCH_FLOW_DONE' in answer['content'] and any(tool['name']=='fetch_url' for tool in answer['tools']);assert answer['diagnostics']['sampling']['chat_temperature']==.67
+        answer=turn('Read primary fixture sources '+site+'/page?number=0',options={'depth':depth,'focus':'web'})['messages'][-1];assert 'SEARCH_FLOW_DONE' in answer['content'] and any(tool['name']=='fetch_url' and tool['status']=='succeeded' for tool in answer['tools']);assert answer['diagnostics']['sampling']['chat_temperature']==.67
         if depth!='quick':assert any(tool['name']=='update_search_plan' and tool['status']=='succeeded' for tool in answer['tools'])
     answer=turn('HOSTILE_CHAT search this topic',mode='chat')['messages'][-1];assert any(tool['name']=='read_file' and tool['status']=='failed' for tool in answer['tools'])
     print('PASS search depths use selected model, reading and chat sampling; Chat cannot gain OS actions through retrieval')
+    cited=turn('CITATION_CASE read the primary source '+site+'/page?number=0',options={'depth':'quick','domains':['127.0.0.1']});answer=cited['messages'][-1];report=answer['diagnostics']['citations'];assert report['resolved']==1 and report['missing_ids']==1 and report['unverified_links']==1 and report['semantic_support_verified'] is False
+    assert '[cite:' not in answer['content'] and '[1]('+site+'/page?number=0)' in answer['content'] and '[источник не найден]' in answer['content']
+    run=answer['diagnostics']['execution']['run_id'];sources=read('/api/runs/'+run+'/sources');assert len(sources['items'])==20 and any(source['state']=='received' for source in sources['items']);assert not sources['indexing']['has_more']
+    downloaded=read('/api/artifacts/'+report['artifact']['id']);assert json.loads(downloaded['text'])['semantic_support_verified'] is False
+    stop()
+    # Own fixture only: simulate schema-7 artifacts with no derived source index,
+    # including one malformed historical result. No primary artifact is erased.
+    conn=sqlite3.connect(root/'data/tasks.sqlite3');conn.executescript('DROP TABLE web_sources; DROP TABLE web_source_receipts; DROP TABLE web_source_index_errors; PRAGMA user_version=7;')
+    raw='not-json';digest=hashlib.sha256(raw.encode()).hexdigest();broken=str(uuid.uuid4());conn.execute('INSERT OR IGNORE INTO artifact_bodies VALUES (?,?,?)',(digest,len(raw),len(raw)));conn.execute('INSERT OR IGNORE INTO artifact_chunks(hash,part,char_start,characters,text) VALUES (?,0,0,?,?)',(digest,len(raw),raw));conn.execute('INSERT INTO artifacts(id,run,kind,metadata,hash,created) VALUES (?,?,?,?,?,?)',(broken,run,'search_results','{}',digest,'2020-01-01T00:00:00Z'));conn.commit();conn.close()
+    start();recovered=read('/api/runs/'+run+'/sources');assert len(recovered['items'])==20 and recovered['indexing']['errors']['count']==1 and not recovered['indexing']['has_more'];assert read('/api/artifacts/'+broken)['text']==raw
+    assert read('/api/runs/'+run+'/sources?retry_errors=true')['indexing']['errors']['count']==1
+    print('PASS source receipts survive restart/window independence; structured citations resolve observed IDs, unknown IDs/links stay unverified, semantic support is never asserted')
     provider_fails=True;before=len(inferences);answer=turn('Provider failure',options={'depth':'results'},allow_error=True)['messages'][-1];assert answer['tools'][0]['status']=='failed' and len(inferences)==before;assert answer['diagnostics']['execution']['failed']==1
     print('PASS provider error persists a failed tool, no fabricated answer or fallback inference')
     provider_fails=False
@@ -109,7 +124,8 @@ try:
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         browser=pw.chromium.launch(channel='msedge',headless=True);page=browser.new_page(viewport={'width':320,'height':760});errors=[];page.on('pageerror',lambda error:errors.append(str(error)));page.goto(base);page.wait_for_selector('[data-mode="search"]');page.locator('[data-mode="search"]').click();page.locator('#search-preferences summary').click();page.locator('#search-depth').select_option('results');page.locator('#search-focus').select_option('news');page.locator('#search-domains').fill('127.0.0.1');page.locator('#search-domains').press('Tab');page.locator('#prompt').fill('UI fixture results');page.locator('#send').click();page.wait_for_selector('.search-result',timeout=20000);assert page.locator('.search-result').count()==8 and page.locator('.search-result b').count()==0
-        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'),page.evaluate('document.documentElement.scrollWidth');assert not errors,errors;page.screenshot(path=str(root/'search-mobile.png'),full_page=True);browser.close()
+        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'),page.evaluate('document.documentElement.scrollWidth');assert not errors,errors;page.screenshot(path=str(root/'search-mobile.png'),full_page=True)
+        page.locator('[data-source-index]').last.click();page.wait_for_selector('.source-index-row');assert page.locator('.source-index-row').count()==20 and page.locator('.source-index-row b').count()==0;assert not page.locator('.source-retry').is_visible();assert page.locator('.source-close').bounding_box()['y']<760;page.screenshot(path=str(root/'source-index-mobile.png'),full_page=True);page.locator('.source-close').click();browser.close()
     print('PASS Edge 320px search controls, literal source cards and no JS errors')
 finally:
     release_wait.set()

@@ -241,10 +241,12 @@ impl Session {
             }
             anyhow::bail!("{error}");
         }
+        crate::source_index::normalize(&mut value);
         if name=="web_search"{
             if let Some(rows)=value.as_object_mut().and_then(|object|object.remove("page_results")){
                 let run=crate::permissions::TASK.try_with(Clone::clone)?;let mut saved=value.clone();saved["results"]=rows;
                 let descriptor=app.tasks.put_artifact(run,"search_results".into(),saved.to_string(),json!({"query":args["query"],"page":value["page"],"provider":value["provider"],"requested_filters":value["requested_filters"],"origin":"provider_results","full_pages_read":false})).await?;
+                app.tasks.index_web_source(descriptor["id"].as_str().unwrap().into(),saved.clone()).await?;
                 value["page_result_count"]=json!(saved["results"].as_array().map_or(0,Vec::len));value["page_source"]=descriptor;
             }
         }

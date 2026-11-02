@@ -19,11 +19,11 @@ pub struct TaskScope {
 }
 pub fn urls(text: &str) -> Vec<reqwest::Url> {
     let mut found = Vec::new();
+    let mut seen=std::collections::HashSet::new();
     let mut rest = text;
-    while let Some(at) = rest.to_ascii_lowercase().find("http") {
+    while let Some(at) = rest.as_bytes().windows(4).position(|part|part.eq_ignore_ascii_case(b"http")) {
         rest = &rest[at..];
-        let lower = rest.to_ascii_lowercase();
-        let ipv6_end = if lower.starts_with("http://[") || lower.starts_with("https://[") {
+        let ipv6_end = if rest.get(..8).is_some_and(|s|s.eq_ignore_ascii_case("http://[")) || rest.get(..9).is_some_and(|s|s.eq_ignore_ascii_case("https://[")) {
             rest.find(']').map(|i| i + 1).unwrap_or(0)
         } else {
             0
@@ -40,7 +40,7 @@ pub fn urls(text: &str) -> Vec<reqwest::Url> {
             .unwrap_or(rest.len());
         let candidate = rest[..end].trim_end_matches([',', ';', '!', '?', '.']);
         if let Ok(url) = reqwest::Url::parse(candidate) {
-            if ["http", "https"].contains(&url.scheme()) && !found.contains(&url) {
+            if ["http", "https"].contains(&url.scheme()) && seen.insert(url.to_string()) {
                 found.push(url);
             }
         }
@@ -48,9 +48,6 @@ pub fn urls(text: &str) -> Vec<reqwest::Url> {
             rest = &rest[1..];
         } else {
             rest = &rest[end..];
-        }
-        if found.len() == 16 {
-            break;
         }
     }
     found
@@ -238,7 +235,7 @@ impl TaskScope {
     }
     pub fn allows(&self, name: &str) -> bool {
         if name=="discover_tools"{return !self.read_only;}
-        if ["read_task","read_artifact","search_artifacts","read_run_log"].contains(&name) {return true;}
+        if ["read_sources","read_task","read_artifact","search_artifacts","read_run_log"].contains(&name) {return true;}
         if matches!(name,"update_search_plan"|"read_search_plan"){return self.research;}
         if self.read_only{return self.web_enabled&&["web_search","fetch_url","browser_open","browser_read"].contains(&name);}
         if crate::web_tools::is_web_tool(name) && !self.web_enabled {
@@ -427,6 +424,11 @@ impl TaskScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn url_lists_have_no_sixteen_address_cutoff_and_keep_ipv6_and_unicode(){
+        let text=(0..2000).map(|index|format!("HTTPS://example.org/page/{index} ")).collect::<String>()+"http://[::1]:8080/page. https://example.org/🦀";
+        let found=urls(&text);assert_eq!(found.len(),2002);assert_eq!(found[2000].host_str(),Some("[::1]"));assert!(found[2001].path().contains("%F0%9F"));assert_eq!(urls("http://example.org/a http://example.org/a").len(),1);
+    }
     #[test]
     fn retrieval_preference_preserves_mixed_work_and_chat_permissions(){
         for text in ["Погугли документацию и исправь проект","Посмотри https://example.org/docs и обнови исходники","Search the web and fix the project"]{

@@ -37,6 +37,7 @@ rusqlite = { version = "0.40.1", features = ["bundled"] }
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 sha2 = "0.10"
 encoding_rs = "0.8"
+pulldown-cmark = { version = "0.13.6", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = { version = "5.4.3", features = ["std"] }

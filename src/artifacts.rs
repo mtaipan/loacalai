@@ -123,13 +123,16 @@ pub fn context_preview(value:&Value,budget:usize)->Value{let mut budget=budget;c
 pub async fn archive_record(app:&crate::api::Shared,run:&str,mut record:Value)->Result<Value>{
     let name=record["name"].as_str().unwrap_or("").to_string();let text=record["result"].as_str().unwrap_or("").to_string();
     if name=="ingest_file"&&record["status"]=="succeeded"{if let Ok(value)=serde_json::from_str::<Value>(&text){record["material_artifact"]=value["material"].clone();}}
-      let derived=["discover_tools","read_task","read_run_log","search_artifacts","update_plan","update_search_plan","read_search_plan","security_analyze","translate_text"].contains(&name.as_str());
+      let derived=["read_sources","discover_tools","read_task","read_run_log","search_artifacts","update_plan","update_search_plan","read_search_plan","security_analyze","translate_text"].contains(&name.as_str());
     let source=if name=="read_artifact"&&record["status"]=="succeeded" {app.tasks.artifact(record["arguments"]["id"].as_str().unwrap_or("").into()).await?}else{
         let parsed=serde_json::from_str::<Value>(&text).ok();
         let coverage=parsed.as_ref().map(|value|json!({"start_line":value["start_line"],"end_line":value["end_line"],"has_more":value["has_more"],"next_start_line":value["next_start_line"],"next_offset":value["next_offset"],"complete":value["complete"],"start_page":value["start_page"],"end_page":value["end_page"],"total_pages":value["total_pages"],"encoding":value["encoding"],"revision":value["revision"],"start_byte":value["start_byte"],"end_byte":value["end_byte"],"total_bytes":value["total_bytes"],"partial_line":value["partial_line"]}));
         app.tasks.put_artifact(run.into(),if derived {"derived_result"}else{"tool_result"}.into(),text.clone(),json!({"tool_id":record["id"],"tool_name":name,"status":record["status"],"path":parsed.as_ref().map(|value|&value["path"]),"url":parsed.as_ref().map(|value|&value["url"]),"coverage":coverage,"origin":if derived {"derived"}else{"tool_observation"}})).await?
     };
     record["result_artifact"]=source;
+    if crate::web_tools::is_web_tool(&name)&&record["status"]=="succeeded"{
+        if let Ok(value)=serde_json::from_str::<Value>(&text){if let Err(error)=app.tasks.index_web_source(record["result_artifact"]["id"].as_str().unwrap().into(),value).await{record["source_index_error"]=json!(format!("{error:#}"));}}
+    }
     if text.len()>16384 {
         let preview=if let Ok(value)=serde_json::from_str::<Value>(&text){let mut budget=2500;let mut value=compact_value(&value,&mut budget);if let Some(object)=value.as_object_mut(){object.insert("preview_only".into(),json!(true));}value.to_string()}else{crate::tools::truncate(&text,4000)};
         record["result"]=json!(preview);record["result_preview_only"]=json!(true);

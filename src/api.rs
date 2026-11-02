@@ -405,6 +405,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/runs/{id}", get(run_snapshot))
         .route("/api/runs/{id}/events", get(run_events))
         .route("/api/runs/{id}/tools", get(run_tool_page))
+        .route("/api/runs/{id}/sources",get(run_source_page))
         .route("/api/runs/{id}/text", get(run_text_page))
         .route("/api/chats/{id}/tasks", get(conversation_tasks))
         .route("/api/tasks/{id}", get(task_state))
@@ -1278,6 +1279,10 @@ async fn workspace_events(
 }
 async fn run_snapshot(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     Ok(Json(app.tasks.get(id).await?))
+}
+async fn run_source_page(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
+    app.tasks.get(id.clone()).await?;let before=q.get("before").map(|value|value.parse::<i64>()).transpose()?;let snapshot=q.get("snapshot").map(|value|value.parse::<i64>()).transpose()?;
+    Ok(Json(crate::source_index::page(&app,&id,before,snapshot,q.get("retry_errors").map(|value|value.parse::<bool>()).transpose()?.unwrap_or(false),&app.shutdown.child_token()).await?))
 }
 async fn run_events(
     State(app): State<Shared>,

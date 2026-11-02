@@ -48,10 +48,15 @@ try:
         before=page['next_before']
         if not before:break
     assert len(ids)==81,len(ids)
-    thoughts=[];before=None
-    while True:
-        page=read('/api/runs/'+run+'/text?kind=thinking'+('&before='+str(before) if before else ''));thoughts[:0]=[row['text'] for row in page['items']];before=page['next_before']
-        if not before:break
+    # Tool receipts are persisted before publication; the independent event
+    # relay may still be draining thinking events when inference starts waiting.
+    for _ in range(100):
+        thoughts=[];before=None
+        while True:
+            page=read('/api/runs/'+run+'/text?kind=thinking'+('&before='+str(before) if before else ''));thoughts[:0]=[row['text'] for row in page['items']];before=page['next_before']
+            if not before:break
+        if len(thoughts)==81:break
+        time.sleep(.05)
     assert len(thoughts)==81 and thoughts[0].startswith('THOUGHT_0 ') and thoughts[-1].startswith('THOUGHT_80 ')
     from playwright.sync_api import sync_playwright
     with sync_playwright() as playwright:
