@@ -57,3 +57,7 @@ button,input,select,textarea{font:inherit}
 
 .source-index-row{padding:16px 0;border-bottom:1px solid var(--line2);overflow-wrap:anywhere}.source-index-row>a{display:block;font-weight:600}.source-index .dialog-footer{flex-wrap:wrap}.source-index-list{min-width:0}
 [hidden]{display:none!important}
+
+.approval-shortcut{width:100%;margin-bottom:8px;min-height:32px}
+
+.conversation-scroll{scroll-behavior:auto}

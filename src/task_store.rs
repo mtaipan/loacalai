@@ -196,6 +196,15 @@ impl Store {
             id.map(|id|crate::task_state::snapshot(conn,&id,0)).transpose()
         }).await
     }
+    pub async fn permission_task(&self,run:String)->Result<Option<(String,String)>>{
+        self.access(move|conn|Ok(conn.query_row("SELECT t.task,substr(w.goal,1,180) FROM task_runs t JOIN work_tasks w ON w.id=t.task WHERE t.run=?1 AND w.state='open'",[run],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).optional()?)).await
+    }
+    pub async fn permission_task_titles(&self,ids:Vec<String>)->Result<serde_json::Map<String,Value>>{
+        self.access(move|conn|{let mut query=conn.prepare("SELECT id,substr(goal,1,180) FROM work_tasks WHERE id IN (SELECT value FROM json_each(?1))")?;let rows=query.query_map([serde_json::to_string(&ids)?],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;Ok(rows.into_iter().map(|(id,title)|(id,json!(title))).collect())}).await
+    }
+    pub async fn work_task_ids(&self,conversation:String)->Result<Vec<String>>{
+        self.access(move|conn|{let mut query=conn.prepare("SELECT id FROM work_tasks WHERE conversation=?1")?;let ids=query.query_map([conversation],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;Ok(ids)}).await
+    }
     pub async fn task(&self,id:String,after:i64)->Result<Value>{self.access(move|conn|crate::task_state::snapshot(conn,&id,after)).await}
     pub async fn task_request(&self,id:String,sequence:i64,offset:usize)->Result<Value>{
         self.task_request_slice(id,sequence,offset,16000).await

@@ -298,9 +298,11 @@ async fn approval_scoped(
 }
 async fn approval_details(
     app:&Shared,title:&str,details:&str,private_details:Option<&str>,
-    tx:&mpsc::Sender<Value>,cancel:&CancellationToken,tool_id:&str,scope:crate::permissions::Scope,
+    tx:&mpsc::Sender<Value>,cancel:&CancellationToken,tool_id:&str,mut scope:crate::permissions::Scope,
 ) -> Result<()> {
     anyhow::ensure!(!cancel.is_cancelled(), "Остановлено пользователем");
+    let mut task_title=None;
+    if let Ok(run)=crate::permissions::TASK.try_with(Clone::clone){if let Some((id,title))=app.tasks.permission_task(run).await?{scope.work_task=Some(id);task_title=Some(title);}}
     let mut pending = app.approvals.lock().await;
     let mode = app.settings.lock().await.permission_mode.clone();
     if app.grants.lock().await.allows(&scope, &mode) {
@@ -325,7 +327,7 @@ async fn approval_details(
     drop(pending);
     if let Err(error) = engine::emit(
         tx,
-        json!({"type":"approval","id":id,"tool_id":tool_id,"title":title,"details":details,"private_preview":private_details.is_some(),"scope":scope,"reusable":scope.reusable()}),
+        json!({"type":"approval","id":id,"tool_id":tool_id,"title":title,"details":details,"task_title":task_title,"private_preview":private_details.is_some(),"scope":scope,"reusable":scope.reusable()}),
     )
     .await
     {
@@ -591,7 +593,8 @@ pub async fn execute(
                 }
                 args["_expected_element"] = element.clone();
                 let waiting = std::time::Instant::now();
-                approval(app, "Действие на сайте", &details, tx, cancel, tool_id).await?;
+                let private=if matches!(args["action"].as_str(),Some("fill"|"select")){args["text"].as_str()}else{None};
+                approval_details(app, "Действие на сайте", &details, private, tx, cancel, tool_id,crate::permissions::Scope::once()).await?;
                 wait_ms = waiting.elapsed().as_millis().min(u64::MAX as u128) as u64;
             }
             let mut result = web.execute(app, name, &args, cancel).await?;
@@ -888,6 +891,7 @@ pub async fn execute(
         "run_command" | "start_process" => {
             let script = string(&args, "command")?;
             let directory = crate::projects::directory(app, args["directory"].as_str()).await?;
+            let project=app.settings.lock().await.workspace.clone();
             let seconds = args["timeout_seconds"].as_u64().unwrap_or(0);
             let limit = if seconds == 0 {
                 "Без ограничения времени".to_string()
@@ -904,7 +908,7 @@ pub async fn execute(
                 tx,
                 cancel,
                 tool_id,
-                crate::permissions::Scope::command(&directory,script),
+                crate::permissions::Scope::command_in(Path::new(&project),&directory,script),
             )
             .await?;
             let resolved = crate::projects::directory(app, args["directory"].as_str()).await?;

@@ -37,8 +37,8 @@ async function showArtifact(id){
 }
 
 async function showApprovalPreview(id){
-  const dialog=document.createElement('dialog');dialog.className='workspace-dialog';dialog.setAttribute('aria-label','Ввод в процесс');
-  dialog.innerHTML='<h2>Ввод в процесс</h2><div class="dialog-body"><p class="form-help">Точный текст, включая переносы строк. Доступен до принятия решения.</p><pre class="artifact-content" tabindex="0"></pre><p class="form-help" role="status">Чтение…</p></div><div class="dialog-footer"><button class="button">Закрыть</button></div>';
+  const dialog=document.createElement('dialog');dialog.className='workspace-dialog';dialog.setAttribute('aria-label','Ввод');
+  dialog.innerHTML='<h2>Ввод</h2><div class="dialog-body"><p class="form-help">Точный текст, включая переносы строк. Доступен до принятия решения.</p><pre class="artifact-content" tabindex="0"></pre><p class="form-help" role="status">Чтение…</p></div><div class="dialog-footer"><button class="button">Закрыть</button></div>';
   document.body.append(dialog);const controller=new AbortController();let timer;
   const erase=()=>{dialog.querySelector('pre').textContent='';dialog.close();};
   dialog.onclose=()=>{controller.abort();clearInterval(timer);dialog.remove();};dialog.querySelector('button').onclick=erase;dialog.showModal();

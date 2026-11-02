@@ -96,7 +96,12 @@ def run(model,text,web,mode='agent',allow_error=False,attachments=None):
     e=json.loads(line[5:]);assert allow_error or e['type']!='error',e
     if e['type']=='approval':
      assert site+'/browser-case' in e['details'],e
+     if e.get('private_preview'):assert read('/api/approve/'+e['id']+'/preview')['text'] in ['probe-user','probe-secret']
      read('/api/approve/'+e['id'],{'allow':True})
+     if e.get('private_preview'):
+      try:read('/api/approve/'+e['id']+'/preview')
+      except urllib.error.HTTPError as error:assert error.code==404
+      else:raise AssertionError('Browser input preview survived the decision')
  return read('/api/chats/'+chat['id'])['messages'][-1]
 try:
  for _ in range(80):

@@ -84,6 +84,7 @@ function handleGlobalShortcut(event){
   if(!editable&&(event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='n'){event.preventDefault();newChat();}
 }
 function setSidebarOpen(open){
+  const wasOpen=!document.body.classList.contains('sidebar-hidden'),restoreFocus=wasOpen&&(document.querySelector('.sidebar')?.contains(document.activeElement)||document.activeElement===document.getElementById('sidebar-backdrop'));
   document.body.classList.toggle('sidebar-hidden',!open);
   const mobile=innerWidth<761;
   const sidebar=document.querySelector('.sidebar');
@@ -92,7 +93,7 @@ function setSidebarOpen(open){
   document.querySelectorAll('main,.file-panel').forEach(element=>element.inert=mobile&&open);
   document.querySelector('[data-action="sidebar"]').setAttribute('aria-expanded',String(open));
   if(open&&mobile)document.getElementById('chat-search').focus({preventScroll:true});
-  if(!open)document.querySelector('[data-action="sidebar"]')?.focus({preventScroll:true});
+  if(!open&&restoreFocus)document.querySelector('[data-action="sidebar"]')?.focus({preventScroll:true});
 }
 function setupUI(){
   for(const dialog of document.querySelectorAll('dialog')){

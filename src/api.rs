@@ -822,6 +822,8 @@ async fn delete_chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
     let _storage=app.storage.lock().await;
     // Verify existence before accepting deletion, then make its intent durable first.
     tokio::fs::metadata(&path).await?;
+    let task_ids=app.tasks.work_task_ids(id.clone()).await?;
+    app.grants.lock().await.forget_work_tasks(&app.data,&task_ids)?;
     app.tasks.delete_conversation(id).await?;
     tokio::fs::remove_file(path).await?;
     Ok(Json(json!({"ok":true})))
@@ -1337,7 +1339,7 @@ async fn approve(
     let allowed = value["allow"].as_bool().unwrap_or(false);
     let duration = value["duration"].as_str().unwrap_or("once");
     require(
-        ["once", "task", "project"].contains(&duration),
+        ["once", "task", "work_task", "project"].contains(&duration),
         "Неизвестный срок разрешения",
     )?;
     if allowed && duration != "once" {
@@ -1360,9 +1362,10 @@ async fn approval_preview(State(app):State<Shared>,Path(id):Path<String>)->ApiRe
     Ok(Json(json!({"text":item.private_details.as_deref().ok_or(crate::task_store::MissingResource("Предпросмотр недоступен"))?})))
 }
 async fn permission_grants(State(app): State<Shared>) -> ApiResult<Value> {
-    Ok(Json(serde_json::to_value(
-        &app.grants.lock().await.entries,
-    )?))
+    let grants=app.grants.lock().await.entries.clone();let ids=grants.iter().filter_map(|grant|grant.scope.work_task.clone()).collect();
+    let titles=app.tasks.permission_task_titles(ids).await?;let mut values=serde_json::to_value(grants)?;
+    for grant in values.as_array_mut().unwrap(){if let Some(id)=grant["scope"]["work_task"].as_str(){grant["task_title"]=titles.get(id).cloned().unwrap_or(Value::Null);}}
+    Ok(Json(values))
 }
 async fn conversation_tasks(State(app):State<Shared>,Path(id):Path<String>)->ApiResult<Value>{
     app.load(&id).await?;
