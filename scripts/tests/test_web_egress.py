@@ -45,17 +45,37 @@ class Site(BaseHTTPRequestHandler):
         if self.path=='/redirect':self.send_response(302);self.send_header('Location',foreign_url+'/redirect-target');self.end_headers();return
         self.send_response(404 if self.path=='/missing' else 200);self.send_header('Content-Type','text/html; charset=utf-8');self.end_headers()
         if self.path=='/page':
-            self.wfile.write(('<html><title>Owned local site</title><body>LOCAL_EVIDENCE<img src="/image"><img src="/oversize"><img src="/redirect"><img src="'+foreign_url+'/image"><img src="https://external.invalid/image"><a href="'+foreign_url+'/clicked">Foreign service</a><script>fetch("/same-origin");fetch("/redirect").catch(()=>{});fetch("'+foreign_url+'/fetch").catch(()=>{});new WebSocket("'+foreign_url.replace('http:','ws:')+'/socket");</script></body></html>').encode())
+            self.wfile.write(('<html><title>Owned local site</title><body>LOCAL_EVIDENCE<label>Username<input name="username"></label><label>Password<input type="password"></label><img src="/image"><img src="/oversize"><img src="/redirect"><img src="'+foreign_url+'/image"><img src="https://external.invalid/image"><a href="'+foreign_url+'/clicked">Foreign service</a><script>fetch("/same-origin");fetch("/redirect").catch(()=>{});fetch("'+foreign_url+'/fetch").catch(()=>{});new WebSocket("'+foreign_url.replace('http:','ws:')+'/socket");</script></body></html>').encode())
         else:self.wfile.write(b'LOCAL_RESPONSE')
 site=ThreadingHTTPServer(('127.0.0.1',0),Site);local=f'http://127.0.0.1:{site.server_port}';threading.Thread(target=site.serve_forever,daemon=True).start()
 root=project/'build-tools'/('egress-'+uuid.uuid4().hex[:8]);root.mkdir();log=(root/'worker.log').open('w',encoding='utf-8');print(root,flush=True)
+database=root/'authority.sqlite3';db=worker.sqlite3.connect(database)
+db.executescript('PRAGMA user_version=9; CREATE TABLE runs(id TEXT PRIMARY KEY,input TEXT); CREATE TABLE task_runs(run TEXT PRIMARY KEY,task TEXT); CREATE TABLE task_requests(run TEXT,content TEXT); CREATE TABLE web_user_origins(run TEXT,origin TEXT);')
+for i in range(21):
+    content='Use alice and secret-from-original-message' if i==0 else 'continue'
+    db.execute('INSERT INTO runs VALUES (?,?)',(str(i),json.dumps({'content':content})));db.execute('INSERT INTO task_runs VALUES (?,?)',(str(i),'task'));db.execute('INSERT INTO task_requests VALUES (?,?)',(str(i),content))
+db.execute('INSERT INTO runs VALUES (?,?)',('foreign',json.dumps({'content':'different task'})));db.execute('INSERT INTO task_runs VALUES (?,?)',('foreign','foreign'))
+db.execute('INSERT INTO web_user_origins VALUES (?,?)',('0',local))
+for port in range(8100,8400):db.execute('INSERT INTO web_user_origins VALUES (?,?)',('0',f'http://localhost:{port}'))
+db.commit();db.close()
+authority=worker.Authority(str(database),'20')
+assert authority.user_origin(local) and authority.supplied('secret-from-original-message') and not authority.supplied('invented')
+for port in range(8100,8400):assert authority.user_origin(f'http://localhost:{port}')
+assert len(authority.origins)<=256 and authority.user_origin('http://localhost:8100')
+try:authority.db.execute('DELETE FROM runs')
+except worker.sqlite3.OperationalError:pass
+else:raise AssertionError('Authority connection must be read-only')
+authority.close();authority=worker.Authority(str(database),'foreign');assert not authority.user_origin(local) and not authority.supplied('secret-from-original-message');authority.close()
+print('PASS read-only durable user authority, full-task credentials beyond last twelve messages, cache eviction without access loss and foreign-task denial')
 p=subprocess.Popen([sys.executable,'-u','-c',"import runpy,faulthandler;faulthandler.dump_traceback_later(40,repeat=True);runpy.run_path("+repr(str(project/'runtime/web_worker.py'))+",run_name='__main__')"],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,text=True,encoding='utf-8',env={**os.environ,'PYTHONUTF8':'1'})
 lines=queue.Queue()
 def output():
     for line in p.stdout:lines.put(line)
 threading.Thread(target=output,daemon=True).start()
-def request(name,args,network='loopback',expected_error=False):
-    p.stdin.write(json.dumps({'name':name,'args':args,'network':network,'user_urls':[local+'/page']})+'\n');p.stdin.flush();result=json.loads(lines.get(timeout=35));assert bool(result.get('error'))==expected_error,result;return result
+def request(name,args,network='loopback',expected_error=False,authority_run=None):
+    payload={'name':name,'args':args,'network':network,'user_urls':[local+'/page']}
+    if authority_run is not None:payload['authority']={'database':str(database),'run':authority_run};payload['user_urls']=[]
+    p.stdin.write(json.dumps(payload)+'\n');p.stdin.flush();result=json.loads(lines.get(timeout=35));assert bool(result.get('error'))==expected_error,result;return result
 try:
     bound=worker.BROWSER_RESOURCE_BYTES;worker.BROWSER_RESOURCE_BYTES=1024
     try:
@@ -75,6 +95,10 @@ try:
     assert any('external.invalid' in value for value in page['blocked_requests']),page
     assert any(foreign_url in value for value in page['blocked_requests']),page
     assert '/same-origin' in seen and '/image' in seen and not foreign,(seen,foreign)
+    login=next(e['ref'] for e in page['elements'] if e['name']=='Username');password=next(e['ref'] for e in page['elements'] if e['name']=='Password')
+    request('browser_prepare',{'action':'fill','ref':login,'text':'alice'},authority_run='20')
+    request('browser_prepare',{'action':'fill','ref':password,'text':'secret-from-original-message'},authority_run='20')
+    denied=request('browser_prepare',{'action':'fill','ref':password,'text':'secret-from-original-message'},authority_run='foreign',expected_error=True);assert denied['error_code']=='needs_input'
     ref=next(e['ref'] for e in page['elements'] if e['name']=='Foreign service')
     request('browser_action',{'action':'click','ref':ref},expected_error=True)
     assert not foreign,foreign

@@ -852,7 +852,7 @@ pub async fn run(
         let existing=app.web_sessions.lock().await.get(&input.conversation).cloned();
         if let Some(session)=existing{session.lock().await.set_policy(crate::web_tools::Egress::Disabled).await;}
         None
-    }else{Some(crate::web_tools::session(&app,&input.conversation,&input.content,input.egress()).await?)};
+    }else{Some(crate::web_tools::session(&app,&input.conversation,input.egress()).await?)};
     let mut chat = app.load(&input.conversation).await?;
     chat.mode = input.mode.clone();
     if input.retry {
@@ -1025,7 +1025,6 @@ pub async fn run(
             web.search_options=search_options.clone();
             web.audit_urls=if scope.web_enabled||scope.local_web {crate::web_tools::security_test_urls(&input.content,&web.audit_urls,&web.last_page)} else {vec![]};
             if !web.audit_urls.is_empty(){if !scope.local_work(){scope.web_only=true;}use_tools=true;}
-            web.user_texts=chat.messages.iter().filter(|m|m.role=="user").rev().take(12).map(|m|m.content.clone()).collect();
             if (scope.web_enabled||scope.local_web) && !web.last_page.is_empty() && crate::web_tools::browser_followup(&input.content){if !scope.local_work(){scope.web_only=true;}use_tools=true;}
             let model_show=crate::thinking::show_cancellable(&app,&selected,&cancel).await?;
             let thinking=crate::thinking::resolve(&input.thinking,&model_show)?;

@@ -61,3 +61,15 @@ button,input,select,textarea{font:inherit}
 .approval-shortcut{width:100%;margin-bottom:8px;min-height:32px}
 
 .conversation-scroll{scroll-behavior:auto}
+
+.model-name{min-width:0;max-width:100%}.model-name>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tool-control{max-width:100%;min-width:0}.tool-control>summary{white-space:normal;overflow-wrap:anywhere}
+@media(max-width:480px){
+ .composer-toolbar{display:grid;grid-template-columns:36px 36px minmax(0,1fr) 36px 36px;gap:2px}
+ .composer-toolbar .tool-controls{grid-column:1/-1;grid-row:1;min-width:0}
+ .composer-toolbar .attach{grid-column:1;grid-row:2}
+ .composer-toolbar [data-action=paste]{grid-column:2;grid-row:2}
+ .composer-toolbar .toolbar-spacer{grid-column:3;grid-row:2}
+ .composer-toolbar [data-action=voice]{grid-column:4;grid-row:2}
+ .composer-toolbar #send{grid-column:5;grid-row:2}
+}

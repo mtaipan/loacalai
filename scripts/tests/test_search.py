@@ -108,6 +108,9 @@ try:
         if mode=='agent':
             local_chat=turn('LOCAL_OFFLINE continue',mode=mode,network='off',chat=local_chat)
             assert any(tool['name']=='fetch_url' and tool['status']=='succeeded' for tool in local_chat['messages'][-1]['tools'])
+            stop();start()
+            local_chat=turn('LOCAL_OFFLINE continue after restart',mode=mode,network='off',chat=local_chat)
+            assert any(tool['name']=='fetch_url' and tool['status']=='succeeded' for tool in local_chat['messages'][-1]['tools'])
             local_chat=turn('LOCAL_OFFLINE another task',mode=mode,network='off',chat=local_chat,new_task=True)
             assert any(tool['name']=='fetch_url' and tool['status']=='failed' for tool in local_chat['messages'][-1]['tools'])
     print('PASS Chat/Agent/Team loopback with external search off, same-task continuation, no inherited origin in a new Task')

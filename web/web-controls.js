@@ -8,6 +8,13 @@ if(webChoice==='research')webChoice='search';
 const thoughtLabel=v=>v===false?'Выкл':v===true?'Вкл':({low:'Низкий',medium:'Средний',high:'Высокий',max:'Максимальный',xhigh:'Очень высокий'}[v]||v);
 const thoughtValue=v=>v===false?'off':v===true?'on':String(v);
 function controlMenu(id,label,items){return `<details class="tool-control" id="${id}"><summary>${label}<span aria-hidden="true">⌄</span></summary><div class="tool-control-options">${items}</div></details>`;}
+function positionToolControl(details){
+ if(!details.open)return;const menu=details.querySelector('.tool-control-options'),summary=details.querySelector('summary');if(!menu||!summary)return;
+ const rect=summary.getBoundingClientRect(),above=rect.top-20,below=innerHeight-rect.bottom-20,up=above>=Math.min(menu.scrollHeight,300)||above>=below;
+ menu.style.position='fixed';menu.style.width=Math.min(245,innerWidth-24)+'px';menu.style.maxHeight=Math.max(40,Math.min(360,up?above:below))+'px';menu.style.overflowY='auto';
+ menu.style.left=Math.max(12,Math.min(rect.left,innerWidth-menu.getBoundingClientRect().width-12))+'px';menu.style.bottom=up?innerHeight-rect.top+8+'px':'auto';menu.style.top=up?'auto':rect.bottom+8+'px';
+}
+window.addEventListener('resize',()=>document.querySelectorAll('.tool-control[open]').forEach(positionToolControl));
 function renderToolControls(values=[false],loading=false){
  const box=document.getElementById('tool-controls');if(!box)return;
  box.hidden=state.mode==='translate';
@@ -21,7 +28,10 @@ function renderToolControls(values=[false],loading=false){
   (values.length>1?`<button type="button" data-thinking="auto" ${state.busy?'disabled':''}>Авто · как задано моделью${choice==='auto'?icon('check'):''}</button>`:''));
  const networkLabel=(state.busy?activeRunOptions()?.egress==='disabled':searchOptions().focus==='materials')?'Материалы задачи':(webLabels[networkChoice]||webLabels.search);
  const network=controlMenu('web-menu',icon('globe')+'Сеть: '+networkLabel,Object.entries(webLabels).map(([v,label])=>`<button type="button" data-web-mode="${v}" ${state.busy?'disabled':''}>${label}${v===networkChoice?icon('check'):''}</button>`).join('')+'<span class="tool-control-caption">Поиск отправляет запрос поисковику. При выключенном интернете доступны явно указанные localhost-адреса. Команды имеют собственный доступ к сети.</span>');
- box.innerHTML=(state.mode==='search'?'':network)+(state.mode==='search'&&searchOptions().depth==='results'?'':reasoning);
+ const html=(state.mode==='search'?'':network)+(state.mode==='search'&&searchOptions().depth==='results'?'':reasoning);
+ if(box._source===html){box.querySelectorAll('.tool-control[open]').forEach(positionToolControl);return;}
+ box._source=html;box.innerHTML=html;
+ box.querySelectorAll('.tool-control').forEach(details=>details.addEventListener('toggle',()=>positionToolControl(details)));
  box.querySelectorAll('[data-thinking]').forEach(b=>b.onclick=()=>{thinkingChoice=b.dataset.thinking;localStorage.setItem('gemma.thinking.'+model,thinkingChoice);renderToolControls(values);});
  box.querySelectorAll('[data-web-mode]').forEach(b=>b.onclick=()=>{webChoice=b.dataset.webMode;localStorage.setItem('gemma.webMode',webChoice);renderToolControls(values);});
 }

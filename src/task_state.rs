@@ -23,6 +23,7 @@ pub fn install(conn: &mut Connection, backfill:bool) -> Result<()> {
     Ok(())
 }
 pub fn associate(tx:&Transaction<'_>,run:&str,conversation:&str,input:&Value,project:&str)->Result<()> {
+    crate::web_authority::record(tx,run,input["content"].as_str().unwrap_or(""))?;
     if !matches!(input["mode"].as_str(),Some("agent"|"team"|"search"|"chat")) {return Ok(());}
     if input["mode"]!="search"&&crate::agent::reply_only(input["content"].as_str().unwrap_or("")) {return Ok(());}
     anyhow::ensure!(input["new_task"]!=true || input["task_id"].is_null(),"Выберите существующую или новую задачу");

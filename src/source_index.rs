@@ -10,6 +10,7 @@ pub fn install(conn:&Connection)->Result<()>{
         source_id TEXT NOT NULL,canonical_url TEXT NOT NULL,url TEXT NOT NULL,title TEXT NOT NULL,
         state TEXT NOT NULL,published TEXT,retrieved TEXT NOT NULL,artifact TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
         coverage TEXT NOT NULL,UNIQUE(artifact,source_id));
+        CREATE INDEX IF NOT EXISTS web_sources_origin_range ON web_sources(canonical_url,run);
         CREATE INDEX IF NOT EXISTS web_sources_run ON web_sources(run,sequence);
         CREATE INDEX IF NOT EXISTS web_sources_id ON web_sources(source_id,sequence);
         CREATE INDEX IF NOT EXISTS task_runs_task ON task_runs(task,run);
@@ -39,6 +40,7 @@ fn rows(value:&Value)->Vec<Value>{
         result.push(json!({"source_id":id,"canonical_url":canonical,"url":url,"title":item["title"].as_str().unwrap_or(""),"state":state,"published":item["published"],"retrieved":item["retrieved"].as_str().unwrap_or(""),"coverage":{"offset":item["offset"],"next_offset":item["next_offset"],"complete":item["complete"],"status":item["status"],"model_full_reading_verified":false}}));
     };
     let state=match value["status"].as_u64(){Some(400..)=>"unavailable",Some(300..=399)=>"redirect",_=>if value["complete"]==true{"received"}else{"partial"}};append(value,state);
+    if let Some(target)=value["redirect_to"].as_str(){append(&json!({"url":target,"retrieved":value["retrieved"]}),"linked");}
     for key in ["results","links"]{for row in value[key].as_array().into_iter().flatten(){append(row,if key=="results"{"found"}else{"linked"});}}
     result
 }

@@ -112,72 +112,38 @@ pub fn loopback_url(url:&reqwest::Url)->bool {
 pub struct Session {
     pub search_options:crate::search::Options,
     worker: Option<Worker>,
-    pub user_urls: Vec<String>,
-    observed: Vec<reqwest::Url>,
     pub policy:Egress,
     task:Option<String>,
     pub last_page: String,
-    pub user_texts: Vec<String>,
     pub audit_urls: Vec<String>,
     touched: std::time::Instant,
 }
 impl Session {
-    pub fn new(text: &str, enabled: bool) -> Self {
-        let observed = crate::task_scope::urls(text);
+    pub fn new(enabled: bool) -> Self {
         Self {
             search_options:crate::search::Options::default(),
-            user_urls: observed.iter().map(ToString::to_string).collect(),
-            observed,
             policy:Egress::for_request(enabled,true),
             task:None,
             worker: None,
             last_page: String::new(),
-            user_texts: vec![text.into()],
             audit_urls: vec![],
             touched: std::time::Instant::now(),
         }
     }
-    pub fn authorize(&self, name: &str, args: &Value) -> Result<()> {
+    pub fn authorize_policy(&self, name: &str, args: &Value) -> Result<()> {
         anyhow::ensure!(self.policy!=Egress::Disabled, "Веб-инструменты отключены: выбраны сохранённые материалы");
         anyhow::ensure!(name!="web_search"||self.policy==Egress::External,"Внешний поиск выключен для этого запроса");
         if matches!(name, "fetch_url" | "browser_open") {
             let u = checked_url(args["url"].as_str().unwrap_or(""))?;
             if self.policy==Egress::Loopback {
                 anyhow::ensure!(loopback_url(&u),"Интернет выключен: доступны только явно указанные localhost/loopback адреса");
-                anyhow::ensure!(self.user_urls.iter().filter_map(|raw|checked_url(raw).ok()).any(|url|url.origin()==u.origin()),"Локальный адрес должен быть указан пользователем, а не найден в содержимом страницы");
             }
-            anyhow::ensure!(self.observed.iter().any(|seen|seen.origin()==u.origin()),"Сначала найдите адрес через web_search или используйте URL/ссылку из текущей страницы. Не придумывайте адреса.");
         }
         Ok(())
     }
     pub async fn set_policy(&mut self,policy:Egress) {
         // Closing the owned browser also closes already connected sockets and pages.
         if self.policy!=policy{self.close().await;self.policy=policy;}
-    }
-    pub fn observe(&mut self, result: &Value) {
-        for item in result["results"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .chain(result["links"].as_array().into_iter().flatten())
-        {
-            if let Some(s) = item["url"].as_str() {
-                if let Ok(u) = checked_url(s) {
-                    if !self.observed.contains(&u) {
-                        self.observed.push(u);
-                    }
-                }
-            }
-        }
-        for key in ["url", "redirect_to"] {
-            if let Some(s) = result[key].as_str() {
-                if let Ok(u) = checked_url(s) {
-                    if !self.observed.contains(&u) {
-                        self.observed.push(u);
-                    }
-                }
-            }
-        }
     }
     async fn start(&mut self, app: &Shared) -> Result<()> {
         if self.worker.is_some() {
@@ -213,16 +179,37 @@ impl Session {
         args: &Value,
         cancel: &CancellationToken,
     ) -> Result<Value> {
-        self.authorize(name, args)?;
+        self.authorize_policy(name, args)?;
+        let run=crate::permissions::TASK.try_with(Clone::clone)?;
+        loop {
+            anyhow::ensure!(!cancel.is_cancelled(),"Остановлено пользователем");
+            if !app.tasks.backfill_web_authority(run.clone()).await?{break;}
+            tokio::task::yield_now().await;
+        }
+        let mut effective=args.clone();
+        if matches!(name,"fetch_url"|"browser_open") {
+            let url=checked_url(args["url"].as_str().unwrap_or(""))?;
+            let origin=url.origin().ascii_serialization();let explicit=self.policy==Egress::Loopback;
+            let mut known=app.tasks.known_web_origin(run.clone(),origin.clone(),explicit).await?;
+            // Old artifacts may not have a derived source index yet. Index in
+            // cancellable packets, without loading all observations or a quota.
+            while !known&&!explicit {
+                let page=crate::source_index::backfill(app,&run,cancel).await?;
+                known=app.tasks.known_web_origin(run.clone(),origin.clone(),false).await?;
+                if page["has_more"]!=true{break;}
+            }
+            anyhow::ensure!(known,"Адрес не указан пользователем и не найден в источниках этой задачи; содержимое страницы не разрешает доступ к другому локальному сервису");
+            effective["url"]=json!(url.to_string());
+        }
         if name=="web_search"{
             if let Some(id)=args["page_source"].as_str(){
                 let run=crate::permissions::TASK.try_with(Clone::clone)?;
-                let result=crate::search::saved_page(app,&run,id,args["query"].as_str().unwrap_or(""),usize::try_from(args["result_offset"].as_u64().unwrap_or(0))?,usize::try_from(args["count"].as_u64().unwrap_or(5))?,cancel).await?;self.observe(&result);return Ok(result);
+                let result=crate::search::saved_page(app,&run,id,args["query"].as_str().unwrap_or(""),usize::try_from(args["result_offset"].as_u64().unwrap_or(0))?,usize::try_from(args["count"].as_u64().unwrap_or(5))?,cancel).await?;return Ok(result);
             }
         }
         self.start(app).await?;
         let config = app.settings.lock().await.web.clone();
-        let request = json!({"name":name,"args":args,"network":self.policy,"search":self.search_options,"user_urls":self.user_urls,"user_texts":self.user_texts,"audit_urls":self.audit_urls,"config":config});
+        let request = json!({"name":name,"args":effective,"authority":{"database":app.data.join("tasks.sqlite3"),"run":run},"network":self.policy,"search":self.search_options,"audit_urls":self.audit_urls,"config":config});
         let worker = self.worker.as_mut().unwrap();
         let call = async {
             worker
@@ -290,7 +277,6 @@ impl Session {
             )
             .await;
         }
-        self.observe(&value);
         if matches!(name,"browser_open"|"browser_read"|"browser_action") {
             if value["navigation"]=="redirect_requires_open"{self.last_page.clear();}
             else if let Some(url)=value["url"].as_str(){self.last_page=url.into();}
@@ -375,7 +361,6 @@ pub fn browser_followup(text: &str) -> bool {
 pub async fn session(
     app: &Shared,
     id: &str,
-    text: &str,
     policy:Egress,
 ) -> Result<std::sync::Arc<tokio::sync::Mutex<Session>>> {
     let task=if let Ok(run)=crate::permissions::TASK.try_with(Clone::clone){app.tasks.permission_task(run).await?.map(|(id,_)|id)}else{None};
@@ -415,7 +400,7 @@ pub async fn session(
     let result = sessions
         .entry(id.into())
         .or_insert_with(|| {
-            std::sync::Arc::new(tokio::sync::Mutex::new(Session::new(text,policy==Egress::External)))
+            std::sync::Arc::new(tokio::sync::Mutex::new(Session::new(policy==Egress::External)))
         })
         .clone();
     drop(sessions);
@@ -423,19 +408,10 @@ pub async fn session(
         let mut s = result.lock().await;
         if s.task!=task {
             s.close().await;
-            *s=Session::new(text,policy==Egress::External);s.task=task;
+            *s=Session::new(policy==Egress::External);s.task=task;
         }
         s.set_policy(policy).await;
         s.touched = std::time::Instant::now();
-        for u in crate::task_scope::urls(text) {
-            let raw = u.to_string();
-            if !s.user_urls.contains(&raw) {
-                s.user_urls.push(raw);
-            }
-            if !s.observed.contains(&u) {
-                s.observed.push(u);
-            }
-        }
     }
     Ok(result)
 }
@@ -501,31 +477,15 @@ mod tests {
         assert!(include_str!("tools.rs").contains("Действие на сайте"));
     }
     #[test]
-    fn evidence_and_protocol_boundaries() {
-        let mut s = Session::new("open http://localhost:9999/", true);
-        assert!(s
-            .authorize("browser_open", &json!({"url":"http://localhost:9999/x"}))
-            .is_ok());
-        assert!(s
-            .authorize("browser_open", &json!({"url":"https://invented.invalid/"}))
-            .is_err());
-        s.observe(&json!({"results":[{"url":"https://example.org/"}]}));
-        assert!(s
-            .authorize("fetch_url", &json!({"url":"https://example.org/a"}))
-            .is_ok());
+    fn protocol_policy_does_not_confuse_loopback_with_private_lan() {
+        let mut s=Session::new(true);
         assert!(checked_url("file:///C:/secret").is_err());
         assert!(checked_url("http://user:pass@localhost").is_err());
-        s.policy = Egress::Loopback;
-        assert!(s.authorize("fetch_url",&json!({"url":"http://localhost:9999/ok"})).is_ok());
-        for raw in ["https://example.org/","http://localhost:9998/","http://127.0.0.1:9999/","http://192.168.0.1/"] {
-            s.observe(&json!({"results":[{"url":raw}]}));
-            assert!(s.authorize("browser_open",&json!({"url":raw})).is_err(),"{raw}");
-        }
-        s.policy=Egress::Disabled;
-        assert!(s.authorize("fetch_url",&json!({"url":"http://localhost:9999/"})).is_err());
         s.policy=Egress::Loopback;
-        assert!(s
-            .authorize("web_search", &json!({"query":"hello"}))
-            .is_err());
+        assert!(s.authorize_policy("fetch_url",&json!({"url":"http://localhost:9999/"})).is_ok());
+        for raw in ["https://example.org/","http://192.168.0.1/"]{assert!(s.authorize_policy("browser_open",&json!({"url":raw})).is_err());}
+        assert!(s.authorize_policy("web_search",&json!({"query":"hello"})).is_err());
+        s.policy=Egress::Disabled;
+        assert!(s.authorize_policy("fetch_url",&json!({"url":"http://localhost:9999/"})).is_err());
     }
 }

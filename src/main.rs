@@ -42,6 +42,7 @@ mod tool_schema;
 mod tool_catalog;
 mod search;
 mod source_index;
+mod web_authority;
 mod citations;
 mod web_tools;
 
