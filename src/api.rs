@@ -1017,12 +1017,13 @@ async fn inspect_project(State(app): State<Shared>, Json(value): Json<Value>) ->
 }
 async fn project_git(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<Value> {
     let root = crate::projects::directory(&app, value["path"].as_str()).await?;
+    let cancel=app.shutdown.child_token();let _guard=cancel.clone().drop_guard();
     Ok(Json(
         crate::projects::git(
             &root,
             value["action"].as_str().unwrap_or("status"),
             value["staged"].as_bool().unwrap_or(false),
-            &app.shutdown.child_token(),
+            &cancel,
         )
         .await?,
     ))

@@ -28,7 +28,7 @@ pub async fn worker(app: &Shared, mut request: Value, cancel: &CancellationToken
         .arg(app.root.join("runtime/document_worker.py"))
         .arg(path)
         .env("PYTHONUTF8", "1");
-    let (code, out, err) = tools::capture(command, cancel, 600).await?;
+    let (code, out, err) = tools::capture(command, cancel, 0).await?;
     let mut value: Value = serde_json::from_str(out.trim())
         .with_context(|| format!("Обработка документа: {}", tools::truncate(&err, 1000)))?;
     if value["result_file"] == true {

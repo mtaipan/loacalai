@@ -227,7 +227,7 @@ impl Session {
             let value: Value = serde_json::from_slice(&line)?;
             Ok::<Value, anyhow::Error>(value)
         };
-        let result = tokio::select! {_ = cancel.cancelled()=>Err(anyhow::anyhow!("Остановлено пользователем")), r=tokio::time::timeout(std::time::Duration::from_secs(60),call)=>match r {Ok(v)=>v,Err(_)=>Err(anyhow::anyhow!("Истекло время веб-инструмента"))}};
+        let result=tokio::select! {_=cancel.cancelled()=>Err(anyhow::anyhow!("Остановлено пользователем")),result=call=>result};
         let mut value = match result {
             Ok(v) => v,
             Err(e) => {
@@ -422,7 +422,7 @@ pub async fn install(app: &Shared, cancel: &CancellationToken) -> Result<Value> 
         .env("PYTHONUTF8", "1")
         .env("PLAYWRIGHT_BROWSERS_PATH", app.data.join("cache/browsers"))
         .env("PIP_CACHE_DIR", app.data.join("cache/pip"));
-    let (code, out, err) = tools::capture(c, cancel, 600).await?;
+    let (code, out, err) = tools::capture(c, cancel, 0).await?;
     anyhow::ensure!(
         code == 0,
         "Установка браузера: {} {}",

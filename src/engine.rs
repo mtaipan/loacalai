@@ -1349,7 +1349,7 @@ pub async fn pull_models(app: &Shared, models: &[String], tx: &mpsc::Sender<Valu
             command
                 .arg(app.root.join("runtime/setup_media.py"))
                 .env("LOCAL_GEMMA_SPEECH_PATH", tools::speech_model(app));
-            let (code, _, err) = tools::capture(command, &app.shutdown.child_token(), 7200).await?;
+            let (code, _, err) = tools::capture(command, &app.shutdown.child_token(), 0).await?;
             anyhow::ensure!(code == 0, "Whisper: {err}");
             continue;
         }

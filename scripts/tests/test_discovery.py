@@ -32,7 +32,7 @@ with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[
 base=f'http://127.0.0.1:{port}';token='';http=urllib.request.build_opener(urllib.request.ProxyHandler({}));process=None
 (root/'data/settings.json').write_text(json.dumps({'workspace':str(workspace),'computer_access':False,'agent_model':model,'chat_model':model,'cpu_only':True,'source':'en','target':'ru','theme':'dark'}))
 log=(root/'test.log').open('w')
-def call(path,body=None):return http.open(urllib.request.Request(base+path,data=json.dumps(body).encode() if body is not None else None,headers={'Content-Type':'application/json','X-Studio-Token':token}),timeout=60)
+def call(path,body=None):return http.open(urllib.request.Request(base+path,data=json.dumps(body).encode() if body is not None else None,headers={'Content-Type':'application/json','X-Studio-Token':token}),timeout=90)
 def read(path,body=None):
     with call(path,body) as response:return json.load(response)
 def start():
@@ -50,7 +50,7 @@ def stop():
     except subprocess.TimeoutExpired:process.kill();process.wait(timeout=5)
 def turn(chat,tool,args,new_task=False,failed=False):
     content='Inspect project files. DISCOVERY_CASE:'+json.dumps({'tool':tool,'arguments':args},ensure_ascii=False)
-    with call('/api/chat',{'conversation':chat['id'],'content':content,'mode':'agent','web':'off','source':'en','target':'ru','attachments':[],'new_task':new_task}) as response:
+    with call('/api/chat',{'conversation':chat['id'],'content':content,'mode':'agent','web':('auto' if tool=='web_search' else 'off'),'source':'en','target':'ru','attachments':[],'new_task':new_task}) as response:
         for line in response:
             if line.startswith(b'data:'):
                 event=json.loads(line[5:]);assert event['type']!='approval',event
@@ -131,6 +131,14 @@ try:
         assert not errors,errors
         browser.close()
     print('PASS Edge320 inspector changes packets, replays previous packet and retains page on failed request/retry')
+    if os.environ.get('LOCAL_GEMMA_SLOW_PROTOCOL')=='1':
+        (root/'runtime').mkdir()
+        subprocess.run(['powershell.exe','-NoProfile','-Command','New-Item -ItemType Junction -Path $env:TEST_PY_LINK -Target $env:TEST_PY_TARGET | Out-Null'],env={**os.environ,'TEST_PY_LINK':str(root/'runtime/python'),'TEST_PY_TARGET':str(project/'runtime/python')},check=True)
+        (root/'runtime/web_worker.py').write_text("import json,sys,time\nfor line in sys.stdin:\n request=json.loads(line);time.sleep(65);print(json.dumps({'query':request['args'].get('query',''),'results':[],'worker_wait_seconds':65}),flush=True)\n")
+        started=time.monotonic();result=turn(chat,'web_search',{'query':'slow protocol fixture'})
+        assert time.monotonic()-started>=65 and result['worker_wait_seconds']==65,result
+        print('PASS own web protocol worker completes after 65 seconds without the former 60-second deadline; no network requests')
+
     # Deletion only removes internal cursor/queue receipts; source files survive.
     with sqlite3.connect(root/'data/tasks.sqlite3') as db:task_ids=[row[0] for row in db.execute('SELECT id FROM work_tasks WHERE conversation=?',(chat['id'],))]
     request=urllib.request.Request(base+'/api/chats/'+chat['id'],method='DELETE',headers={'X-Studio-Token':token})

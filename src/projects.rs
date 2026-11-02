@@ -113,7 +113,7 @@ pub async fn git(
     );
     let mut locate = git_command(root);
     locate.args(["rev-parse", "--show-toplevel"]);
-    let (code, out, err) = tools::capture(locate, cancel, 15)
+    let (code, out, err) = tools::capture(locate, cancel, 0)
         .await
         .context("Git не установлен или недоступен")?;
     anyhow::ensure!(
@@ -154,7 +154,7 @@ pub async fn git(
             cmd.args(["log", "-8", "--format=%h %s", "--no-show-signature"]);
         }
     }
-    let (code, out, err) = tools::capture(cmd, cancel, 20).await?;
+    let (code, out, err) = tools::capture(cmd, cancel, 0).await?;
     anyhow::ensure!(
         code == 0,
         "Git завершился с кодом {code}: {}",

@@ -135,7 +135,7 @@ async fn run(
     command.creation_flags(0x08000000);
     let mut child = command.spawn()?;
     let job = async {
-        for _ in 0..100 {
+        loop {
             if let Some(code) = child.try_wait()? {
                 anyhow::bail!("Ранкер завершился при запуске: {code}");
             }
@@ -156,7 +156,6 @@ async fn run(
             .as_array()
             .context("Нет списка источников")?
             .iter()
-            .take(8)
             .map(|r| {
                 format!(
                     "{}\n{}",
@@ -174,7 +173,7 @@ async fn run(
         let value:Value=app.client.post(format!("{url}/reranking")).bearer_auth(&key).json(&json!({"query":query.chars().take(1000).collect::<String>(),"documents":docs,"top_n":docs.len(),"return_documents":false})).send().await?.error_for_status()?.json().await?;
         reorder(results, &value)
     };
-    let result = tokio::select! {_=cancel.cancelled()=>Err(anyhow::anyhow!("Переранжирование остановлено")),r=tokio::time::timeout(std::time::Duration::from_secs(60),job)=>r.context("Ранкер превысил лимит 60 секунд")?};
+    let result=tokio::select! {_=cancel.cancelled()=>Err(anyhow::anyhow!("Переранжирование остановлено")),result=job=>result};
     let _ = child.kill().await;
     let _ = child.wait().await;
     result
@@ -190,7 +189,7 @@ pub async fn apply(app: &Shared, query: &str, value: &mut Value, cancel: &Cancel
     match run(app, query, &value["results"], cancel).await {
         Ok(r) => {
             value["results"] = r;
-            value["reranking"] = json!({"model":MODEL,"applied":true,"execution_ms":start.elapsed().as_millis(),"device":"cpu"});
+            value["reranking"] = json!({"model":MODEL,"applied":true,"execution_ms":start.elapsed().as_millis(),"device":"cpu","scope":"current_result_packet","document_excerpt_characters":1800,"query_excerpt_characters":1000});
         }
         Err(e) => {
             value["reranking"] = json!({"model":MODEL,"applied":false,"reason":format!("{e:#}"),"original_order_preserved":true})

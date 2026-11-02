@@ -545,7 +545,7 @@ pub async fn install_package(
         .arg("--version")
         .arg(version)
         .env("PYTHONUTF8", "1");
-    let result = tools::capture(cmd, &app.shutdown.child_token(), 3600).await;
+    let result = tools::capture(cmd, &app.shutdown.child_token(), 0).await;
     app.compute.lock().await.installing = false;
     // Bring back the private service even when a download fails.
     let restart = ensure(app, &config).await;

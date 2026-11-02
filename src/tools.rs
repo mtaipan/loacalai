@@ -154,7 +154,7 @@ pub async fn media(
         command.arg("--language").arg(language);
     }
     command.arg("--seconds").arg(seconds.to_string());
-    let (_, stdout, stderr) = capture(command, cancel, 600).await?;
+    let (_, stdout, stderr) = capture(command, cancel, 0).await?;
     let result: Value = serde_json::from_str(stdout.trim()).with_context(|| {
         format!(
             "Ошибка медиа: {} {}",
