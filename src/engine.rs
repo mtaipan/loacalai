@@ -68,6 +68,16 @@ async fn model(
     tx: &mpsc::Sender<Value>,
     cancel: &CancellationToken,
 ) -> Result<Value> {
+    crate::resources::with_memory_wait(||model_attempt(app,model,messages,mode.clone(),tx,cancel),tx,cancel).await
+}
+async fn model_attempt(
+    app: &Shared,
+    model: &str,
+    messages: &[Value],
+    mode: InferenceMode,
+    tx: &mpsc::Sender<Value>,
+    cancel: &CancellationToken,
+) -> Result<Value> {
     if app.resources.gate.try_lock().is_err() {
         emit(
             tx,

@@ -5,6 +5,37 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug)]
+pub struct MemoryPressure(pub String);
+impl std::fmt::Display for MemoryPressure{
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str(&self.0)}
+}
+impl std::error::Error for MemoryPressure{}
+
+/// An attempt must release its broker lease before returning a pressure error.
+/// Waiting has no total deadline and holds no inference resource.
+pub async fn with_memory_wait<F,Fut>(attempt:F,tx:&tokio::sync::mpsc::Sender<Value>,cancel:&CancellationToken)->Result<Value>
+where F:FnMut()->Fut,Fut:std::future::Future<Output=Result<Value>>{
+    memory_wait(attempt,tx,cancel,std::time::Duration::from_secs(5)).await
+}
+async fn memory_wait<F,Fut>(mut attempt:F,tx:&tokio::sync::mpsc::Sender<Value>,cancel:&CancellationToken,interval:std::time::Duration)->Result<Value>
+where F:FnMut()->Fut,Fut:std::future::Future<Output=Result<Value>>{
+    let mut waiting=false;
+    loop{
+        let result=tokio::select!{biased;_=cancel.cancelled()=>anyhow::bail!("Остановлено пользователем"),result=attempt()=>result};
+        match result{
+            Err(error) if error.downcast_ref::<MemoryPressure>().is_some()=>{
+                if !waiting{
+                    let notice=json!({"type":"notice","message":format!("Ожидание свободной RAM. {error} Можно остановить операцию.")});
+                    tokio::select!{_=cancel.cancelled()=>anyhow::bail!("Остановлено пользователем"),sent=tx.send(notice)=>sent.map_err(|_|anyhow::anyhow!("Канал задачи закрыт"))?};waiting=true;
+                }
+                tokio::select!{_=cancel.cancelled()=>anyhow::bail!("Остановлено пользователем"),_=tokio::time::sleep(interval)=>{}}
+            },
+            result=>return result,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Broker {
     pub gate: Arc<Mutex<()>>,
@@ -162,12 +193,18 @@ pub fn fit_context(
     let quant=show["details"]["quantization_level"].as_str().unwrap_or("");
     let bits=match quant{"F16"|"BF16"=>Some(16),"F32"=>Some(32),_=>quant.strip_prefix('Q').or_else(||quant.strip_prefix("IQ")).and_then(|q|q.split('_').next()?.parse::<u64>().ok())};
     let weights=parameter_count.zip(bits).map(|(n,b)|n.saturating_mul(b).div_ceil(8).saturating_mul(12)/10);
-    anyhow::ensure!(available>reserve&&weights.is_none_or(|bytes|bytes<available-reserve),"Недостаточно свободной RAM для модели: доступно {} МиБ, резерв ОС {} МиБ, оценка весов {} МиБ. Запрос сохранён. Освободите память или выберите меньшую модель; оценка приблизительная",available/(1024*1024),reserve/(1024*1024),weights.unwrap_or(0)/(1024*1024));
+    let room=total.saturating_sub(reserve);
+    anyhow::ensure!(weights.is_none_or(|bytes|bytes<room),"Оценка весов модели {} МиБ превышает RAM устройства после резерва ОС {} МиБ. Выберите меньшую модель; запрос сохранён, оценка приблизительная",weights.unwrap_or(0)/(1024*1024),room/(1024*1024));
+    if available<=reserve||weights.is_some_and(|bytes|bytes>=available.saturating_sub(reserve)){
+        return Err(MemoryPressure(format!("Доступно {} МиБ, резерв ОС {} МиБ, оценка весов {} МиБ; оценка приблизительная.",available/(1024*1024),reserve/(1024*1024),weights.unwrap_or(0)/(1024*1024))).into());
+    }
     let Some(per_token)=per_token else{return Ok(json!({"estimated":false,"reason":"architecture_metadata_missing","weights_bytes":weights,"os_reserve_bytes":reserve,"memory":memory}));};
     let budget=available.saturating_sub(reserve).saturating_sub(weights.unwrap_or(0));let safe=(budget/per_token).min(usize::MAX as u64) as usize;
     let trained=crate::context::model_limit(show);
     let required=if config.window_tokens==0{4096.min(trained)}else{config.window_tokens.min(trained)};
-    anyhow::ensure!(safe>=required,"Контекст {} превышает оценку доступной RAM (около {safe} токенов). Запрос сохранён; выберите Авто или уменьшите окно",required);
+    let physical_safe=room.saturating_sub(weights.unwrap_or(0))/per_token;
+    anyhow::ensure!(physical_safe>=required as u64,"Контекст {} превышает оценку RAM устройства (около {physical_safe} токенов после резерва ОС). Выберите Авто или уменьшите окно; запрос сохранён",required);
+    if safe<required{return Err(MemoryPressure(format!("Для контекста {required} токенов пока доступно около {safe}; оценка приблизительная.")).into());}
     if config.window_tokens==0{config.auto_max_tokens=config.auto_max_tokens.min(safe);}
     Ok(json!({"estimated":true,"kv_bytes_per_token":per_token,"weights_bytes":weights,"os_reserve_bytes":reserve,"safe_window_tokens":safe,"memory":memory}))
 
@@ -176,6 +213,32 @@ pub fn fit_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn pressure_wait_releases_broker_retries_and_cancels_without_a_total_deadline(){
+        let broker=Arc::new(Broker::default());let cancel=CancellationToken::new();let(tx,mut rx)=tokio::sync::mpsc::channel(8);let count=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result=memory_wait(||{let broker=broker.clone();let count=count.clone();let cancel=cancel.clone();async move{
+            let _lease=broker.acquire(reqwest::Client::new(),"fixture",&cancel).await?;
+            let index=count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+            if index<2{Err(MemoryPressure("temporary fixture".into()).into())}else{Ok(json!({"done":true}))}
+        }},&tx,&cancel,std::time::Duration::from_millis(1)).await.unwrap();
+        assert_eq!(result["done"],true);assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst),3);assert_eq!(rx.recv().await.unwrap()["type"],"notice");assert!(rx.try_recv().is_err());assert!(broker.gate.try_lock().is_ok());
+        let waiting_cancel=cancel.clone();let waiting_broker=broker.clone();
+        let handle=tokio::spawn(async move{memory_wait(||{let broker=waiting_broker.clone();let cancel=waiting_cancel.clone();async move{
+            let _lease=broker.acquire(reqwest::Client::new(),"fixture",&cancel).await?;Err(MemoryPressure("blocked fixture".into()).into())
+        }},&tx,&waiting_cancel,std::time::Duration::from_secs(3600)).await});
+        assert_eq!(rx.recv().await.unwrap()["type"],"notice");assert!(broker.gate.try_lock().is_ok());cancel.cancel();assert!(handle.await.unwrap().unwrap_err().to_string().contains("Остановлено"));
+    }
+    #[test]
+    fn temporary_ram_pressure_is_retryable_but_impossible_physical_fit_is_not(){
+        let mut config=crate::context::Config::default();
+        let show=json!({"details":{"quantization_level":"Q4_K_M"},"model_info":{"general.parameter_count":4_000_000_000u64}});
+        let temporary=fit_context(&mut config,&show,&json!({"total_bytes":16u64<<30,"available_bytes":1u64<<30}),true).unwrap_err();assert!(temporary.downcast_ref::<MemoryPressure>().is_some());
+        let impossible=fit_context(&mut config,&show,&json!({"total_bytes":2u64<<30,"available_bytes":1u64<<30}),true).unwrap_err();assert!(impossible.downcast_ref::<MemoryPressure>().is_none());
+        assert!(fit_context(&mut config,&show,&json!({"total_bytes":16u64<<30,"available_bytes":8u64<<30}),true).is_ok());
+        let kv=json!({"model_info":{"x.block_count":32,"x.attention.head_count":32,"x.attention.head_count_kv":8,"x.embedding_length":4096,"x.context_length":262144}});config.window_tokens=32768;
+        assert!(fit_context(&mut config,&kv,&json!({"total_bytes":16u64<<30,"available_bytes":3u64<<30}),true).unwrap_err().downcast_ref::<MemoryPressure>().is_some());
+        config.window_tokens=262144;assert!(fit_context(&mut config,&kv,&json!({"total_bytes":16u64<<30,"available_bytes":3u64<<30}),true).unwrap_err().downcast_ref::<MemoryPressure>().is_none());
+    }
     #[test]
     fn physical_memory_limits_auto_context_but_never_silently_changes_manual_window() {
         let show = json!({"model_info":{"x.block_count":32,"x.attention.head_count":32,"x.attention.head_count_kv":8,"x.embedding_length":4096,"x.context_length":262144}});
