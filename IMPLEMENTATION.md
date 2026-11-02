@@ -213,3 +213,9 @@ macOS/Unix дерево процессов пока проверено по ко
 - В timeline fixture устранена гонка проверки: tool receipts пишутся до публикации, independent thinking-event relay может ещё догонять. Теперь тест ожидает фактического сохранения 81 событий, затем проверяет полную пагинацию; число/текст событий не ослаблены. Все fixtures изолированы, физические модели не оценивались.
 - Основания: https://docs.rs/pulldown-cmark/0.13.6/pulldown_cmark/struct.Parser.html ; https://www.sqlite.org/windowfunctions.html .
 - Далее: история всех receipts отдельного адреса, claim/evidence/coverage graph и query decomposition, ресурсная политика browser session origins, сетевой egress/local access, оставшиеся R09/R10 input/Message/document pipelines. Остальной общий план не сокращён.
+
+
+## История обращений к источнику
+
+- read_sources(source_id) и тот же source API возвращают все receipts адреса в Task: отдельные immutable snapshots, HTTP/coverage и даты, страницы по 32 с фиксированным snapshot. Дедупликация общего списка не уничтожает версии содержимого или позднюю ошибку. UI «Все обращения» открывает историю отдельным диалогом с переходом к каждому сохранённому результату.
+- Unit: 43 версии, поздний 404, добавление новой версии между страницами без пропусков/дублей, точные artifact references и отказ чужой Task/неверному ID. test_search.py прошёл с API истории, migration/error/restart/citations и реальным Edge320 переходом/возвратом между диалогами. Тест ожидает asynchronous close removal перед выбором родительского диалога; поведение не объявляется синхронным. Release/JS check пройдены.

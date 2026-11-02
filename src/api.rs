@@ -1282,7 +1282,7 @@ async fn run_snapshot(State(app): State<Shared>, Path(id): Path<String>) -> ApiR
 }
 async fn run_source_page(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
     app.tasks.get(id.clone()).await?;let before=q.get("before").map(|value|value.parse::<i64>()).transpose()?;let snapshot=q.get("snapshot").map(|value|value.parse::<i64>()).transpose()?;
-    Ok(Json(crate::source_index::page(&app,&id,before,snapshot,q.get("retry_errors").map(|value|value.parse::<bool>()).transpose()?.unwrap_or(false),&app.shutdown.child_token()).await?))
+    Ok(Json(crate::source_index::page(&app,&id,before,snapshot,q.get("source_id").cloned(),q.get("retry_errors").map(|value|value.parse::<bool>()).transpose()?.unwrap_or(false),&app.shutdown.child_token()).await?))
 }
 async fn run_events(
     State(app): State<Shared>,

@@ -43,6 +43,17 @@ fn rows(value:&Value)->Vec<Value>{
     result
 }
 impl Store{
+    pub async fn web_source_history(&self,run:String,source:String,before:Option<i64>,snapshot:Option<i64>)->Result<Value>{
+        anyhow::ensure!(source.len()==66&&source.starts_with("S-")&&source.as_bytes()[2..].iter().all(u8::is_ascii_hexdigit),"Некорректный идентификатор источника");
+        anyhow::ensure!(before.is_none_or(|n|n>0)&&snapshot.is_none_or(|n|n>=0),"Некорректный курсор обращений");
+        self.access(move|conn|{
+            let snapshot=match snapshot{Some(n)=>n,None=>conn.query_row("SELECT COALESCE(MAX(sequence),0) FROM web_sources",[],|row|row.get::<_,i64>(0))?};
+            let mut query=conn.prepare("WITH allowed(run) AS (SELECT ?1 UNION SELECT owner.run FROM task_runs owner JOIN task_runs current ON owner.task=current.task WHERE current.run=?1) SELECT s.source_id,s.canonical_url,s.url,s.title,s.state,s.published,s.retrieved,s.artifact,s.coverage,s.sequence FROM web_sources s JOIN allowed ON allowed.run=s.run WHERE s.source_id=?2 AND s.sequence<=?3 AND (?4 IS NULL OR s.sequence<?4) ORDER BY s.sequence DESC LIMIT 33")?;
+            let mut items=query.query_map(params![run,source,snapshot,before],|row|Ok(json!({"source_id":row.get::<_,String>(0)?,"canonical_url":row.get::<_,String>(1)?,"url":row.get::<_,String>(2)?,"title":row.get::<_,String>(3)?,"state":row.get::<_,String>(4)?,"published":row.get::<_,Option<String>>(5)?,"retrieved":row.get::<_,String>(6)?,"artifact":row.get::<_,String>(7)?,"coverage":serde_json::from_str::<Value>(&row.get::<_,String>(8)?).unwrap_or(Value::Null),"sequence":row.get::<_,i64>(9)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let more=items.len()>32;items.truncate(32);let next=if more{items.last().map(|item|item["sequence"].clone()).unwrap_or(Value::Null)}else{Value::Null};
+            Ok(json!({"source_id":source,"items":items,"next_before":next,"has_more":more,"snapshot":snapshot,"view":"receipts","note":"Every indexed receipt for this URL in the task. Open its artifact to inspect actual historical content, status and coverage. A URL identity is not content identity or semantic verification."}))
+        }).await
+    }
     pub async fn source_index_error(&self,artifact:String,error:String)->Result<()>{self.access(move|conn|{conn.execute("INSERT OR REPLACE INTO web_source_index_errors VALUES (?1,?2,?3)",params![artifact,error,crate::api::now()])?;Ok(())}).await}
     pub async fn source_index_errors(&self,run:String,retry:bool)->Result<Value>{
         self.access(move|conn|{
@@ -79,10 +90,10 @@ impl Store{
         }).await
     }
 }
-pub async fn page(app:&crate::api::Shared,run:&str,before:Option<i64>,snapshot:Option<i64>,retry_errors:bool,cancel:&tokio_util::sync::CancellationToken)->Result<Value>{
+pub async fn page(app:&crate::api::Shared,run:&str,before:Option<i64>,snapshot:Option<i64>,source:Option<String>,retry_errors:bool,cancel:&tokio_util::sync::CancellationToken)->Result<Value>{
     if retry_errors{app.tasks.source_index_errors(run.into(),true).await?;}
     let indexing=backfill(app,run,cancel).await?;
-    let mut page=app.tasks.web_source_page(run.into(),before,snapshot).await?;page["indexing"]=indexing;Ok(page)
+    let mut page=match source{Some(source)=>app.tasks.web_source_history(run.into(),source,before,snapshot).await?,None=>app.tasks.web_source_page(run.into(),before,snapshot).await?};page["indexing"]=indexing;Ok(page)
 }
 pub async fn backfill(app:&crate::api::Shared,run:&str,cancel:&tokio_util::sync::CancellationToken)->Result<Value>{
     let source_run=run.to_string();let pending=app.tasks.access(move|conn|{
@@ -101,6 +112,16 @@ pub async fn backfill(app:&crate::api::Shared,run:&str,cancel:&tokio_util::sync:
     #[test]fn canonical_identity_preserves_semantic_queries_and_overrides_untrusted_ids(){
         assert_eq!(canonical("HTTPS://EXAMPLE.org/a?meaning=1&utm_source=x#fragment").unwrap(),"https://example.org/a?meaning=1");assert_ne!(source_id("https://example.org/a?meaning=1").unwrap(),source_id("https://example.org/a?meaning=2").unwrap());
         let mut value=json!({"results":[{"url":"https://example.org/a?meaning=1","source_id":"forged","state":"received"},{"url":"javascript:bad","source_id":"forged"}]});normalize(&mut value);let entries=rows(&value);assert_eq!(entries.len(),1);assert_ne!(entries[0]["source_id"],"forged");assert_eq!(entries[0]["state"],"found");
+    }
+    #[tokio::test]async fn receipt_history_preserves_revisions_scope_and_snapshot_cursors(){
+        let root=std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());std::fs::create_dir_all(&root).unwrap();let store=Store::open(&root).unwrap();
+        for(run,chat)in [("a","chat"),("b","chat"),("foreign","other")]{store.begin_in_project(run.into(),chat.into(),json!({"mode":"agent","content":"Research receipts"}),"project".into()).await.unwrap();}
+        let id=source_id("https://example.org/changed").unwrap();let mut references=vec![];
+        for version in 0..43{let mut value=json!({"url":"https://example.org/changed","title":"Changing source","text":format!("Revision {version}"),"status":if version==42{404}else{200},"complete":true});normalize(&mut value);let source=store.put_artifact("a".into(),"tool_result".into(),value.to_string(),json!({})).await.unwrap();references.push(source["id"].as_str().unwrap().to_string());store.index_web_source(source["id"].as_str().unwrap().into(),value).await.unwrap();}
+        let first=store.web_source_history("b".into(),id.clone(),None,None).await.unwrap();assert_eq!(first["items"].as_array().unwrap().len(),32);assert_eq!(first["items"][0]["state"],"unavailable");let snapshot=first["snapshot"].as_i64();let before=first["next_before"].as_i64();
+        let value=json!({"url":"https://example.org/changed","complete":false,"text":"Later revision"});let source=store.put_artifact("b".into(),"tool_result".into(),value.to_string(),json!({})).await.unwrap();store.index_web_source(source["id"].as_str().unwrap().into(),value).await.unwrap();
+        let last=store.web_source_history("b".into(),id.clone(),before,snapshot).await.unwrap();assert_eq!(last["items"].as_array().unwrap().len(),11);let restored=first["items"].as_array().unwrap().iter().chain(last["items"].as_array().unwrap()).map(|row|row["artifact"].as_str().unwrap().to_string()).collect::<Vec<_>>();assert_eq!(restored,references.into_iter().rev().collect::<Vec<_>>());assert_eq!(last["has_more"],false);
+        assert!(store.web_source_history("foreign".into(),id,None,None).await.unwrap()["items"].as_array().unwrap().is_empty());assert!(store.web_source_history("b".into(),"not-an-id".into(),None,None).await.is_err());drop(store);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]async fn source_pages_deduplicate_without_erasing_receipts_and_remain_scoped_after_restart_delete(){
         let root=std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());std::fs::create_dir_all(&root).unwrap();let store=Store::open(&root).unwrap();
