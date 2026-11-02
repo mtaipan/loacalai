@@ -70,38 +70,6 @@ pub fn checked_path(root: &Path, value: &str) -> Result<PathBuf> {
         Ok(candidate)
     }
 }
-pub fn file_tree(root: &Path) -> Result<Vec<Value>> {
-    fn visit(root: &Path, dir: &Path, depth: usize, result: &mut Vec<Value>) -> Result<()> {
-        if depth > 5 || result.len() >= 1000 {
-            return Ok(());
-        }
-        let mut entries = std::fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .collect::<Vec<_>>();
-        entries.sort_by_key(|e| (!e.path().is_dir(), e.file_name()));
-        for entry in entries {
-            if result.len() >= 1000 {
-                break;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if [".git", ".venv", "node_modules", "target", "models"].contains(&name.as_str())
-                || entry.file_type()?.is_symlink()
-            {
-                continue;
-            }
-            let path = entry.path();
-            let is_dir = path.is_dir();
-            result.push(json!({"name":name,"path":path.strip_prefix(root)?.to_string_lossy(),"directory":is_dir,"depth":depth,"size":entry.metadata()?.len()}));
-            if is_dir {
-                let _ = visit(root, &path, depth + 1, result);
-            }
-        }
-        Ok(())
-    }
-    let mut result = vec![];
-    visit(root, root, 0, &mut result)?;
-    Ok(result)
-}
 pub fn python(app: &crate::api::App) -> Option<PathBuf> {
     let options = if cfg!(windows) {
         vec![

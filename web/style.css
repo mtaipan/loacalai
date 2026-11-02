@@ -43,3 +43,5 @@
 .catalog-category h3{margin:22px 0 4px}.catalog-model a{font-size:11px}.model-directory{margin-top:5px}.catalog-model{align-items:flex-start}.catalog-model>button{margin-top:4px}
 .catalog-category{border:1px solid var(--border);border-radius:10px;margin:10px 0;padding:0 12px}.catalog-category>summary{cursor:pointer;padding:14px 0;font-size:13px;font-weight:600}.catalog-category>summary .tag{margin-left:10px;font-weight:400}.catalog-category[open]>summary{border-bottom:1px solid var(--border)}
 .team-description{margin:0 4px 10px;font-size:11px}.team-description[hidden]{display:none}.team-settings{margin-top:14px}.team-settings select{width:100%}@media(max-width:650px){.mode-row{flex-wrap:wrap;gap:8px}.mode-row .model-name{margin-left:auto}.mode-tabs{max-width:100%}}
+
+.file-location{display:flex;flex-wrap:wrap;gap:6px;padding:6px 0}.file-location p{width:100%;font-size:11px;overflow-wrap:anywhere;margin:4px}.project-pages{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}

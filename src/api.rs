@@ -965,9 +965,18 @@ async fn file(State(app): State<Shared>, Path(id): Path<String>) -> Result<Respo
     headers.insert("content-type", mime.parse()?);
     Ok((headers, bytes).into_response())
 }
-async fn tree(State(app): State<Shared>) -> ApiResult<Value> {
-    let root = PathBuf::from(&app.settings.lock().await.workspace);
-    Ok(Json(json!(tools::file_tree(&root)?)))
+async fn tree(State(app):State<Shared>,axum::extract::Query(query):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
+    let workspace=app.settings.lock().await.workspace.clone();
+    let project=dunce::canonicalize(&workspace)?;
+    // The file panel is project-scoped, even when tools may access other explicit roots.
+    let directory=tools::checked_path(&project,query.get("path").map(String::as_str).unwrap_or("."))?;
+    let relative=directory.strip_prefix(&project)?.components().map(|part|part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+    let mut args=json!({"path":directory,"limit":64});
+    if let Some(cursor)=query.get("cursor"){args["cursor"]=json!(cursor);}
+    let cancel=app.shutdown.child_token();let _guard=cancel.clone().drop_guard();
+    let mut page=crate::discovery::tool(&app,"list_files",args,&cancel).await?;
+    page["directory"]=json!(relative);page["workspace"]=json!(project);
+    Ok(Json(page))
 }
 async fn inspect_project(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<Value> {
     let cancel=app.shutdown.child_token();

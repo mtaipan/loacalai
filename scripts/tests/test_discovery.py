@@ -1,7 +1,7 @@
 """Isolated durable project discovery: fake inference, no real model or user files."""
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import json, os, socket, sqlite3, subprocess, threading, time, urllib.request, uuid
+import json, os, socket, sqlite3, subprocess, threading, time, urllib.request, urllib.parse, urllib.error, uuid
 
 project=Path(__file__).resolve().parents[2]
 root=project/'build-tools'/('discovery-test-'+uuid.uuid4().hex[:8])
@@ -83,6 +83,12 @@ try:
         inspection=read('/api/project/inspect',{'path':'.','cursor':inspection['next_cursor'],'limit':100});files+=inspection['files']
     assert inspection['complete'] and sum(not item['directory'] for item in files)==404
     assert turn(chat,'find_files',{'name':'*.txt','directory':str(outside),'cursor':cursor},failed=True)
+    tree=read('/api/tree?'+urllib.parse.urlencode({'path':'a/b/c/d/e/f/g/h'}));tree_files=list(tree['files'])
+    while tree['has_more']:
+        tree=read('/api/tree?'+urllib.parse.urlencode({'path':'a/b/c/d/e/f/g/h','cursor':tree['next_cursor']}));tree_files+=tree['files']
+    assert tree['complete'] and len(tree_files)==401
+    try:read('/api/tree?'+urllib.parse.urlencode({'path':str(outside)}));raise AssertionError('Panel escaped project')
+    except urllib.error.HTTPError as error:assert error.code==400
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         browser=pw.chromium.launch(channel='msedge',headless=True)
@@ -108,6 +114,20 @@ try:
         for button in page.locator('[data-project-cursor]').all():
             bounds=button.bounding_box();assert bounds['x']>=0 and bounds['x']+bounds['width']<=320,bounds
         page.screenshot(path=str(root/'project-inspector-mobile.png'),full_page=True)
+        page.locator('[data-close="projects-dialog"]').click()
+        page.set_viewport_size({'width':1280,'height':900})
+        page.locator('header [data-action="files"]').click()
+        for directory in ['a','a/b','a/b/c','a/b/c/d','a/b/c/d/e','a/b/c/d/e/f','a/b/c/d/e/f/g','a/b/c/d/e/f/g/h']:
+            page.locator('[data-tree-directory="'+directory+'"]').click()
+        page.wait_for_selector('[data-tree-path]');initial_files=page.locator('[data-tree-path]').all_text_contents()
+        assert len(initial_files)==64
+        page.locator('[data-tree-cursor]').last.click()
+        page.wait_for_function('()=>document.querySelectorAll("[data-tree-cursor]").length===2')
+        page.locator('[data-tree-cursor]').first.click()
+        page.wait_for_function('(expected)=>JSON.stringify([...document.querySelectorAll("[data-tree-path]")].map(b=>b.textContent))===JSON.stringify(expected)',arg=initial_files)
+        selected=page.locator('[data-tree-path]').first.get_attribute('data-tree-path')
+        page.locator('[data-tree-path]').first.click();assert selected in page.locator('#prompt').input_value()
+        assert page.locator('[data-tree-path]').count()==64
         assert not errors,errors
         browser.close()
     print('PASS Edge320 inspector changes packets, replays previous packet and retains page on failed request/retry')
