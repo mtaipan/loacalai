@@ -222,6 +222,7 @@ impl TaskScope {
         }
     }
     pub fn allows(&self, name: &str) -> bool {
+        if name=="discover_tools"{return !self.read_only;}
         if ["read_task","read_artifact","search_artifacts","read_run_log"].contains(&name) {return true;}
         if self.read_only{return self.web_enabled&&["web_search","fetch_url","browser_open","browser_read"].contains(&name);}
         if crate::web_tools::is_web_tool(name) && !self.web_enabled {

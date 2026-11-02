@@ -41,6 +41,7 @@ fn revision(metadata:&Metadata)->Result<String>{
 pub fn page(path:&Path,options:&Value,cancel:&CancellationToken)->Result<Value>{
     anyhow::ensure!(!cancel.is_cancelled(),"Чтение остановлено");
     let count=options["max_lines"].as_u64().unwrap_or(200);let start=options["start_line"].as_u64().unwrap_or(1);
+    let packet=usize::try_from(options["max_bytes"].as_u64().unwrap_or(PAGE_BYTES as u64))?;anyhow::ensure!((4..=PAGE_BYTES).contains(&packet),"Размер страницы от 4 до 20000 байт UTF-8");
     anyhow::ensure!(start>0&&(1..=500).contains(&count),"start_line от 1; max_lines от 1 до 500");
     let offset=options["offset"].as_u64();
     anyhow::ensure!(offset.is_none()||options.get("start_line").is_none_or(Value::is_null),"Используйте start_line либо offset, не оба сразу");
@@ -70,7 +71,7 @@ pub fn page(path:&Path,options:&Value,cancel:&CancellationToken)->Result<Value>{
         let Some(character)=codec.next(&mut reader)? else{break;};
         position+=codec.width(character);
         anyhow::ensure!(character!='\0',"Текст содержит NUL; проверьте кодировку или формат файла");
-        if output.len()+character.len_utf8()>PAGE_BYTES{
+        if output.len()+character.len_utf8()>packet{
             if let Some((length,position,completed))=boundary{output.truncate(length);end_byte=position;lines=completed;}else{end_byte=before;}
             break;
         }

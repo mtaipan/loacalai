@@ -342,9 +342,8 @@ impl App {
         if self.tasks.is_deleted(id.into()).await? {
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Чат удалён").into());
         }
-        let mut chat=serde_json::from_slice(
-            &tokio::fs::read(self.chat_path(id)?).await?,
-        )?;
+        let bytes=tokio::fs::read(self.chat_path(id)?).await?;
+        let mut chat=tokio::task::spawn_blocking(move||serde_json::from_slice::<Conversation>(&bytes)).await??;
         crate::tools::public_chat(&mut chat);Ok(chat)
     }
     pub async fn save(&self, chat: &Conversation) -> anyhow::Result<()> {
@@ -1100,7 +1099,7 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
     }
     {
         let mut runs = app.runs.lock().await;
-        app.load(&input.conversation).await?;
+        require(!app.tasks.is_deleted(input.conversation.clone()).await?,"Чат удалён")?;
         if app.tasks.get(run_id.clone()).await.is_ok() {
             // Reconnecting an accepted request must not execute it twice.
             app.tasks
@@ -1116,6 +1115,7 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
             !runs.values().any(|r| r.conversation == input.conversation),
             "В этом чате уже идёт ответ",
         )?;
+        if input.mode!="translate"&&!crate::agent::reply_only(&input.content){app.tasks.import_legacy_requests(&_chat,app.settings.lock().await.workspace.clone()).await?;}
         app.tasks
             .begin_in_project(
                 run_id.clone(),

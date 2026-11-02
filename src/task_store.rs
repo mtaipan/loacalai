@@ -49,7 +49,7 @@ impl Store {
         let mut conn = Connection::open(data.join("tasks.sqlite3"))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 6,
+            version <= 7,
             "База задач создана более новой версией приложения; исходный файл сохранён"
         );
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -70,7 +70,8 @@ impl Store {
         crate::artifacts::install(&mut conn)?;
         crate::timeline::install(&conn)?;
         crate::materials::install(&conn)?;
-        conn.pragma_update(None,"user_version",6)?;
+        crate::legacy::install(&conn)?;
+        conn.pragma_update(None,"user_version",7)?;
         conn.execute("UPDATE material_ingests SET status='interrupted',error=COALESCE(error,'Приложение завершилось до окончания подготовки') WHERE status='ingesting'",[])?;
         // A crash leaves effects with unknown outcome. Never replay mutations automatically.
         conn.execute(

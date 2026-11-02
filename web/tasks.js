@@ -29,6 +29,7 @@ async function showTaskState(){
       content.replaceChildren();
       const project=document.createElement('p');project.className='form-help';project.textContent='Рабочая папка: '+(task.project||'Не указана');content.append(project);
       const resume=document.createElement('button');resume.className='button';resume.textContent='Выбрать для продолжения';resume.onclick=()=>{currentSession().selectedTask=task.id;currentSession().nextTask=false;captureDraft();renderTaskIntent();dialog.close();document.getElementById('prompt').focus();};content.append(resume);
+      if(task.legacy_context){const legacy=document.createElement('p');legacy.className='form-help';legacy.textContent='Запросы перенесены из старого чата. Их принадлежность одной задаче и результаты прежних действий не проверены.';content.append(legacy);}
       const note=document.createElement('p');note.className='form-help';note.textContent='Отметки плана выставляет агент. Завершённый ответ не подтверждает готовность всей задачи.';content.append(note);
       for(const process of task.active_processes||[]){const button=document.createElement('button');button.className='button';button.textContent='Процесс: '+process.command_preview;button.onclick=()=>showProcess(process.execution_id);content.append(button);}
       if(task.material_jobs?.items?.length){const jobs=document.createElement('details'),heading=document.createElement('summary');heading.textContent='Подготовка материалов';jobs.append(heading);content.append(jobs);
