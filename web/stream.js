@@ -37,7 +37,7 @@ function paintStream(){
   syncCards(document.getElementById('approvals'),state.approvals.map(approvalHtml).join(''),'data-approval-card');
   renderApprovalShortcut();
   const history=document.getElementById('stream-history');if(history){const html=runHistoryLinks(state.run,currentSession());if(history._source!==html){history.innerHTML=html;history._source=html;}}
-  const notice=document.querySelector('#stream-notice span:last-child');if(notice)notice.textContent=state.notice||'Подготовка модели';
+  const notice=document.querySelector('#stream-notice span:last-child');if(notice)notice.textContent=state.notice||'Обработка запроса';
   followScroll();streamRenderCost=performance.now()-began;
 }
 function renderCompletedConversation(){

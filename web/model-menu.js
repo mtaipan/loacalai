@@ -8,10 +8,13 @@ function closeModelMenu(restoreFocus=false){
   trigger?.setAttribute('aria-expanded','false');
   if(restoreFocus)trigger?.focus();
 }
+function activeRunOptions(){return state.busy?currentSession().acceptedOptions:null;}
+function activeModelId(){const options=activeRunOptions();return state.busy?(options?.model??null):state.settings[modelField()];}
+function activeModelLabel(){if(state.mode==='search'&&searchOptions().depth==='results')return 'Без модели';const id=activeModelId();return id?modelName(id):'Модель не указана в журнале';}
 function renderActiveModel(){
   const trigger=$('#model-name');if(!trigger)return;
   const resultsOnly=state.mode==='search'&&searchOptions().depth==='results';
-  const name=resultsOnly?'Без модели':modelName(state.settings[modelField()]);
+  const name=activeModelLabel();
   renderTeamMode();
   trigger.innerHTML=`<span>${escapeHtml(name)}</span>${modelCaret()}`;
   trigger.setAttribute('aria-label','Выбрать модель: '+name);

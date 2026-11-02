@@ -2,7 +2,7 @@
 // Conversation state is independent of the currently visible conversation.
 const viewSessions=new Map();
 let navigationVersion=0,workspaceStreamStarted=false,workspaceConnecting=null;
-const sessionDefaults=()=>({busy:false,run:null,runMode:null,streamText:'',streamThinking:'',streamTools:[],toolsTotal:0,textOffset:0,thinkingOffset:0,approvals:[],notice:'',scrollFollow:true,uploading:0,pendingInput:0,nextTask:false,selectedTask:null,pending:[],searchOptions:null,sending:false,startedAt:0,submitting:false,cancelRequested:false,draft:'',submission:null,chat:null});
+const sessionDefaults=()=>({busy:false,run:null,runMode:null,acceptedOptions:null,streamText:'',streamThinking:'',streamTools:[],toolsTotal:0,textOffset:0,thinkingOffset:0,approvals:[],notice:'',scrollFollow:true,uploading:0,pendingInput:0,nextTask:false,selectedTask:null,pending:[],searchOptions:null,sending:false,startedAt:0,submitting:false,cancelRequested:false,draft:'',submission:null,chat:null});
 const visibleConversation=()=>state.chat?.id||'new';
 function draftStorageKey(id){return 'gemma.draft.v1.'+id;}
 function readDraft(id){
@@ -52,6 +52,7 @@ function clearAcceptedDraft(session,id,payload){
 }
 function restoreWorkspaceRun(run){
   const session=currentSession(run.conversation);Object.assign(session,run.state||{});
+  session.acceptedOptions ||= {...run.input,model:undefined};
   session.busy=true;session.run=run.id;session.runMode=run.input.mode;session.startedAt=Date.parse(run.created)||Date.now();session.draftMode=run.input.mode;
   if(session.submission?.request_id===run.id)clearAcceptedDraft(session,run.conversation,session.submission);
 }
@@ -89,7 +90,7 @@ async function finishConversationRun(session,id,run=session.run){
   }
   if(session.run!==run)return;
   session.chat=finished;
-  session.busy=false;session.run=null;session.submitting=false;session.approvals=[];
+  session.busy=false;session.run=null;session.acceptedOptions=null;session.submitting=false;session.approvals=[];
   if(visibleConversation()===id){clearTimeout(renderTimer);renderTimer=null;paintStream();if(session.chat){state.chat=session.chat;document.getElementById('chat-title').textContent=state.chat.title;}renderCompletedConversation();updateSend();}
   session.streamText='';session.streamThinking='';session.streamTools=[];session.toolsTotal=0;session.textOffset=0;session.thinkingOffset=0;session.chat=null;
   if(visibleConversation()!==id)prunePreviousSession(id);
@@ -143,7 +144,7 @@ async function submitMessage(retry=false){
     session.submission={...payload,submittedDraft:raw};persistDraft(id,session);
     if(retry){if(state.chat.messages.at(-1)?.role==='assistant')state.chat.messages.pop();if(state.chat.messages.at(-1)?.role==='user')state.chat.messages.pop();}
     if(!state.chat.messages.some(message=>message.id===payload.request_id))state.chat.messages.push({id:payload.request_id,role:'user',content,attachments,tools:[],created:new Date().toISOString()});session.chat=state.chat;
-    Object.assign(session,{busy:true,run:payload.request_id,runMode:payload.mode,streamText:'',streamThinking:'',streamTools:[],toolsTotal:0,textOffset:0,thinkingOffset:0,approvals:[],notice:'Отправка запроса…',scrollFollow:true,startedAt:Date.now(),submitting:true,cancelRequested:false});
+    Object.assign(session,{busy:true,run:payload.request_id,runMode:payload.mode,acceptedOptions:{...payload,model:undefined},streamText:'',streamThinking:'',streamTools:[],toolsTotal:0,textOffset:0,thinkingOffset:0,approvals:[],notice:'Отправка запроса…',scrollFollow:true,startedAt:Date.now(),submitting:true,cancelRequested:false});
     renderMessages();updateSend();startResponseTimer();
     try{
       const accepted=await api('/api/runs',{method:'POST',body:payload});

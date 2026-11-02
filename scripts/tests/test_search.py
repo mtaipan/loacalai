@@ -71,6 +71,14 @@ def turn(query,mode='search',options=None,chat=None,network='search',allow_error
         for line in response:
             if line.startswith(b'data:'):
                 event=json.loads(line[5:]);assert allow_error or event['type']!='error',event;assert event['type']!='approval',event
+                if event['type']=='start':
+                    accepted=event['accepted'];assert accepted['mode']==mode and accepted['web']==network
+                    if options is not None:
+                        assert accepted['search']['depth']==options.get('depth','quick')
+                        assert accepted['search']['focus']==options.get('focus','web')
+                    if mode=='search' and options and options.get('depth')=='results':assert accepted['model'] is None
+                    else:assert accepted['model']
+
     return read('/api/chats/'+chat['id'])
 try:
     start();options={'depth':'results','focus':'news','period':'week','language':'ru','region':'RU','domains':['127.0.0.1']};query='Exact fixture query'

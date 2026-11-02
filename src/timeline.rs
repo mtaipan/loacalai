@@ -100,6 +100,8 @@ mod tests{
     async fn bounded_views_and_complete_cursor_journal_survive_checkpoints(){
         let root=std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());std::fs::create_dir_all(&root).unwrap();
         let store=crate::task_store::Store::open(&root).unwrap();store.begin("run".into(),"chat".into(),json!({})).await.unwrap();
+        let accepted=json!({"mode":"agent","model":"accepted-model","web":"off","thinking":"auto","search":{"depth":"deep"},"settings_revision":7});
+        store.append("run".into(),json!({"type":"start","accepted":accepted})).await.unwrap();
         let mut evidence=Evidence::default();let mut recent=vec![];
         for i in 0..120{
             store.append("run".into(),json!({"type":"tool_start","id":format!("t{i}"),"name":"read_file","arguments":{"path":format!("{i}.txt")}})).await.unwrap();
@@ -112,6 +114,7 @@ mod tests{
         store.append("run".into(),json!({"type":"tool_start","id":"t0","name":"read_file","arguments":{}})).await.unwrap();
         let dashboard=store.dashboard().await.unwrap();let state=&dashboard["runs"][0]["state"];
         assert!(state["streamTools"].as_array().unwrap().len()<=48);assert!(state["streamThinking"].as_str().unwrap().len()<=16384);assert!(state["thinkingOffset"].as_u64().unwrap()>0);
+        assert_eq!(state["acceptedOptions"],accepted);
         assert_eq!(evidence.report(&recent,"run")["actions"],120);
         let mut before=None;let mut seen=std::collections::HashSet::new();
         loop{let page=store.tool_page("run".into(),before).await.unwrap();for item in page["tools"].as_array().unwrap(){assert_eq!(item["tool"]["status"],"succeeded");assert!(seen.insert(item["tool"]["id"].as_str().unwrap().to_string()));}before=page["next_before"].as_i64();if before.is_none(){break;}}

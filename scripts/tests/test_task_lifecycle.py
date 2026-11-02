@@ -111,6 +111,8 @@ try:
             first = json.loads(line[5:])
             break
     assert first['type'] == 'start'
+    assert first['accepted']['model']==model and first['accepted']['web']==body['web']
+    assert 'content' not in first['accepted'] and 'workspace' not in first['accepted']
     response.close()  # Subscriber disappears while inference is still running.
     replay = events(f'/api/runs/{rid}/events?after={first["sequence"]}')
     assert replay[-1]['type'] == 'done', replay
@@ -210,8 +212,21 @@ try:
         page.reload()
         page.wait_for_function('()=>state.busy && state.run!==null')
         assert page.locator('#send').get_attribute('aria-label') == 'Остановить ответ'
+        # A second client may have different draft preferences. They must not describe this run.
+        accepted=page.evaluate('currentSession().acceptedOptions')
+        assert accepted['model']==model,accepted
+        page.evaluate("""()=>{window.priorDraftModel=state.settings[modelField()];state.settings[modelField()]='different-next-model';webChoice='off';currentSession().searchOptions={depth:'deep',focus:'news'};renderActiveModel();renderSearchMode();}""")
+        assert page.evaluate('activeModelId()')==model
+        assert page.evaluate('searchOptions().depth')==accepted['search']['depth']
+        assert page.evaluate('searchOptions().focus')==accepted['search']['focus']
+        assert 'Авто' in page.locator('#web-menu summary').inner_text()
+        assert page.evaluate('currentSession().searchOptions.focus')=='news'
+        page.evaluate('()=>{state.settings[modelField()]=priorDraftModel;renderActiveModel();}')
         page.wait_for_function('()=>!state.busy', timeout=15000)
         assert 'DURABLE_RESULT' in page.locator('#conversation').inner_text()
+        assert page.evaluate('currentSession().acceptedOptions') is None
+        assert page.evaluate('searchOptions().focus')=='news'
+        assert 'Выключена' in page.locator('#web-menu summary').inner_text()
         response_delay=3
         page.locator('[data-action="new-chat"]').click()
         page.locator('[data-mode="agent"]').click()

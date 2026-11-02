@@ -840,18 +840,12 @@ async fn review_attachment(
 pub async fn run(
     app: Shared,
     input: ChatInput,
+    settings: crate::api::Settings,
     tx: &mpsc::Sender<Value>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let started = std::time::Instant::now();
-    let settings = app.settings.lock().await.clone();
-    let selected = match input.mode.as_str() {
-        "translate" => settings.translation_model.clone(),
-        "agent" => settings.agent_model.clone(),
-        "team" => settings.team_model.clone(),
-        "search"=>settings.search_model.clone(),
-        _ => settings.chat_model.clone(),
-    };
+    let selected = settings.model_for(&input.mode).to_owned();
     let mut chat = app.load(&input.conversation).await?;
     chat.mode = input.mode.clone();
     if input.retry {
@@ -958,8 +952,7 @@ pub async fn run(
         created: now(),
     };
     let mut evidence=crate::timeline::Evidence::default();
-    let mut search_options=input.search.clone().unwrap_or_default();
-    if input.search.is_none()&&input.web=="research"{search_options.depth="deep".into();}
+    let search_options=input.search_options();
     let results_only=input.mode=="search"&&search_options.depth=="results";
     // Store partial streamed text even when cancellation or inference fails.
     let result:Result<()>=async {

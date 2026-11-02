@@ -2,7 +2,7 @@
 const searchDepths={results:'Результаты',quick:'Быстрый',detailed:'Подробный',deep:'Глубокий'};
 const searchFocuses={web:'Веб',news:'Новости',science:'Наука',docs:'Документация',discussions:'Обсуждения',materials:'Материалы задачи'};
 function searchDefaults(){return {depth:'quick',focus:'web',period:'any',language:'',region:'',domains:[],excluded_domains:[],page:1,page_source:null,result_offset:0,after:0,snapshot:null};}
-function searchOptions(){const value={...searchDefaults(),...(currentSession().searchOptions||{})};if(state.mode!=='search'&&value.depth==='results')value.depth='quick';return value;}
+function searchOptions(){const value={...searchDefaults(),...((state.busy?activeRunOptions()?.search:currentSession().searchOptions)||{})};if(state.mode!=='search'&&value.depth==='results')value.depth='quick';return value;}
 function searchControlOptions(values,current){return Object.entries(values).map(([value,label])=>`<option value="${value}" ${value===current?'selected':''}>${escapeHtml(label)}</option>`).join('');}
 function setupSearchUI(){
  const row=document.querySelector('.mode-row');row.insertAdjacentHTML('afterend','<details id="search-preferences" class="search-preferences"><summary>Настройки поиска</summary><div id="search-preferences-body"></div></details>');

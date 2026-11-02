@@ -143,6 +143,16 @@ pub struct Settings {
     #[serde(default = "default_area_hotkey")]
     pub quick_area_hotkey: String,
 }
+impl Settings {
+    pub fn model_for(&self,mode:&str)->&str {
+        match mode {"translate"=>&self.translation_model,"agent"=>&self.agent_model,"team"=>&self.team_model,"search"=>&self.search_model,_=>&self.chat_model}
+    }
+    pub fn accepted_options(&self,input:&ChatInput)->Value {
+        let search=input.search_options();
+        let results=input.mode=="search"&&search.depth=="results";
+        json!({"mode":input.mode,"model":if results{None}else{Some(self.model_for(&input.mode))},"web":input.web,"thinking":input.thinking,"search":search,"settings_revision":self.revision})
+    }
+}
 fn default_true() -> bool {
     true
 }
@@ -1024,6 +1034,13 @@ pub struct ChatInput {
     #[serde(default)]
     pub retry: bool,
 }
+impl ChatInput {
+    pub fn search_options(&self)->crate::search::Options {
+        let mut value=self.search.clone().unwrap_or_default();
+        if self.search.is_none()&&self.web=="research"{value.depth="deep".into();}
+        value
+    }
+}
 fn thinking_off() -> String {
     "off".into()
 }
@@ -1169,12 +1186,14 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
         journal.runs.lock().await.remove(&journal_id);
         journal.grants.lock().await.finish(&journal_id);
     });
+    let settings=app.settings.lock().await.clone();
+    let accepted=settings.accepted_options(&input);
     let worker = app.clone();
     let id = run_id.clone();
     tokio::spawn(async move {
         let _model_guard = model_guard;
         let _ = tx
-            .send(json!({"type":"start","run_id":id,"mode":input.mode}))
+            .send(json!({"type":"start","run_id":id,"mode":input.mode,"accepted":accepted}))
             .await;
         let started = std::time::Instant::now();
         let conversation = input.conversation.clone();
@@ -1182,7 +1201,7 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
         if let Err(error) = crate::permissions::TASK
             .scope(
                 id.clone(),
-                engine::run(worker.clone(), input, &tx, cancel.clone()),
+                engine::run(worker.clone(), input, settings, &tx, cancel.clone()),
             )
             .await
         {

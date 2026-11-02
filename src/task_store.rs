@@ -244,6 +244,7 @@ pub(crate) struct Fold {
     thinking_offset:usize,
     tools_total:u64,
     notice: String,
+    accepted: Value,
     tools: Vec<Value>,
     approvals: Vec<Value>,
 }
@@ -251,6 +252,7 @@ impl Fold {
     pub(crate) fn consume(&mut self, event: &Value) {
         let text = event["text"].as_str().unwrap_or("");
         match event["type"].as_str().unwrap_or("") {
+            "start"=>self.accepted=event["accepted"].clone(),
             "token"=>self.text.push_str(text),
             "replace_content"=>{self.text=text.into();self.text_offset=0;},
             "thinking"=>self.thinking.push_str(text),
@@ -268,7 +270,7 @@ impl Fold {
         self.thinking_offset+=crate::timeline::tail(&mut self.thinking,16384);
     }
     pub(crate) fn value(self) -> Value {
-        json!({"streamText":self.text,"streamThinking":self.thinking,"streamTools":self.tools,"approvals":self.approvals,"notice":self.notice,"textOffset":self.text_offset,"thinkingOffset":self.thinking_offset,"toolsTotal":self.tools_total})
+        json!({"acceptedOptions":self.accepted,"streamText":self.text,"streamThinking":self.thinking,"streamTools":self.tools,"approvals":self.approvals,"notice":self.notice,"textOffset":self.text_offset,"thinkingOffset":self.thinking_offset,"toolsTotal":self.tools_total})
     }
 }
 

@@ -1,7 +1,7 @@
 'use strict';
 function webSettingsHtml(){return `<div class="settings-section"><label class="form-label"><input type="checkbox" id="reranker-enabled"> Qwen3-Reranker 0.6B</label><p class="form-help" id="reranker-help"></p></div><div class="settings-section"><h3>Интернет и браузер</h3><label class="form-label" for="search-provider">Поисковик</label><select class="full-input" id="search-provider"><option value="duckduckgo">DuckDuckGo + Bing резерв · без ключа</option><option value="searxng">SearXNG · свой сервер</option><option value="brave">Brave Search API · ключ</option></select><label class="form-label" for="searxng-url">Адрес SearXNG с включённым JSON</label><input class="full-input" id="searxng-url" type="url" placeholder="http://localhost:8080"><label class="form-label" for="brave-key">Ключ Brave Search API</label><input class="full-input" id="brave-key" type="password" autocomplete="off"><p class="form-help">Поисковые запросы передаются выбранному провайдеру; история сохраняется в приложении, запросы к модели обрабатывает выбранный движок. При ограничении DuckDuckGo запрос передаётся Bing. Оба сервиса могут ограничивать автоматические запросы. Без интернета доступ к запущенным локальным сайтам остаётся. Ключ хранится в локальных настройках приложения.</p><button class="button" data-action="install-browser">Установить / проверить браузерные компоненты</button><label class="checkbox-row"><input id="browser-visible" type="checkbox">Показывать окно браузера для ручного входа и взаимодействия</label><p class="form-help">Применяется к новым браузерным сессиям. Для нового окна начните новый чат. Пароли можно вводить в самом окне браузера.</p><p class="form-help" id="browser-install-status">Используется отдельная сессия Edge/Chrome или Chromium; личный профиль браузера не подключается. Сессия сохраняется для продолжения в этом чате; закрывается при удалении чата, перезапуске или освобождении слота (до 4 сессий). Клики и ввод требуют подтверждения.</p></div>`;}
 const thinkingCache=new Map();
-let controlsModel='',thinkingChoice='off';
+let controlsModel='',thinkingDraftModel='',thinkingChoice='off';
 let webChoice=localStorage.getItem('gemma.webMode')||'auto';
 const webLabels={off:'Выключена',auto:'Авто',search:'Искать'};
 if(webChoice==='research')webChoice='search';
@@ -11,22 +11,26 @@ function controlMenu(id,label,items){return `<details class="tool-control" id="$
 function renderToolControls(values=[false],loading=false){
  const box=document.getElementById('tool-controls');if(!box)return;
  box.hidden=state.mode==='translate';
- const model=state.settings[modelField()];
- if(!loading&&thinkingChoice!=='auto'&&!values.some(v=>thoughtValue(v)===thinkingChoice))thinkingChoice=values.length===1?thoughtValue(values[0]):'auto';
- const reasoning=controlMenu('thinking-menu','Рассуждения: '+(loading?'…':thinkingChoice==='auto'?'Авто':thoughtLabel(thinkingChoice==='off'?false:thinkingChoice==='on'?true:thinkingChoice)),
-  `<span class="tool-control-caption">${values.length===1&&values[0]===false?'Модель не поддерживает переключение':'Режимы выбранной модели'}</span>`+
-  values.map(v=>`<button type="button" data-thinking="${escapeHtml(thoughtValue(v))}" ${state.busy||loading?'disabled':''}>${escapeHtml(thoughtLabel(v))}${thinkingChoice===thoughtValue(v)?icon('check'):''}</button>`).join('')+
-  (values.length>1?`<button type="button" data-thinking="auto" ${state.busy?'disabled':''}>Авто · как задано моделью${thinkingChoice==='auto'?icon('check'):''}</button>`:''));
- const network=controlMenu('web-menu',icon('globe')+'Сеть: '+webLabels[webChoice],Object.entries(webLabels).map(([v,label])=>`<button type="button" data-web-mode="${v}" ${state.busy?'disabled':''}>${label}${v===webChoice?icon('check'):''}</button>`).join('')+'<span class="tool-control-caption">Поиск отправляет запрос поисковику. Локальные сайты доступны без интернета.</span>');
+ const model=activeModelId();
+ if(!state.busy&&!loading&&thinkingChoice!=='auto'&&!values.some(v=>thoughtValue(v)===thinkingChoice))thinkingChoice=values.length===1?thoughtValue(values[0]):'auto';
+ const choice=state.busy?(activeRunOptions()?.thinking||'auto'):thinkingChoice;
+ const networkChoice=state.busy?(activeRunOptions()?.web||'auto'):webChoice;
+ const reasoning=controlMenu('thinking-menu','Рассуждения: '+(loading?'…':choice==='auto'?'Авто':escapeHtml(thoughtLabel(choice==='off'?false:choice==='on'?true:choice))),
+  `<span class="tool-control-caption">${state.busy?'Параметр принятого запроса':values.length===1&&values[0]===false?'Модель не поддерживает переключение':'Режимы выбранной модели'}</span>`+
+  values.map(v=>`<button type="button" data-thinking="${escapeHtml(thoughtValue(v))}" ${state.busy||loading?'disabled':''}>${escapeHtml(thoughtLabel(v))}${choice===thoughtValue(v)?icon('check'):''}</button>`).join('')+
+  (values.length>1?`<button type="button" data-thinking="auto" ${state.busy?'disabled':''}>Авто · как задано моделью${choice==='auto'?icon('check'):''}</button>`:''));
+ const network=controlMenu('web-menu',icon('globe')+'Сеть: '+(webLabels[networkChoice]||webLabels.search),Object.entries(webLabels).map(([v,label])=>`<button type="button" data-web-mode="${v}" ${state.busy?'disabled':''}>${label}${v===networkChoice?icon('check'):''}</button>`).join('')+'<span class="tool-control-caption">Поиск отправляет запрос поисковику. Локальные сайты доступны без интернета.</span>');
  box.innerHTML=(state.mode==='search'?'':network)+(state.mode==='search'&&searchOptions().depth==='results'?'':reasoning);
  box.querySelectorAll('[data-thinking]').forEach(b=>b.onclick=()=>{thinkingChoice=b.dataset.thinking;localStorage.setItem('gemma.thinking.'+model,thinkingChoice);renderToolControls(values);});
  box.querySelectorAll('[data-web-mode]').forEach(b=>b.onclick=()=>{webChoice=b.dataset.webMode;localStorage.setItem('gemma.webMode',webChoice);renderToolControls(values);});
 }
 async function refreshToolControls(){
- const model=state.settings[modelField()];
+ const model=activeModelId();
  if(state.mode==='translate'){document.getElementById('tool-controls')?.setAttribute('hidden','');return;}
  if(state.mode==='search'&&searchOptions().depth==='results'){renderToolControls([false]);return;}
- if(controlsModel!==model){controlsModel=model;thinkingChoice=localStorage.getItem('gemma.thinking.'+model)||'off';}
+ if(!model){renderToolControls([false]);return;}
+ if(!state.busy&&thinkingDraftModel!==model){thinkingDraftModel=model;thinkingChoice=localStorage.getItem('gemma.thinking.'+model)||'off';}
+ controlsModel=model;
  if(thinkingCache.has(model)){renderToolControls(thinkingCache.get(model));return;}
  renderToolControls([false],true);
  try{const r=await api('/api/thinking?model='+encodeURIComponent(model));thinkingCache.set(model,r.values);if(model===controlsModel)renderToolControls(r.values);}
