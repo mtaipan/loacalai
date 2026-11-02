@@ -795,21 +795,22 @@ async fn compute_install(
     let stream = async_stream::stream! {while let Some(value)=rx.recv().await{yield Ok::<Event,Infallible>(Event::default().json_data(value).unwrap());}};
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
-async fn chats(State(app): State<Shared>) -> ApiResult<Value> {
-    let mut items = vec![];
-    let mut entries = tokio::fs::read_dir(app.data.join("chats")).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        if entry.path().extension().is_some_and(|e| e == "json") {
-            if let Ok(bytes) = tokio::fs::read(entry.path()).await {
-                if let Ok(chat) = serde_json::from_slice::<Conversation>(&bytes) {
-                    if app.tasks.is_deleted(chat.id.clone()).await? {continue;}
-                    items.push(json!({"id":chat.id,"title":chat.title,"updated":chat.updated,"mode":chat.mode,"count":chat.messages.len()}));
-                }
+async fn chats(State(app):State<Shared>)->ApiResult<Value>{
+    let path=app.data.join("chats");
+    let headers=tokio::task::spawn_blocking(move||->anyhow::Result<Vec<crate::chat_headers::Header>>{
+        let mut headers=vec![];
+        for entry in std::fs::read_dir(path)?{
+            let entry=entry?;
+            if entry.path().extension().is_some_and(|e|e=="json"){
+                // Legacy/corrupt files remain untouched. Listing does not validate their full Message schema.
+                if let Ok(header)=crate::chat_headers::read(&entry.path()){headers.push(header);}
             }
         }
-    }
-    items.sort_by(|a, b| b["updated"].as_str().cmp(&a["updated"].as_str()));
-    Ok(Json(json!(items)))
+        headers.sort_by(|a,b|b.updated.cmp(&a.updated).then_with(||a.id.cmp(&b.id)));Ok(headers)
+    }).await??;
+    let mut items=vec![];
+    for header in headers{if !app.tasks.is_deleted(header.id.clone()).await?{items.push(header);}}
+    Ok(Json(serde_json::to_value(items)?))
 }
 async fn new_chat(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<Conversation> {
     let chat = Conversation {

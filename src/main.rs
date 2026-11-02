@@ -3,6 +3,7 @@ mod agent;
 mod artifacts;
 mod api;
 mod changes;
+mod chat_headers;
 mod compute;
 mod context;
 mod documents;
