@@ -95,7 +95,7 @@ try:
         page=browser.new_page(viewport={'width':320,'height':760});errors=[]
         page.on('pageerror',lambda error:errors.append(str(error)))
         page.goto(base);page.wait_for_selector('[data-action="projects"]',state='attached')
-        page.evaluate('showProjects()');page.wait_for_selector('#projects-dialog[open]')
+        page.locator('header [data-action="sidebar"]').click();page.locator('.sidebar [data-action="projects"]').click();page.wait_for_selector('#projects-dialog[open]')
         page.locator('[data-action="inspect-project"]').click()
         page.wait_for_selector('[data-project-cursor]')
         initial=page.locator('.project-overview>pre').inner_text()

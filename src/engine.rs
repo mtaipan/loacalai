@@ -103,7 +103,7 @@ async fn model(
         {
             crate::compute::fallback(app, &config, &format!("{error:#}")).await;
             if emitted.lock().unwrap().is_empty() {
-                emit(tx,json!({"type":"notice","message":"Ускоритель не смог выполнить запрос. Повторяю на CPU; причина сохранена в настройках вычислений."})).await?;
+                emit(tx,json!({"type":"notice","message":"Ускоритель не смог выполнить запрос. Повторяю на CPU; причина доступна в разделе вычислений."})).await?;
                 ensure_ollama(app).await?;
                 result = tokio::select! {_=cancel.cancelled()=>Err(anyhow::anyhow!("Остановлено пользователем")),value=model_once(app, model, messages, mode, tx, cancel, true, &emitted,&mut lease)=>value};
             }

@@ -229,16 +229,20 @@ pub async fn fallback(app: &Shared, config: &Config, error: &str) {
         runtime.fallback_key = Some(key.clone());
         runtime.last_error = Some(error.clone());
     }
-    let _ = crate::changes::replace(
+    if let Err(persist)=crate::changes::replace(
         &app.data.join("compute-fallback.json"),
-        &serde_json::to_vec_pretty(&json!({"key":key,"error":error})).unwrap(),
-    );
+        json!({"key":key,"error":error}).to_string().as_bytes(),
+    ){
+        app.compute.lock().await.last_error=Some(format!("{error}; резервный режим действует в текущем процессе, но не сохранён на диске: {persist:#}"));
+    }
 }
-pub async fn clear_fallback(app: &Shared) {
-    let mut runtime = app.compute.lock().await;
-    runtime.fallback_key = None;
-    runtime.last_error = None;
-    let _ = std::fs::remove_file(app.data.join("compute-fallback.json"));
+pub async fn clear_fallback(app:&Shared)->Result<()> {
+    let mut runtime=app.compute.lock().await;
+    match std::fs::remove_file(app.data.join("compute-fallback.json")){
+        Ok(())=>{},Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
+        Err(error)=>return Err(anyhow::anyhow!("Не удалось сбросить резервный режим; прежнее состояние сохранено: {error}"))
+    }
+    runtime.fallback_key=None;runtime.last_error=None;Ok(())
 }
 pub fn gpu_error(error: &str) -> bool {
     let text = error.to_lowercase();
@@ -435,8 +439,8 @@ pub async fn validate_reconfiguration(app: &Shared, config: &Config) -> Result<(
 }
 pub async fn reconfigure(app: &Shared, config: &Config) -> Result<()> {
     validate_reconfiguration(app,config).await?;
+    clear_fallback(app).await?;
     app.model_stores.lock().await.clear();
-    clear_fallback(app).await;
     ensure(app, config).await?;
     Ok(())
 }
@@ -445,9 +449,9 @@ pub async fn restart(app: &Shared, config: &Config) -> Result<()> {
         std::env::var_os("LOCAL_GEMMA_OLLAMA").is_none(),
         "Внешняя Ollama не перезапускается приложением"
     );
+    clear_fallback(app).await?;
     app.model_stores.lock().await.clear();
     stop_private(app).await?;
-    clear_fallback(app).await;
     ensure(app, config).await
 }
 pub async fn summary(app: &Shared) -> Value {
@@ -564,6 +568,22 @@ pub async fn info(app: &Shared, refresh: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn fallback_disk_failures_preserve_current_recovery_state(){
+        let root=std::env::temp_dir().join(format!("compute-state-{}",uuid::Uuid::new_v4()));
+        let app=std::sync::Arc::new(crate::api::App::new(root.clone()).unwrap());
+        let path=app.data.join("compute-fallback.json");std::fs::create_dir(&path).unwrap();
+        let config=Config{backend:"cuda".into(),device:"fixture".into(),..Default::default()};
+        fallback(&app,&config,"GPU fixture failed").await;
+        assert!(force_cpu(&app,&config).await);
+        let before=app.compute.lock().await.last_error.clone().unwrap();assert!(before.contains("не сохранён на диске"));
+        assert!(clear_fallback(&app).await.is_err());assert!(force_cpu(&app,&config).await);
+        assert_eq!(app.compute.lock().await.last_error.as_deref(),Some(before.as_str()));
+        std::fs::remove_dir(&path).unwrap();fallback(&app,&config,"GPU fixture failed").await;
+        let recovered=Runtime::load(&app.data);assert_eq!(recovered.fallback_key,Some(config.key()));
+        clear_fallback(&app).await.unwrap();assert!(!path.exists());assert!(!force_cpu(&app,&config).await);
+        drop(app);std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn backend_filters_are_isolated_and_device_ids_are_preserved() {
         let cpu = Config {
