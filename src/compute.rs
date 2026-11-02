@@ -314,52 +314,7 @@ async fn stop_private(app: &Shared) -> Result<()> {
     if !healthy(app).await {
         return Ok(());
     }
-    anyhow::ensure!(
-        engine_port() == 11435,
-        "Порт занят движком, не запущенным этим приложением"
-    );
-    if cfg!(windows) {
-        let python =
-            tools::python(app).context("Не установлен Python для управления встроенным движком")?;
-        let mut cmd = tokio::process::Command::new(python);
-        cmd.arg(app.root.join("runtime/compute_probe.py"))
-            .arg("--stop-engine")
-            .arg(tools::ollama(app))
-            .env("PYTHONUTF8", "1");
-        let (code, _, err) = tools::capture(cmd, &app.shutdown.child_token(), 30).await?;
-        if code != 0 && !healthy(app).await {
-            return Ok(());
-        }
-        anyhow::ensure!(
-            code == 0,
-            "Встроенный движок не остановлен: {}",
-            tools::truncate(&err, 1200)
-        );
-    } else {
-        let record:Value=serde_json::from_slice(&std::fs::read(app.data.join("engine-owner.json")).context("Неизвестен владелец прежней Ollama. Остановите прежний встроенный движок один раз.")?)?;
-        let pid = record["pid"].as_u64().context("Неизвестен PID движка")?;
-        let mut verify = tokio::process::Command::new("ps");
-        verify.args(["-ww", "-p", &pid.to_string(), "-o", "comm="]);
-        let (code, out, _) = tools::capture(verify, &app.shutdown.child_token(), 5).await?;
-        let actual =
-            dunce::canonicalize(out.trim()).context("Не удалось проверить владельца порта")?;
-        anyhow::ensure!(
-            code == 0 && actual == dunce::canonicalize(tools::ollama(app))?,
-            "Движок принадлежит другому приложению и не был остановлен"
-        );
-        let mut stop = tokio::process::Command::new("kill");
-        stop.args(["-TERM", &pid.to_string()]);
-        let (code, _, err) = tools::capture(stop, &app.shutdown.child_token(), 5).await?;
-        anyhow::ensure!(code == 0, "Не удалось остановить движок: {err}");
-    }
-    app.compute.lock().await.child.take();
-    for _ in 0..40 {
-        if !healthy(app).await {
-            return Ok(());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    anyhow::bail!("Прежний движок ещё завершает работу")
+    anyhow::bail!("Порт встроенного движка занят процессом, которым приложение не владеет. Выберите свободный LOCAL_GEMMA_ENGINE_PORT или подключите внешний сервер через LOCAL_GEMMA_OLLAMA; чужой процесс не остановлен")
 }
 pub async fn ensure(app: &Shared, config: &Config) -> Result<()> {
     let _guard = app.startup.lock().await;
@@ -374,19 +329,11 @@ pub async fn ensure(app: &Shared, config: &Config) -> Result<()> {
         return Ok(());
     }
     if healthy(app).await {
-        let applied = app.compute.lock().await.applied_key.clone();
-        let recorded = std::fs::read(app.data.join("engine-owner.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .and_then(|v| v["key"].as_str().map(str::to_owned));
-        if applied.as_deref() == Some(&key)
-            || (applied.is_none()
-                && (recorded.as_deref() == Some(&key)
-                    || (effective.backend == "cpu" && engine_port() == 11435)))
-        {
-            app.compute.lock().await.applied_key = Some(key);
-            return Ok(());
-        }
+        let owned={
+            let mut runtime=app.compute.lock().await;
+            runtime.group.is_some()&&runtime.child.as_mut().is_some_and(|child|matches!(child.try_wait(),Ok(None)))&&runtime.applied_key.as_deref()==Some(&key)
+        };
+        if owned{return Ok(());}
         stop_private(app).await?;
     }
     stop_private(app).await?;

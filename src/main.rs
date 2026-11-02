@@ -10,6 +10,7 @@ mod engine;
 mod executions;
 mod filesystem;
 mod lifecycle;
+mod instance;
 mod model_adapter;
 mod model_storage;
 mod models;
@@ -84,34 +85,51 @@ fn main() -> Result<()> {
     std::env::set_var("HF_HOME", root.join("data/cache/huggingface"));
     std::env::set_var("PIP_CACHE_DIR", root.join("data/cache/pip"));
     std::env::set_var("OLLAMA_HOME", root.join("data/home"));
+    // No database/recovery is allowed before the data-home owner is known.
+    let home_lease=instance::acquire(&root)?;
+    let port: u16 = std::env::var("LOCAL_GEMMA_PORT").ok().map(|value|value.parse()).transpose()?.unwrap_or(3210);
+    anyhow::ensure!(port>0,"LOCAL_GEMMA_PORT должен быть от 1 до 65535");
     let runtime = tokio::runtime::Runtime::new()?;
-    let state = Arc::new(api::App::new(root)?);
-    let port: u16 = std::env::var("LOCAL_GEMMA_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(3210);
-    let addr = format!("127.0.0.1:{port}");
-    let listener = runtime.block_on(tokio::net::TcpListener::bind(&addr));
-    let url = format!("http://{addr}");
-    let listener = match listener {
-        Ok(listener) => Some(listener),
-        Err(error) => {
-            let existing = runtime.block_on(async {
-                state
-                    .client
-                    .get(format!("{url}/api/bootstrap"))
-                    .send()
-                    .await?
-                    .json::<serde_json::Value>()
-                    .await
-            });
-            if existing.is_ok_and(|value| value["app"] == "Local Gemma Studio") {
-                None
-            } else {
-                return Err(error.into());
+    let attach=|url:String,bootstrap:serde_json::Value|->Result<()>{
+        println!("Local Gemma Studio уже работает: {url}");
+        if std::env::args().any(|arg|arg=="--server"){return Ok(());}
+        let native=runtime.block_on(instance::activate(&url,&bootstrap)).unwrap_or(false);
+        if std::env::args().any(|arg|arg=="--browser")||!native{webbrowser::open(&url)?;}
+        Ok(())
+    };
+    let Some(owner)=home_lease.as_ref() else{
+        // A second launcher may arrive before the first publishes/listens. Wait
+        // only for this handshake; never recover its database on timeout.
+        let found=runtime.block_on(async{
+            let mut last=None;
+            for _ in 0..50{
+                if let Ok(port)=instance::port(&root){match instance::existing(&root,port).await{Ok(value)=>return Ok(value),Err(error)=>last=Some(error)}}
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
+            Err(last.unwrap_or_else(||anyhow::anyhow!("Папка данных занята запускающимся экземпляром. Повторите открытие приложения.")))
+        })?;
+        return attach(found.0,found.1);
+    };
+    let addr = format!("127.0.0.1:{port}");
+    let listener=match runtime.block_on(tokio::net::TcpListener::bind(&addr)){
+        Ok(listener)=>listener,
+        Err(error)=>{
+            // Also protect a legacy instance without an instance.lock file.
+            return match runtime.block_on(instance::existing(&root,port)){
+                Ok((url,value))=>attach(url,value),
+                Err(probe)=>Err(anyhow::anyhow!("Не удалось открыть порт {port}: {error}. {probe:#}")),
+            };
         }
     };
+    owner.publish(&root,port)?;
+    // home_lease was created before runtime: runtime teardown drops first.
+    if std::env::var_os("LOCAL_GEMMA_OLLAMA").is_none()&&std::env::var_os("LOCAL_GEMMA_ENGINE_PORT").is_none(){
+        let socket=std::net::TcpListener::bind("127.0.0.1:0")?;
+        std::env::set_var("LOCAL_GEMMA_ENGINE_PORT",socket.local_addr()?.port().to_string());
+    }
+    let state=Arc::new(api::App::new(root)?);
+    let url=format!("http://{addr}");
+    let listener=Some(listener);
     let owns_server = listener.is_some();
     if let Some(listener) = listener {
         let server_state = state.clone();
@@ -202,6 +220,7 @@ fn main() -> Result<()> {
             menu.init_for_nsapp();
             (menu,quit)
         };
+        state.native.store(true,std::sync::atomic::Ordering::Release);
         let base_url = url.clone();
         let quick_window = WindowBuilder::new()
             .with_title("Быстрый перевод — Local Gemma")
@@ -293,6 +312,9 @@ fn main() -> Result<()> {
                             std::time::Instant::now() + std::time::Duration::from_millis(250),
                         )
                     };
+                    if state.activate.swap(false,std::sync::atomic::Ordering::AcqRel){
+                        window.set_minimized(false);window.set_visible(true);window.set_focus();
+                    }
                     match &event {
                         Event::UserEvent(NativeEvent::CaptureArea) => {
                             quick_window.set_visible(false);

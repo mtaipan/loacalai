@@ -220,6 +220,8 @@ pub struct Run {
     pub conversation: String,
 }
 pub struct App {
+    pub activate:std::sync::atomic::AtomicBool,
+    pub native:std::sync::atomic::AtomicBool,
     pub processes: Mutex<HashMap<String,crate::processes::Active>>,
     pub process_recovery_errors:Vec<String>,
     pub settings_write: Mutex<()>,
@@ -300,6 +302,8 @@ impl App {
         tasks.recover_deletions(&data)?;
         let process_recovery_errors=crate::processes::recover(&data)?;
         Ok(Self {
+            activate:false.into(),
+            native:false.into(),
             processes:Mutex::new(HashMap::new()),
             process_recovery_errors,
             settings_write: Mutex::new(()),
@@ -358,6 +362,7 @@ pub fn now() -> String {
 pub fn router(app: Shared) -> Router {
     Router::new()
         .route("/api/bootstrap", get(bootstrap))
+        .route("/api/activate", post(activate))
         .route("/api/status", get(status))
         .route("/api/settings", post(settings))
         .route("/api/assistant/config", get(assistant_config))
@@ -569,6 +574,10 @@ async fn bootstrap(State(app): State<Shared>) -> Json<Value> {
     Json(
         json!({"app":"Local Gemma Studio","root":app.root.to_string_lossy(),"version":env!("CARGO_PKG_VERSION"),"token":app.token,"settings":app.settings.lock().await.clone(),"platform":std::env::consts::OS,"local_inference":engine::local_inference(),"catalog":crate::models::catalog()}),
     )
+}
+async fn activate(State(app):State<Shared>)->Json<Value>{
+    app.activate.store(true,std::sync::atomic::Ordering::Release);
+    Json(json!({"native":app.native.load(std::sync::atomic::Ordering::Acquire)}))
 }
 async fn status(State(app): State<Shared>) -> Json<Value> {
     let hotkey = std::fs::read(app.root.join("data/hotkey-status.json"))
