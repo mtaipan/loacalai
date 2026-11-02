@@ -184,7 +184,7 @@ async function restoreChange(id){
 function fileReadHtml(tool){
  if(tool.name!=='read_file'||tool.status!=='succeeded')return '';
  try{const r=JSON.parse(tool.result);if(typeof r.text!=='string')return '';
- return `<div class="tool-file"><p>${escapeHtml(r.path||'')} · строки ${escapeHtml(String(r.start_line??''))}–${escapeHtml(String(r.end_line??''))}${r.has_more?' · есть продолжение':''}</p><button class="button" data-copy-tool-text>Копировать текст</button><pre>${escapeHtml(r.text)}</pre></div>`;}catch{return '';}
+ return `<div class="tool-file"><p>${escapeHtml(r.path||'')} · ${r.start_line!=null?'строки '+escapeHtml(String(r.start_line))+'–'+escapeHtml(String(r.end_line??'')):'байты '+escapeHtml(String(r.start_byte??''))+'–'+escapeHtml(String(r.end_byte??''))}${r.encoding?' · '+escapeHtml(r.encoding):''}${r.partial_line?' · часть строки':''}${r.has_more?' · есть продолжение':''}</p><button class="button" data-copy-tool-text>Копировать текст</button><pre>${escapeHtml(r.text)}</pre></div>`;}catch{return '';}
 }
 function toolHtml(tool,pending=false){
   const execution=executionHtml(tool),fileRead=fileReadHtml(tool);

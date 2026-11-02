@@ -1784,6 +1784,7 @@ dependencies = [
  "clipboard-rs",
  "clipboard-win",
  "dunce",
+ "encoding_rs",
  "enigo",
  "futures-util",
  "global-hotkey",

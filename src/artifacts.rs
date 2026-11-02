@@ -100,7 +100,7 @@ fn compact_value(value:&Value,budget:&mut usize)->Value {
         Value::Object(object)=>{
             let mut result=serde_json::Map::new();
             // Identity and trusted mutation/process facts survive preview reduction.
-            for key in ["status","tool_status","changed","verified","path","source","destination","change_id","execution_id","exit_code","start_line","end_line","has_more","next_start_line","next_offset","complete","url","title","format","results","coverage","live_testing"] {
+            for key in ["status","tool_status","changed","verified","path","source","destination","change_id","execution_id","exit_code","start_line","end_line","has_more","next_start_line","next_offset","encoding","revision","start_byte","end_byte","total_bytes","partial_line","complete","url","title","format","results","coverage","live_testing"] {
                 if let Some(value)=object.get(key){let value=if ["path","source","destination","url","change_id","execution_id"].contains(&key)&&value.is_string(){value.clone()}else{compact_value(value,budget)};result.insert(key.into(),value);}
             }
             for(key,value)in object {if result.contains_key(key){continue;}if *budget==0{break;}result.insert(key.clone(),compact_value(value,budget));}
@@ -114,7 +114,7 @@ pub async fn archive_record(app:&crate::api::Shared,run:&str,mut record:Value)->
     let derived=["read_task","read_run_log","search_artifacts","update_plan","security_analyze","translate_text"].contains(&name.as_str());
     let source=if name=="read_artifact"&&record["status"]=="succeeded" {app.tasks.artifact(record["arguments"]["id"].as_str().unwrap_or("").into()).await?}else{
         let parsed=serde_json::from_str::<Value>(&text).ok();
-        let coverage=parsed.as_ref().map(|value|json!({"start_line":value["start_line"],"end_line":value["end_line"],"has_more":value["has_more"],"next_start_line":value["next_start_line"],"next_offset":value["next_offset"],"complete":value["complete"],"start_page":value["start_page"],"end_page":value["end_page"],"total_pages":value["total_pages"]}));
+        let coverage=parsed.as_ref().map(|value|json!({"start_line":value["start_line"],"end_line":value["end_line"],"has_more":value["has_more"],"next_start_line":value["next_start_line"],"next_offset":value["next_offset"],"complete":value["complete"],"start_page":value["start_page"],"end_page":value["end_page"],"total_pages":value["total_pages"],"encoding":value["encoding"],"revision":value["revision"],"start_byte":value["start_byte"],"end_byte":value["end_byte"],"total_bytes":value["total_bytes"],"partial_line":value["partial_line"]}));
         app.tasks.put_artifact(run.into(),if derived {"derived_result"}else{"tool_result"}.into(),text.clone(),json!({"tool_id":record["id"],"tool_name":name,"status":record["status"],"path":parsed.as_ref().map(|value|&value["path"]),"url":parsed.as_ref().map(|value|&value["url"]),"coverage":coverage,"origin":if derived {"derived"}else{"tool_observation"}})).await?
     };
     record["result_artifact"]=source;

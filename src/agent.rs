@@ -268,7 +268,7 @@ pub fn tool_context(name: &str, status: &str, text: &str, exit_code: Option<i32>
     if name == "read_file" && status == "succeeded" {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
             if let Some(content) = value["text"].as_str() {
-                return format!("STATUS: succeeded\nPATH: {}\nLINES: {}..{}\nHAS_MORE: {}\nNEXT_START_LINE: {}\nThe following is raw file text. Do not copy these metadata labels or markers into edits.\nFILE_TEXT_BEGIN\n{}\nFILE_TEXT_END",value["path"].as_str().unwrap_or("").replace('\\',"/"),value["start_line"],value["end_line"],value["has_more"],value["next_start_line"],content);
+                return format!("STATUS: succeeded\nSOURCE_PAGE: {}\nPATH: {}\nLINES: {}..{}\nHAS_MORE: {}\nNEXT_START_LINE: {}\nThe following is raw file text. Do not copy these metadata labels or markers into edits.\nFILE_TEXT_BEGIN\n{}\nFILE_TEXT_END",serde_json::json!({"encoding":value["encoding"],"revision":value["revision"],"start_byte":value["start_byte"],"end_byte":value["end_byte"],"next_offset":value["next_offset"],"partial_line":value["partial_line"]}),value["path"].as_str().unwrap_or("").replace('\\',"/"),value["start_line"],value["end_line"],value["has_more"],value["next_start_line"],content);
             }
         }
     }

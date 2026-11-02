@@ -32,6 +32,7 @@ mod task_store;
 mod task_state;
 mod thinking;
 mod timeline;
+mod text_source;
 mod tools;
 mod tool_schema;
 mod web_tools;

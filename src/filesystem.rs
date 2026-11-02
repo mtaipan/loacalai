@@ -225,53 +225,9 @@ pub fn writable_path(root: &Path, value: &str, computer_access: bool) -> Result<
     Ok(resolved)
 }
 
-pub fn read_lines(path: &Path, start: u64, count: u64) -> Result<Value> {
-    use std::io::{BufRead, BufReader, Read};
-    anyhow::ensure!(
-        start > 0 && count > 0 && count <= 500,
-        "start_line от 1; max_lines от 1 до 500"
-    );
-    let mut reader = BufReader::new(std::fs::File::open(path)?.take(32 * 1024 * 1024));
-    let mut line = Vec::new();
-    let mut number = 0;
-    let mut output = String::new();
-    let mut last_line = None;
-    let mut more = false;
-    loop {
-        line.clear();
-        // Individual very long lines are capped too.
-        let n = reader
-            .by_ref()
-            .take(128 * 1024)
-            .read_until(b'\n', &mut line)?;
-        if n == 0 {
-            break;
-        }
-        anyhow::ensure!(
-            n < 128 * 1024 || line.last() == Some(&b'\n'),
-            "Строка длиннее 128 КиБ; разбейте файл на строки"
-        );
-        number += 1;
-        if number < start {
-            continue;
-        }
-        if number >= start + count || output.len() + line.len() > 20000 {
-            anyhow::ensure!(
-                !output.is_empty(),
-                "Одна строка превышает лимит вывода 20 КБ. Разбейте её на несколько строк."
-            );
-            more = true;
-            break;
-        }
-        let text = std::str::from_utf8(&line).context("Файл не является текстом UTF-8")?;
-        anyhow::ensure!(!text.contains('\0'), "Двоичный файл");
-        output.push_str(text);
-        last_line = Some(number);
-    }
-    let bytes_limit = reader.get_ref().limit() == 0;
-    Ok(
-        json!({"path":path,"start_line":start,"end_line":last_line,"text":output,"has_more":more || bytes_limit,"next_start_line":if more {Some(number)} else {None},"scan_limit_reached":bytes_limit,"note":"text содержит исходный текст без добавленных номеров строк; переводы строк сохранены."}),
-    )
+#[cfg(test)]
+pub fn read_lines(path:&Path,start:u64,count:u64)->Result<Value>{
+    crate::text_source::page(path,&json!({"start_line":start,"max_lines":count}),&CancellationToken::new())
 }
 
 pub async fn search_text(
