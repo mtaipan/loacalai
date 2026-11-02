@@ -1359,7 +1359,7 @@ async fn task_state(State(app):State<Shared>,Path(id):Path<String>,axum::extract
     let after=q.get("after").map(|v|v.parse::<i64>()).transpose()?.unwrap_or(0);
     require(after>=0,"Курсор должен быть неотрицательным")?;
     let mut task=app.tasks.task(id.clone(),after).await?;task["active_processes"]=json!(crate::processes::for_task(&app,&id).await?);
-    if let Some(run)=task["runs"].as_array().and_then(|runs|runs.first()).and_then(|run|run["id"].as_str()).map(str::to_owned){let before=q.get("before_artifact").map(|value|value.parse::<i64>()).transpose()?;task["observations"]=app.tasks.artifact_list(run,before).await?;}
+    if let Some(run)=task["runs"].as_array().and_then(|runs|runs.first()).and_then(|run|run["id"].as_str()).map(str::to_owned){let before=q.get("before_artifact").map(|value|value.parse::<i64>()).transpose()?;let material_before=q.get("before_material").map(|value|value.parse::<i64>()).transpose()?;task["material_jobs"]=app.tasks.material_jobs(run.clone(),material_before).await?;task["observations"]=app.tasks.artifact_list(run,before).await?;}
     Ok(Json(task))
 }
 async fn task_request(State(app):State<Shared>,Path((id,sequence)):Path<(String,i64)>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{

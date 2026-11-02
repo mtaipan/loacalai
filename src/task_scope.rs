@@ -239,6 +239,7 @@ impl TaskScope {
                 "get_system_paths",
                 "find_files",
                 "read_file",
+                "ingest_file",
                 "read_document",
                 "read_image",
                 "transcribe_audio",
@@ -326,7 +327,7 @@ impl TaskScope {
         if !self.names.is_empty()
             && matches!(
                 name,
-                "find_files" | "read_file" | "read_document" | "read_image" | "transcribe_audio"
+                "find_files" | "read_file" | "ingest_file" | "read_document" | "read_image" | "transcribe_audio"
             )
         {
             let value = args[if name == "find_files" { "name" } else { "path" }]
@@ -376,7 +377,7 @@ impl TaskScope {
                 "write_file" | "edit_file" | "delete_file" => Some("path"),
                 "copy_file" | "move_file" => Some("destination"),
                 "translate_file" => Some("output"),
-                "read_file" | "read_document" | "read_image" | "transcribe_audio"
+                "read_file" | "ingest_file" | "read_document" | "read_image" | "transcribe_audio"
                     if !self.names.is_empty() =>
                 {
                     Some("path")
@@ -426,9 +427,10 @@ mod tests {
     #[test]
     fn named_read_is_narrow_but_project_edit_can_read_dependencies() {
         let s = TaskScope::new("найди makar.txt и прочитай его");
+        for name in ["read_file","ingest_file"]{
         assert!(s
             .prepare(
-                "read_file",
+                name,
                 &mut json!({"path":"A:/some/makar.txt"}),
                 Path::new("."),
                 true
@@ -436,12 +438,13 @@ mod tests {
             .is_ok());
         assert!(s
             .prepare(
-                "read_file",
+                name,
                 &mut json!({"path":"A:/some/other.txt"}),
                 Path::new("."),
                 true
             )
             .is_err());
+        }
         assert!(!s.allows("inspect_project"));
         assert!(TaskScope::new("исправь app.rs в проекте").allows("inspect_project"));
     }

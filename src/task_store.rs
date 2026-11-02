@@ -49,7 +49,7 @@ impl Store {
         let mut conn = Connection::open(data.join("tasks.sqlite3"))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 5,
+            version <= 6,
             "База задач создана более новой версией приложения; исходный файл сохранён"
         );
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -69,7 +69,9 @@ impl Store {
         crate::task_state::install(&mut conn,version<3)?;
         crate::artifacts::install(&mut conn)?;
         crate::timeline::install(&conn)?;
-        conn.pragma_update(None,"user_version",5)?;
+        crate::materials::install(&conn)?;
+        conn.pragma_update(None,"user_version",6)?;
+        conn.execute("UPDATE material_ingests SET status='interrupted',error=COALESCE(error,'Приложение завершилось до окончания подготовки') WHERE status='ingesting'",[])?;
         // A crash leaves effects with unknown outcome. Never replay mutations automatically.
         conn.execute(
             "UPDATE runs SET status='interrupted', updated=?1 WHERE status IN ('running','queued','awaiting_approval','stopping')",
@@ -85,8 +87,9 @@ impl Store {
         self.access(move |conn| {
             let tx=conn.transaction()?;
             tx.execute("INSERT OR IGNORE INTO deleted_conversations VALUES (?1)", [&id])?;
+            tx.execute("DELETE FROM material_ingests WHERE run IN (SELECT id FROM runs WHERE conversation=?1)",[&id])?;
             tx.execute("DELETE FROM artifacts WHERE run IN (SELECT id FROM runs WHERE conversation=?1)",[&id])?;
-            tx.execute("DELETE FROM artifact_bodies WHERE NOT EXISTS (SELECT 1 FROM artifacts WHERE artifacts.hash=artifact_bodies.hash)",[])?;
+            tx.execute("DELETE FROM artifact_bodies WHERE NOT EXISTS (SELECT 1 FROM artifacts WHERE artifacts.hash=artifact_bodies.hash) AND NOT EXISTS (SELECT 1 FROM material_ingests WHERE material_ingests.body=artifact_bodies.hash)",[])?;
             tx.execute("DELETE FROM task_plans WHERE task IN (SELECT id FROM work_tasks WHERE conversation=?1)",[&id])?;
             tx.execute("DELETE FROM task_requests WHERE task IN (SELECT id FROM work_tasks WHERE conversation=?1)",[&id])?;
             tx.execute("DELETE FROM task_runs WHERE task IN (SELECT id FROM work_tasks WHERE conversation=?1)",[&id])?;

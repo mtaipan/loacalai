@@ -17,6 +17,9 @@ class Fixture(BaseHTTPRequestHandler):
         if self.path=='/api/show':return self.reply({'model_info':{'qwen.context_length':65536},'thinking':{'values':[False]}})
         if self.path!='/api/chat' or not body.get('messages'):return self.reply({'done':True,'status':'success'})
         messages=body['messages'];user=max(i for i,m in enumerate(messages) if m['role']=='user');request=messages[user]['content'];results=[m for m in messages[user+1:] if m['role']=='tool']
+        if 'INGEST_FIXTURE' in request:
+            if results:return self.reply({'message':{'role':'assistant','content':'SOURCE_INGESTED'},'done':True})
+            return self.reply({'message':{'role':'assistant','content':'','tool_calls':[{'function':{'name':'ingest_file','arguments':{'path':'source.txt'}}}]},'done':True})
         args=None
         if 'LEGACY_FIXTURE' in request:
             if not results:args={'path':'legacy.txt','encoding':'windows-1251'}
@@ -65,6 +68,15 @@ try:
     assert any(page['partial_line'] for page in pages)
     assert all(a['end_byte']==b['start_byte'] for a,b in zip(pages,pages[1:]))
     assert pages[-1]['has_more'] is False and pages[-1]['end_byte']==(workspace/'source.txt').stat().st_size
+    prepared=run('INGEST_FIXTURE prepare source.txt as a saved material')
+    tool=prepared['tools'][0];assert tool['name']=='ingest_file' and tool['status']=='succeeded' and 'SOURCE_INGESTED' in prepared['content'],prepared
+    source=tool['material_artifact'];assert source['metadata']['coverage']['complete'] is True
+    with call('/api/artifacts/'+source['id']+'/download') as response:assert response.read().decode()==original
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as playwright:
+        browser=playwright.chromium.launch(channel='msedge',headless=True);page=browser.new_page(viewport={'width':320,'height':700});errors=[];page.on('pageerror',lambda error:errors.append(str(error)));page.goto(base);page.wait_for_selector('#prompt')
+        conversation=read('/api/runs/'+source['run'])['conversation'];page.evaluate('(id)=>switchConversation(id)',conversation);page.locator('.tool-card summary').first.click();page.locator('[data-artifact="'+source['id']+'"]').click();page.wait_for_selector('#artifact-dialog .artifact-content')
+        page.wait_for_function('(text)=>document.querySelector("#artifact-dialog .artifact-content")?.textContent===text',arg=original[:8000]);page.screenshot(path=str(root/'material-mobile.png'));assert page.locator('.artifact-close').bounding_box()['y']<700;assert not errors,errors;browser.close()
     answer=run('LEGACY_FIXTURE read legacy.txt');assert observed(answer['tools'][0])['text']==legacy
     answer=run('CHANGE_FIXTURE read source.txt completely');assert answer['tools'][0]['status']=='succeeded' and answer['tools'][1]['status']=='failed' and 'SOURCE_CHANGE_DETECTED' in answer['content']
     assert observed(answer['tools'][0])['text']==pages[0]['text'],'source mutation changed an earlier observation'

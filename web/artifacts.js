@@ -1,7 +1,7 @@
 'use strict';
 function artifactLinks(tool){
   const links=[];
-  for(const [field,label] of [['result_artifact','Сохранённый результат'],['arguments_artifact','Полные параметры']]){
+  for(const [field,label] of [['material_artifact','Исходный материал'],['result_artifact','Сохранённый результат'],['arguments_artifact','Полные параметры']]){
     const source=tool[field];if(!/^[0-9a-f-]{36}$/i.test(source?.id||''))continue;
     links.push(`<button class="button" data-artifact="${escapeHtml(source.id)}">${label}</button>`);
   }

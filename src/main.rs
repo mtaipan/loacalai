@@ -12,6 +12,7 @@ mod filesystem;
 mod lifecycle;
 mod instance;
 mod model_adapter;
+mod materials;
 mod model_storage;
 mod models;
 mod process_group;

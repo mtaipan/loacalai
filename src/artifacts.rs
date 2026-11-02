@@ -111,6 +111,7 @@ fn compact_value(value:&Value,budget:&mut usize)->Value {
 }
 pub async fn archive_record(app:&crate::api::Shared,run:&str,mut record:Value)->Result<Value>{
     let name=record["name"].as_str().unwrap_or("").to_string();let text=record["result"].as_str().unwrap_or("").to_string();
+    if name=="ingest_file"&&record["status"]=="succeeded"{if let Ok(value)=serde_json::from_str::<Value>(&text){record["material_artifact"]=value["material"].clone();}}
     let derived=["read_task","read_run_log","search_artifacts","update_plan","security_analyze","translate_text"].contains(&name.as_str());
     let source=if name=="read_artifact"&&record["status"]=="succeeded" {app.tasks.artifact(record["arguments"]["id"].as_str().unwrap_or("").into()).await?}else{
         let parsed=serde_json::from_str::<Value>(&text).ok();
