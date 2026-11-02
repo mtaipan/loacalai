@@ -277,6 +277,7 @@ function renderComputeRuntime(runtime){
  const models=Array.isArray(runtime.loaded_models)?runtime.loaded_models:[];
  element.innerHTML=`<strong>Сохранено: ${escapeHtml(names[runtime.requested?.backend]||runtime.requested?.backend||'—')}</strong>${runtime.fallback_error?`<p class="compute-fallback">Выбран резервный режим CPU после ошибки ускорителя.<br>${escapeHtml(runtime.fallback_error)}</p>`:''}${models.length?models.map(m=>`<p>${escapeHtml(modelName(m.name||m.model))}<br>${typeof m.size_vram==='number'?(m.size_vram>0?'Память GPU: '+computeMemory(m.size_vram)+' · размер размещения: '+computeMemory(m.size):'Модель размещена на CPU'):'Движок не сообщил размещение модели'}</p>`).join(''):'<p>Сейчас модель не загружена. Фактическое размещение появится после запроса.</p>'}${runtime.installing?'<p>Устанавливаются компоненты движка…</p>':''}`;
  if(runtime.memory){const memory=runtime.memory;element.insertAdjacentHTML('beforeend',`<p>RAM: доступно ${computeMemory(memory.available_bytes)} из ${computeMemory(memory.total_bytes)}<br>Подкачка: ${computeMemory(memory.swap_used_bytes)}</p>`);}
+ if(runtime.package_cleanup_error)element.insertAdjacentHTML('beforeend',`<p class="compute-fallback">Резервные копии установки пока не удалены.<br>${escapeHtml(runtime.package_cleanup_error)}</p>`);
  if(runtime.cleanup_error)element.insertAdjacentHTML('beforeend',`<p class="compute-fallback">${escapeHtml(runtime.cleanup_error.error)}</p>`);
 }
 async function loadCompute(refresh=false){

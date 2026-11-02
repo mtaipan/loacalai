@@ -68,6 +68,7 @@ pub struct Runtime {
     pub child: Option<tokio::process::Child>,
     pub group: Option<crate::process_group::Group>,
     pub installing: bool,
+    pub package_cleanup_error:Option<String>,
 }
 impl Runtime {
     pub fn load(data: &Path) -> Self {
@@ -320,8 +321,24 @@ async fn stop_private(app: &Shared) -> Result<()> {
     }
     anyhow::bail!("Порт встроенного движка занят процессом, которым приложение не владеет. Выберите свободный LOCAL_GEMMA_ENGINE_PORT или подключите внешний сервер через LOCAL_GEMMA_OLLAMA; чужой процесс не остановлен")
 }
+async fn recover_packages(app:&Shared)->Result<()> {
+    let directory=app.data.join("package-transactions");
+    let pending=match std::fs::read_dir(&directory){
+        Ok(entries)=>{let mut found=false;for entry in entries{let entry=entry?;let name=entry.file_name();if name.to_str().is_some_and(|name|uuid::Uuid::parse_str(name).is_ok_and(|id|id.to_string().eq_ignore_ascii_case(name))){found=true;}}found},
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>false,
+        Err(error)=>return Err(error.into())
+    };
+    if !pending{app.compute.lock().await.package_cleanup_error=None;return Ok(());}
+    let python=tools::python(app).context("Для восстановления прерванной установки нужен Python из комплекта приложения")?;
+    let mut command=tokio::process::Command::new(python);
+    command.arg(app.root.join("runtime/compute_packages.py")).arg("--root").arg(&app.root).arg("--recover").env("PYTHONUTF8","1");
+    let(code,_,error)=tools::capture(command,&app.shutdown.child_token(),0).await?;
+    anyhow::ensure!(code==0,"Не удалось восстановить прерванную установку компонентов. Исходные файлы и копии сохранены: {}",tools::truncate(&error,2400));
+    app.compute.lock().await.package_cleanup_error=if error.trim().is_empty(){None}else{Some(tools::truncate(&error,2400))};Ok(())
+}
 pub async fn ensure(app: &Shared, config: &Config) -> Result<()> {
     let _guard = app.startup.lock().await;
+    recover_packages(app).await?;
     let mut effective = config.clone();
     if force_cpu(app, config).await {
         effective.backend = "cpu".into();
@@ -484,7 +501,8 @@ pub async fn summary(app: &Shared) -> Value {
             }
         }
     }
-    json!({"requested":config,"forced_cpu":fallback,"fallback_error":error,"loaded_models":models,"installing":app.compute.lock().await.installing,"memory":crate::resources::memory(),"inference_busy":app.resources.gate.try_lock().is_err(),"release_after_inference":true,"cleanup_error":app.resources.failure.lock().unwrap().clone()})
+    let (installing,package_cleanup_error)={let runtime=app.compute.lock().await;(runtime.installing,runtime.package_cleanup_error.clone())};
+    json!({"requested":config,"forced_cpu":fallback,"fallback_error":error,"loaded_models":models,"installing":installing,"memory":crate::resources::memory(),"inference_busy":app.resources.gate.try_lock().is_err(),"release_after_inference":true,"cleanup_error":app.resources.failure.lock().unwrap().clone(),"package_cleanup_error":package_cleanup_error})
 }
 pub async fn model_on_gpu(app: &Shared, model: &str) -> Option<bool> {
     let value = app

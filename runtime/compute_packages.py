@@ -3,7 +3,7 @@
 HTTP byte ranges avoid downloading the entire multi-gigabyte release archive.
 Every ZIP member is CRC checked by zipfile; extracted paths are allowlisted.
 """
-import argparse,io,json,os,re,shutil,sys,time,urllib.request,zipfile
+import argparse,hashlib,io,json,os,re,shutil,sys,time,urllib.request,uuid,zipfile
 from pathlib import Path,PurePosixPath
 
 class RangeZip(io.RawIOBase):
@@ -43,20 +43,154 @@ class RangeZip(io.RawIOBase):
             result.extend(self.cache[offset:offset+take]);self.pos+=take;n-=take
         return bytes(result)
 
+def relative_path(raw,backend):
+    path=PurePosixPath(raw.replace('\\','/'))
+    if path.is_absolute() or not path.parts or '..' in path.parts:raise ValueError('Unsafe package path')
+    for part in path.parts:
+        if re.search(r'[<>:"|?*\x00-\x1f]',part) or part.endswith((' ','.')) or re.fullmatch(r'(?i)(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?',part):raise ValueError('Unsafe Windows package path')
+    if str(path)==backend+'-package.json':return path
+    if len(path.parts)<4 or path.parts[:2]!=('lib','ollama') or not path.parts[2].lower().startswith(backend):raise ValueError('Package path outside backend')
+    return path
+
 def members(z,backend):
+    seen=set()
     for entry in z.infolist():
-        path=PurePosixPath(entry.filename.replace('\\','/'))
-        if path.is_absolute() or '..' in path.parts:continue
-        parts=path.parts
-        if len(parts)>=4 and parts[:2]==('lib','ollama'):
-            folder=parts[2].lower()
-            if (backend=='vulkan' and folder.startswith('vulkan')) or (backend=='cuda' and folder.startswith('cuda')) or (backend=='rocm' and folder.startswith('rocm')):
-                if not entry.is_dir():yield entry,path
+        raw=entry.orig_filename.replace('\\','/');parts=PurePosixPath(raw).parts
+        if entry.is_dir() or len(parts)<4 or parts[:2]!=('lib','ollama') or not parts[2].lower().startswith(backend):continue
+        path=relative_path(raw,backend);key=str(path).casefold()
+        if key in seen:raise ValueError('Duplicate package destination')
+        seen.add(key);yield entry,path
+
+def safe_path(base,path):
+    base=base.resolve();value=base.joinpath(*path.parts)
+    # Refuse alias/reparse parents before replacing any installed path.
+    if value.resolve()!=value or not value.is_relative_to(base):raise RuntimeError('Package path follows a link or escapes its directory')
+    return value
+
+def install_target(root):
+    root=root.resolve();target=root/'runtime/ollama'
+    if target.resolve()!=target:raise RuntimeError('Installed engine directory follows a link')
+    return target
+
+def jobs_root(root):
+    root=root.resolve();base=root/'data/package-transactions'
+    if base.resolve()!=base or not base.resolve().is_relative_to(root):raise RuntimeError('Package journal escapes application root or follows a link')
+    return base
+
+def digest(path):
+    if not path.exists():return None
+    if not path.is_file() or path.is_symlink():raise RuntimeError('Package destination is not a regular file')
+    value=hashlib.sha256()
+    with path.open('rb') as source:
+        for chunk in iter(lambda:source.read(1024*1024),b''):value.update(chunk)
+    return value.hexdigest()
+
+def atomic_json(path,value):
+    temporary=path.with_name(path.name+'.'+uuid.uuid4().hex+'.tmp')
+    try:
+        with temporary.open('x',encoding='utf-8') as output:json.dump(value,output,ensure_ascii=False);output.flush();os.fsync(output.fileno())
+        os.replace(temporary,path)
+    finally:
+        if temporary.exists():temporary.unlink()
+
+def copy_synced(source,destination):
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    with source.open('rb') as src,destination.open('xb') as out:shutil.copyfileobj(src,out,1024*1024);out.flush();os.fsync(out.fileno())
+
+def remove_job(root,job):
+    base=jobs_root(root).resolve();resolved=job.resolve()
+    if resolved.parent!=base or resolved.name.lower()!=str(uuid.UUID(resolved.name)):raise RuntimeError('Unsafe package journal cleanup')
+    # Keep the recovery decision until all staged files/backups have been removed.
+    for child in resolved.iterdir():
+        if child.name=='journal.json':continue
+        checked=child.resolve()
+        if checked!=child or not checked.is_relative_to(resolved):raise RuntimeError('Package cleanup follows a link')
+        if child.is_dir():shutil.rmtree(checked)
+        else:child.unlink()
+    journal=resolved/'journal.json'
+    if journal.exists():journal.unlink()
+    resolved.rmdir()
+
+def cleanup_finished(root,job):
+    try:remove_job(root,job)
+    except Exception as error:
+        warning='Остались резервные копии установки; очистка не завершена: '+str(error)
+        print(json.dumps({'status':'cleanup_pending','journal':str(job),'warning':warning},ensure_ascii=False),file=sys.stderr,flush=True)
+        return warning
+    return None
+
+def rollback(root,job,plan):
+    errors=[];backend=plan['backend'];target=install_target(root)
+    for index,item in reversed(list(enumerate(plan['files']))):
+        try:
+            path=safe_path(target,relative_path(item['path'],backend));current=digest(path)
+            if current==item['before']:continue
+            if current!=item['after']:raise RuntimeError('File changed outside this installation; recovery did not overwrite it')
+            if item['before'] is None:path.unlink()
+            else:
+                backup=safe_path(job,PurePosixPath('old')/str(index))
+                if digest(backup)!=item['before']:raise RuntimeError('Package backup is missing or damaged')
+                temporary=path.with_name(path.name+'.'+uuid.uuid4().hex+'.restore')
+                try:copy_synced(backup,temporary);os.replace(temporary,path)
+                finally:
+                    if temporary.exists():temporary.unlink()
+            if digest(path)!=item['before']:raise RuntimeError('Package rollback verification failed')
+        except Exception as error:errors.append({'path':item.get('path'),'error':str(error)})
+    if errors:
+        plan['status']='recovery_required';plan['errors']=errors;atomic_json(job/'journal.json',plan)
+        raise RuntimeError('Package recovery requires attention; files and backups retained: '+json.dumps(errors,ensure_ascii=False))
+    plan['status']='rolled_back';atomic_json(job/'journal.json',plan)
+    return cleanup_finished(root,job)
+
+def recover(root):
+    root=root.resolve();base=jobs_root(root)
+    if not base.exists():return
+    for job in base.iterdir():
+        # Only this installer's UUID directories are owned by recovery.
+        try:valid=job.name.lower()==str(uuid.UUID(job.name))
+        except ValueError:continue
+        if not valid:continue
+        if job.resolve().parent!=base.resolve() or job.is_symlink():raise RuntimeError('Package journal is a link')
+        journal=job/'journal.json'
+        if not journal.exists():
+            if (job/'old').exists():raise RuntimeError('Package journal is missing; backups retained for inspection')
+            remove_job(root,job);continue # extraction staging never touched installed files
+        journal=safe_path(job,PurePosixPath('journal.json'))
+        plan=json.loads(journal.read_text(encoding='utf-8'))
+        if plan.get('version')!=1 or plan.get('backend') not in ('cuda','vulkan','rocm'):raise RuntimeError('Unknown package journal; preserved')
+        if plan['status'] in ('committed','rolled_back'):cleanup_finished(root,job)
+        else:rollback(root,job,plan)
+
+def publish(root,job,backend,paths,checkpoint=None):
+    target=install_target(root);files=[]
+    for index,relative in enumerate(paths):
+        destination=safe_path(target,relative_path(str(relative),backend));before=digest(destination)
+        if before is not None:
+            copy_synced(destination,job/'old'/str(index))
+            if digest(job/'old'/str(index))!=before or digest(destination)!=before:raise RuntimeError('Installed file changed during backup')
+        files.append({'path':str(relative),'before':before,'after':digest(safe_path(job/'new',relative))})
+        if files[-1]['after'] is None:raise RuntimeError('Staged package file missing')
+    plan={'version':1,'backend':backend,'status':'prepared','files':files};atomic_json(job/'journal.json',plan)
+    try:
+        for index,item in enumerate(files):
+            relative=relative_path(item['path'],backend);destination=safe_path(target,relative)
+            if digest(destination)!=item['before']:raise RuntimeError('Installed file changed before publication')
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            os.replace(safe_path(job/'new',relative),destination)
+            if digest(destination)!=item['after']:raise RuntimeError('Package publication verification failed')
+            if checkpoint:checkpoint(index)
+        plan['status']='committed';atomic_json(job/'journal.json',plan)
+    except Exception as error:
+        try:rollback(root,job,plan)
+        except Exception as recovery:raise RuntimeError(str(error)+'; '+str(recovery)) from error
+        raise
+    return cleanup_finished(root,job)
 
 def install(root,backend,version,list_only=False):
     if not re.fullmatch(r'\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)*',version):raise ValueError('Invalid Ollama version')
     if backend not in ['cuda','vulkan','rocm']:raise ValueError('Unknown backend')
-    binary=root/'runtime/ollama/ollama.exe'
+    root=root.resolve();recover(root)
+    binary=install_target(root)/'ollama.exe'
     with binary.open('rb') as file:
         file.seek(0x3c);offset=int.from_bytes(file.read(4),'little');file.seek(offset+4);machine=int.from_bytes(file.read(2),'little')
     arch={0x8664:'amd64',0xaa64:'arm64'}.get(machine)
@@ -71,21 +205,24 @@ def install(root,backend,version,list_only=False):
         print(json.dumps({'status':'files','bytes':total,'files':[str(p) for _,p in selected]}),flush=True)
         if list_only:return
         if shutil.disk_usage(root).free<total*2+256*1024*1024:raise RuntimeError('Not enough free space on the application drive')
-        target=root/'runtime/ollama';stage=root/'data/temp'/('gpu-'+backend+'-'+str(os.getpid()));stage.mkdir(parents=True,exist_ok=True)
+        job=jobs_root(root)/str(uuid.uuid4());stage=job/'new';stage.mkdir(parents=True,exist_ok=False)
         try:
             done=0
             for entry,path in selected:
-                destination=stage.joinpath(*path.parts);destination.parent.mkdir(parents=True,exist_ok=True)
-                with archive.open(entry) as source,destination.open('wb') as output:shutil.copyfileobj(source,output,1024*1024)
+                destination=safe_path(stage,path);destination.parent.mkdir(parents=True,exist_ok=True)
+                with archive.open(entry) as source,destination.open('xb') as output:shutil.copyfileobj(source,output,1024*1024);output.flush();os.fsync(output.fileno())
                 if destination.stat().st_size!=entry.file_size:raise RuntimeError('Incomplete library extraction')
                 done+=entry.file_size;print(json.dumps({'status':'extract','file':str(path),'completed':done,'total':total}),flush=True)
-            for _,path in selected:
-                destination=target.joinpath(*path.parts);destination.parent.mkdir(parents=True,exist_ok=True)
-                os.replace(stage.joinpath(*path.parts),destination)
-            marker=target/f'{backend}-package.json';marker.write_text(json.dumps({'backend':backend,'version':version,'files':[str(p) for _,p in selected]}),encoding='utf-8')
+            marker=PurePosixPath(backend+'-package.json')
+            atomic_json(stage/str(marker),{'backend':backend,'version':version,'files':[str(p) for _,p in selected]})
+            publish(root,job,backend,[path for _,path in selected]+[marker])
             print(json.dumps({'status':'ready','backend':backend,'bytes':total}),flush=True)
-        finally:shutil.rmtree(stage,ignore_errors=True)
+        finally:
+            if job.exists() and not (job/'journal.json').exists():remove_job(root,job)
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--root',type=Path,required=True);p.add_argument('--backend',choices=['cuda','vulkan','rocm'],required=True);p.add_argument('--version',required=True);p.add_argument('--list',action='store_true');a=p.parse_args()
-    install(a.root.resolve(),a.backend,a.version,a.list)
+    p=argparse.ArgumentParser();p.add_argument('--root',type=Path,required=True);p.add_argument('--backend',choices=['cuda','vulkan','rocm']);p.add_argument('--version');p.add_argument('--list',action='store_true');p.add_argument('--recover',action='store_true');a=p.parse_args()
+    if a.recover:recover(a.root.resolve())
+    else:
+        if not a.backend or not a.version:p.error('--backend and --version are required for installation')
+        install(a.root.resolve(),a.backend,a.version,a.list)

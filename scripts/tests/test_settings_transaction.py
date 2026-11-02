@@ -1,12 +1,22 @@
 """Settings/runtime failure and disconnect scenarios; isolated fake engine only."""
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-import copy,ctypes,json,os,socket,subprocess,threading,time,urllib.request,urllib.error,uuid
+import contextlib,copy,ctypes,io,json,os,sys,socket,subprocess,threading,time,urllib.request,urllib.error,uuid
 project=Path(__file__).resolve().parents[2];root=project/'build-tools'/('settings-transaction-'+uuid.uuid4().hex[:8]);(root/'data/workspace').mkdir(parents=True)
 settings_path=root/'data/settings.json';fallback_path=root/'data/compute-fallback.json'
 settings_path.write_text(json.dumps({'workspace':str(root/'data/workspace'),'theme':'dark','source':'en','target':'ru','cpu_only':True}))
 fallback=b'{"key":"OLD_FIXTURE_KEY","error":"OLD_FIXTURE_ERROR"}'
 fallback_path.write_bytes(fallback)
+sys.path.insert(0,str(project/'runtime'));import compute_packages as package
+managed=root/'runtime/ollama/lib/ollama/cuda_v12/fixture.dll';managed.parent.mkdir(parents=True);managed.write_bytes(b'OLD_PACKAGE')
+job=package.jobs_root(root)/str(uuid.uuid4());staged=job/'new/lib/ollama/cuda_v12/fixture.dll';staged.parent.mkdir(parents=True);staged.write_bytes(b'NEW_PACKAGE')
+def interrupted(index):raise SystemExit(7)
+try:package.publish(root,job,'cuda',[package.PurePosixPath('lib/ollama/cuda_v12/fixture.dll')],interrupted)
+except SystemExit:pass
+assert managed.read_bytes()==b'NEW_PACKAGE'
+subprocess.run(['powershell.exe','-NoProfile','-Command','New-Item -ItemType Junction -Path $env:TEST_PY_LINK -Target $env:TEST_PY_TARGET | Out-Null'],env={**os.environ,'TEST_PY_LINK':str(root/'runtime/python'),'TEST_PY_TARGET':str(project/'runtime/python')},check=True)
+(root/'runtime/compute_packages.py').write_bytes((project/'runtime/compute_packages.py').read_bytes())
+recovery_violations=[]
 health_calls=0;failures=0;block=False;entered=threading.Event();release=threading.Event()
 class Engine(BaseHTTPRequestHandler):
     def log_message(self,*args):pass
@@ -15,6 +25,7 @@ class Engine(BaseHTTPRequestHandler):
         status=200
         if self.path=='/api/version':
             health_calls+=1
+            if managed.read_bytes()!=b'OLD_PACKAGE' or job.exists():recovery_violations.append('Engine health accessed before package recovery')
             if block:entered.set();release.wait(10)
             if failures:failures-=1;status=503
         data=json.dumps({'version':'fixture','models':[]}).encode();self.send_response(status);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
@@ -40,6 +51,12 @@ try:
         try:token=call('/api/bootstrap')['token'];break
         except Exception:time.sleep(.05)
     else:raise AssertionError('Own server did not start')
+    for _ in range(200):
+        if health_calls:break
+        time.sleep(.025)
+    assert health_calls and not recovery_violations,recovery_violations
+    assert managed.read_bytes()==b'OLD_PACKAGE' and not job.exists()
+    print('PASS Rust startup recovers the interrupted package before contacting the engine')
     prior=call('/api/bootstrap')['settings'];old=settings_path.read_bytes();value=copy.deepcopy(prior);value['compute']['fallback_to_cpu']=not value['compute']['fallback_to_cpu']
     invalid=copy.deepcopy(value);invalid['workspace']='relative-folder';before=health_calls
     rejected(invalid,400);unchanged(prior,old);assert health_calls==before
@@ -70,6 +87,24 @@ try:
     rejected(value,409);assert call('/api/bootstrap')['settings']==saved
     assert not list((root/'data').glob('.local-gemma-*.tmp'))
     print('PASS accepted settings transition finishes after HTTP disconnect; stale revision cannot overwrite committed settings')
+    assert call('/api/compute')['runtime']['package_cleanup_error'] is None
+    if os.name=='nt':
+        cleanup_job=package.jobs_root(root)/str(uuid.uuid4());staged=cleanup_job/'new/lib/ollama/cuda_v12/fixture.dll';staged.parent.mkdir(parents=True);staged.write_bytes(b'COMMITTED_PACKAGE')
+        original_cleanup=package.remove_job
+        def postpone(root,job):raise OSError('OWN_POSTPONED_CLEANUP')
+        package.remove_job=postpone
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):package.publish(root,cleanup_job,'cuda',[package.PurePosixPath('lib/ollama/cuda_v12/fixture.dll')])
+        finally:package.remove_job=original_cleanup
+        handle=kernel.CreateFileW(str(cleanup_job/'old/0'),0x80000000,1,None,3,0x80,None)
+        assert handle not in (None,ctypes.c_void_p(-1).value)
+        try:
+            state=call('/api/compute/retry',{})['runtime'];assert state['package_cleanup_error'],state
+            assert managed.read_bytes()==b'COMMITTED_PACKAGE' and (cleanup_job/'journal.json').exists()
+        finally:assert kernel.CloseHandle(handle)
+        state=call('/api/compute/retry',{})['runtime'];assert state['package_cleanup_error'] is None and not cleanup_job.exists()
+        print('PASS committed package cleanup failure is visible without blocking engine readiness; retry clears it after unlock')
+
 finally:
     release.set()
     if process.poll() is None:
