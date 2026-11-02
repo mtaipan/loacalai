@@ -29,6 +29,12 @@ pub fn edited(text: &str, old: &str, new: &str) -> Result<Vec<u8>> {
     Ok(text.replacen(&old, &new, 1).into_bytes())
 }
 
+pub fn edited_encoded(bytes:&[u8],encoding:&str,old:&str,new:&str)->Result<Vec<u8>>{
+    let decoded=crate::text_source::decode(bytes,encoding)?;
+    let edited=edited(&decoded.text,old,new)?;
+    decoded.encode(std::str::from_utf8(&edited)?)
+}
+
 pub fn snapshot(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::metadata(path) {
         Ok(meta) => {
@@ -278,44 +284,65 @@ pub fn restore(data: &Path, id: &str, workspace: &Path, computer_access: bool) -
     Ok(result)
 }
 
-pub fn preview(before: Option<&[u8]>, after: Option<&[u8]>) -> String {
-    let old = before.and_then(|b| std::str::from_utf8(b).ok());
-    let new = after.and_then(|b| std::str::from_utf8(b).ok());
-    let header = format!(
-        "Было: {} байт · Будет: {} байт\n",
-        before.map_or(0, |v| v.len()),
-        after.map_or(0, |v| v.len())
-    );
-    if (before.is_some() && old.is_none()) || (after.is_some() && new.is_none()) {
-        return format!("{header}Двоичный файл; доступна резервная копия.");
+#[cfg(test)]
+pub fn preview(before:Option<&[u8]>,after:Option<&[u8]>)->String{preview_encoded(before,after,"auto")}
+pub fn preview_encoded(before:Option<&[u8]>,after:Option<&[u8]>,encoding:&str)->String{
+    let old=before.map(|bytes|crate::text_source::decode(bytes,encoding));
+    let new=after.map(|bytes|crate::text_source::decode(bytes,encoding));
+    let header=format!("Было: {} байт · Будет: {} байт\n",before.map_or(0,|v|v.len()),after.map_or(0,|v|v.len()));
+    if old.as_ref().is_some_and(Result::is_err)||new.as_ref().is_some_and(Result::is_err){return format!("{header}Текстовый diff недоступен: двоичные данные или неизвестная кодировка.");}
+    let old=old.and_then(Result::ok);let new=new.and_then(Result::ok);
+    let a=old.as_ref().map_or("",|value|value.text.as_str());let b=new.as_ref().map_or("",|value|value.text.as_str());
+    let prefix=a.lines().zip(b.lines()).take_while(|(a,b)|a==b).count();
+    let al=a.lines().count();let bl=b.lines().count();
+    let suffix=a.lines().rev().zip(b.lines().rev()).take((al-prefix).min(bl-prefix)).take_while(|(a,b)|a==b).count();
+    let mut diff=format!("{header}Кодировка: {} → {}\n--- до\n+++ после\n@@ строка {} @@\n",old.as_ref().map_or("—",|v|v.encoding()),new.as_ref().map_or("—",|v|v.encoding()),prefix+1);
+    let line_endings=|text:&str|{let crlf=text.matches("\r\n").count();format!("CRLF {}, LF {}, CR {}; завершающий LF: {}",crlf,text.bytes().filter(|c|*c==b'\n').count()-crlf,text.bytes().filter(|c|*c==b'\r').count()-crlf,if text.ends_with('\n'){"да"}else{"нет"})};
+    diff.push_str(&format!("Переводы строк: {} → {}\n",line_endings(a),line_endings(b)));
+    let mut remaining=20000usize.saturating_sub(diff.chars().count());
+    let mut append=|sign:char,line:&str|->bool{
+        if remaining<2{return false;}diff.push(sign);remaining-=1;
+        for character in line.chars(){if remaining<=1{return false;}diff.push(character);remaining-=1;}
+        diff.push('\n');remaining-=1;true
+    };
+    let mut complete=true;
+    for (sign,line) in a.lines().skip(prefix.saturating_sub(2)).take(prefix.min(2)).map(|l|(' ',l))
+        .chain(a.lines().skip(prefix).take(al-prefix-suffix).map(|l|('-',l)))
+        .chain(b.lines().skip(prefix).take(bl-prefix-suffix).map(|l|('+',l)))
+        .chain(b.lines().skip(bl-suffix).take(2).map(|l|(' ',l))){
+        if !append(sign,line){complete=false;break;}
     }
-    let a: Vec<_> = old.unwrap_or("").lines().collect();
-    let b: Vec<_> = new.unwrap_or("").lines().collect();
-    let prefix = a.iter().zip(&b).take_while(|(a, b)| a == b).count();
-    let suffix = a[prefix..]
-        .iter()
-        .rev()
-        .zip(b[prefix..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let mut diff = format!("{header}--- до\n+++ после\n@@ строка {} @@\n", prefix + 1);
-    for line in &a[prefix.saturating_sub(2)..prefix] {
-        diff.push_str(&format!(" {line}\n"));
-    }
-    for line in &a[prefix..a.len() - suffix] {
-        diff.push_str(&format!("-{line}\n"));
-    }
-    for line in &b[prefix..b.len() - suffix] {
-        diff.push_str(&format!("+{line}\n"));
-    }
-    for line in b[b.len() - suffix..].iter().take(2) {
-        diff.push_str(&format!(" {line}\n"));
-    }
-    crate::tools::truncate(&diff, 20000)
+    if !complete{diff.push_str("\n[Предпросмотр сокращён; операция включает весь указанный файл.]\n");}diff
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn encoded_edits_preserve_bom_endianness_crlf_and_legacy_bytes(){
+        let source="строка\r\nстарое значение 🦀\r\n";
+        let replacement="новое значение 🦀";
+        for (encoding,bom) in [("utf-8",vec![0xef,0xbb,0xbf]),("utf-16le",vec![0xff,0xfe]),("utf-16be",vec![0xfe,0xff]),("utf-32le",vec![0xff,0xfe,0,0]),("utf-32be",vec![0,0,0xfe,0xff])]{
+            let codec=crate::text_source::decode(&bom,encoding).unwrap();let before=codec.encode(source).unwrap();
+            let after=edited_encoded(&before,"auto","старое значение 🦀",replacement).unwrap();
+            assert!(after.starts_with(&bom));let decoded=crate::text_source::decode(&after,"auto").unwrap();assert_eq!(decoded.encoding(),encoding);assert_eq!(decoded.text,source.replace("старое значение 🦀",replacement));
+            let preview=preview(Some(&before),Some(&after));assert!(preview.contains("-старое значение 🦀"));assert!(preview.contains("+новое значение 🦀"));assert!(preview.contains("CRLF 2, LF 0"));
+        }
+        for encoding in ["windows-1251","ibm866"]{
+            let codec=crate::text_source::decode(&[],encoding).unwrap();let before=codec.encode("старое\r\n").unwrap();
+            assert!(edited_encoded(&before,"auto","старое","новое").is_err());
+            let after=edited_encoded(&before,encoding,"старое","новое").unwrap();assert_eq!(crate::text_source::decode(&after,encoding).unwrap().text,"новое\r\n");
+            assert!(preview_encoded(Some(&before),Some(&after),encoding).contains("+новое"));
+            assert!(edited_encoded(&before,encoding,"старое","🦀").is_err());
+        }
+        assert!(edited_encoded(&[0xff,0xfe,0x00],"auto","x","y").is_err());
+        assert!(edited_encoded(&[0xff,0xfe,0x00,0xd8],"auto","x","y").is_err());
+        assert!(crate::text_source::decode(&[0xff,0xfe],"utf-8").is_err());
+    }
+    #[test]
+    fn huge_line_preview_is_bounded_and_admits_omission(){
+        let before="я".repeat(2_000_000);let after="x";
+        let diff=preview(Some(before.as_bytes()),Some(after.as_bytes()));assert!(diff.chars().count()<20200);assert!(diff.contains("Предпросмотр сокращён"));
+    }
     #[cfg(unix)]
     #[test]
     fn replacement_preserves_executable_permissions() {

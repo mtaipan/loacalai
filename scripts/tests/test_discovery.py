@@ -48,13 +48,19 @@ def stop():
     except Exception:pass
     try:process.wait(timeout=8)
     except subprocess.TimeoutExpired:process.kill();process.wait(timeout=5)
-def turn(chat,tool,args,new_task=False,failed=False):
+def turn(chat,tool,args,new_task=False,failed=False,approval_text=None):
+    approvals=[]
     content='Inspect project files. DISCOVERY_CASE:'+json.dumps({'tool':tool,'arguments':args},ensure_ascii=False)
     with call('/api/chat',{'conversation':chat['id'],'content':content,'mode':'agent','web':('auto' if tool=='web_search' else 'off'),'source':'en','target':'ru','attachments':[],'new_task':new_task}) as response:
         for line in response:
             if line.startswith(b'data:'):
-                event=json.loads(line[5:]);assert event['type']!='approval',event
+                event=json.loads(line[5:])
+                if event['type']=='approval':
+                    approvals.append(event);assert approval_text is not None,event
+                    for text in approval_text:assert text in event['details'],event
+                    read('/api/approve/'+event['id'],{'allow':True,'duration':'once'})
                 assert event['type']!='error',event
+    assert len(approvals)==(1 if approval_text is not None else 0),approvals
     answer=read('/api/chats/'+chat['id'])['messages'][-1];record=answer['tools'][-1]
     assert record['status']==('failed' if failed else 'succeeded'),record
     with call('/api/artifacts/'+record['result_artifact']['id']+'/download') as response:body=response.read().decode()
@@ -89,6 +95,20 @@ try:
     assert tree['complete'] and len(tree_files)==401
     try:read('/api/tree?'+urllib.parse.urlencode({'path':str(outside)}));raise AssertionError('Panel escaped project')
     except urllib.error.HTTPError as error:assert error.code==400
+    encoded=workspace/'encoded';encoded.mkdir()
+    for codec,prefix,explicit in [('utf-8',b'\xef\xbb\xbf',False),('utf-16le',b'\xff\xfe',False),('utf-16be',b'\xfe\xff',False),('utf-32le',b'\xff\xfe\x00\x00',False),('utf-32be',b'\x00\x00\xfe\xff',False),('cp1251',b'',True),('cp866',b'',True)]:
+        file=encoded/(codec+'.txt');original=prefix+'строка\r\nстарое значение\r\n'.encode(codec);file.write_bytes(original)
+        encoding={'cp1251':'windows-1251','cp866':'ibm866'}.get(codec,'auto')
+        args={'path':str(file),'old_text':'старое значение','new_text':'новое значение','encoding':encoding}
+        result=turn(chat,'edit_file',args,approval_text=['-старое значение','+новое значение','CRLF 2, LF 0'])
+        expected=prefix+'строка\r\nновое значение\r\n'.encode(codec)
+        assert result['verified'] and file.read_bytes()==expected
+        if explicit:
+            bad={**args,'old_text':'новое значение','new_text':'🦀'}
+            assert turn(chat,'edit_file',bad,failed=True);assert file.read_bytes()==expected
+        read('/api/changes/'+result['change_id']+'/restore',{})
+        assert file.read_bytes()==original
+    print('PASS approved UTF BOM/endianness and explicit legacy edits preserve CRLF; unrepresentable text never reaches approval; undo restores original bytes')
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         browser=pw.chromium.launch(channel='msedge',headless=True)

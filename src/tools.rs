@@ -333,13 +333,24 @@ async fn mutate(
     cancel: &CancellationToken,
     tool_id: &str,
 ) -> Result<String> {
+    mutate_encoded(app,operation,mutations,tx,cancel,tool_id,"auto").await
+}
+async fn mutate_encoded(
+    app: &Shared,
+    operation: &str,
+    mutations: Vec<crate::changes::Mutation>,
+    tx: &mpsc::Sender<Value>,
+    cancel: &CancellationToken,
+    tool_id: &str,
+    encoding: &str,
+) -> Result<String> {
     let details = mutations
         .iter()
         .map(|m| {
             format!(
                 "{}\n{}",
                 m.path.display(),
-                crate::changes::preview(m.before.as_deref(), m.after.as_deref())
+                crate::changes::preview_encoded(m.before.as_deref(), m.after.as_deref(),encoding)
             )
         })
         .collect::<Vec<_>>()
@@ -618,11 +629,11 @@ pub async fn execute(
         "edit_file" => {
             let path = crate::filesystem::readable(app, string(&args, "path")?, cancel).await?;
             let before = crate::changes::snapshot(&path)?.context("Файл не найден")?;
-            let text = std::str::from_utf8(&before).context("Ожидается UTF-8")?;
+            let encoding=args["encoding"].as_str().unwrap_or("auto");
             let old = string(&args, "old_text")?;
             let new = string(&args, "new_text")?;
-            let after = crate::changes::edited(text, old, new)?;
-            mutate(
+            let after = crate::changes::edited_encoded(&before,encoding,old,new)?;
+            mutate_encoded(
                 app,
                 name,
                 vec![crate::changes::Mutation {
@@ -633,6 +644,7 @@ pub async fn execute(
                 tx,
                 cancel,
                 tool_id,
+                encoding,
             )
             .await
         }
@@ -852,7 +864,7 @@ pub fn definitions() -> Value {
         f("find_files","Find file names in the selected workspace, or an explicitly supplied accessible directory. Supports * and ?. Follow next_cursor with the same directory until traversal_finished; packet sizes never limit the whole search. No implicit all-disk search. Reuse a task cursor after interruption/restart.",json!({"name":s,"directory":s,"cursor":s,"limit":{"type":"integer","minimum":1,"maximum":100}}),&[]),
         f("search_files","Search literal text in the selected workspace or an explicit accessible directory, including large/encoded files in packets. Optional filename pattern. Follow next_cursor with the same directory; query/pattern/encoding belong to the saved scan. Changes, exclusions and read errors are disclosed. No total result/time cap.",json!({"query":s,"directory":s,"pattern":s,"encoding":s,"cursor":s,"limit":{"type":"integer","minimum":1,"maximum":100}}),&[]),
         f("write_file","Create or replace UTF-8 file. Absolute path allowed when computer access is enabled. Shows changes, requires approval, saves backup and verifies bytes.",json!({"path":s,"content":s}),&["path","content"]),
-        f("edit_file","Replace an exact unique text fragment in an existing UTF-8 file. Read it first; old_text must occur exactly once. Preview, approval, backup and verification included.",json!({"path":s,"old_text":s,"new_text":s}),&["path","old_text","new_text"]),
+        f("edit_file","Replace an exact unique text fragment, preserving source encoding and BOM. Auto detects UTF BOMs or strict UTF-8; legacy encodings require explicit selection. Unrepresentable characters fail before approval/write. Read it first; old_text must occur exactly once. Preview, approval, backup and verification included.",json!({"path":s,"old_text":s,"new_text":s,"encoding":{"type":"string","enum":["auto","utf-8","utf-16le","utf-16be","utf-32le","utf-32be","windows-1251","ibm866"]}}),&["path","old_text","new_text"]),
         f("copy_file","Copy one file up to 16 MiB. Destination must not exist. Preview and approval required.",json!({"source":s,"destination":s}),&["source","destination"]),
         f("move_file","Move or rename one file up to 16 MiB. Destination must not exist. Backup and approval required.",json!({"source":s,"destination":s}),&["source","destination"]),
         f("delete_file","Delete one file up to 16 MiB with backup and approval. Never use for directories.",json!({"path":s}),&["path"]),

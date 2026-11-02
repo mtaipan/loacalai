@@ -10,7 +10,7 @@ impl Codec{
     fn width(self,character:char)->u64{match self{Self::Utf8=>character.len_utf8() as u64,Self::Utf16Le|Self::Utf16Be=>(character.len_utf16()*2) as u64,Self::Utf32Le|Self::Utf32Be=>4,_=>1}}
     fn name(self)->&'static str{match self{Self::Utf8=>"utf-8",Self::Utf16Le=>"utf-16le",Self::Utf16Be=>"utf-16be",Self::Utf32Le=>"utf-32le",Self::Utf32Be=>"utf-32be",Self::Cp1251=>"windows-1251",Self::Cp866=>"ibm866"}}
     fn parse(name:&str)->Result<Self>{Ok(match name{"utf-8"=>Self::Utf8,"utf-16le"=>Self::Utf16Le,"utf-16be"=>Self::Utf16Be,"utf-32le"=>Self::Utf32Le,"utf-32be"=>Self::Utf32Be,"windows-1251"=>Self::Cp1251,"ibm866"=>Self::Cp866,_=>anyhow::bail!("Неизвестная кодировка текста")})}
-    fn next(self,reader:&mut BufReader<File>)->Result<Option<char>>{
+    fn next<R:Read>(self,reader:&mut R)->Result<Option<char>>{
         let mut first=[0];if reader.read(&mut first)?==0{return Ok(None);}
         Ok(Some(match self{
             Self::Utf8=>{
@@ -34,6 +34,36 @@ impl Codec{
         }))
     }
 }
+fn bom(prefix:&[u8])->Option<(Codec,usize)>{
+    if prefix.starts_with(&[0xff,0xfe,0,0]){Some((Codec::Utf32Le,4))}else if prefix.starts_with(&[0,0,0xfe,0xff]){Some((Codec::Utf32Be,4))}else if prefix.starts_with(&[0xef,0xbb,0xbf]){Some((Codec::Utf8,3))}else if prefix.starts_with(&[0xff,0xfe]){Some((Codec::Utf16Le,2))}else if prefix.starts_with(&[0xfe,0xff]){Some((Codec::Utf16Be,2))}else{None}
+}
+fn selected_codec(bom:Option<(Codec,usize)>,requested:&str)->Result<Codec>{
+    let codec=if requested=="auto"{bom.map_or(Codec::Utf8,|value|value.0)}else{Codec::parse(requested)?};
+    if let Some((actual,_))=bom{anyhow::ensure!(codec==actual,"Выбранная кодировка не соответствует BOM файла");}Ok(codec)
+}
+pub struct DecodedText{pub text:String,codec:Codec,prefix:Vec<u8>}
+impl DecodedText{
+    pub fn encoding(&self)->&'static str{self.codec.name()}
+    pub fn encode(&self,text:&str)->Result<Vec<u8>>{
+        anyhow::ensure!(!text.contains('\0'),"Текст содержит NUL; двоичные данные не записаны");
+        let mut bytes=self.prefix.clone();
+        match self.codec{
+            Codec::Utf8=>bytes.extend(text.as_bytes()),
+            Codec::Utf16Le|Codec::Utf16Be=>for unit in text.encode_utf16(){bytes.extend(if self.codec==Codec::Utf16Le{unit.to_le_bytes()}else{unit.to_be_bytes()});},
+            Codec::Utf32Le|Codec::Utf32Be=>for scalar in text.chars(){bytes.extend(if self.codec==Codec::Utf32Le{(scalar as u32).to_le_bytes()}else{(scalar as u32).to_be_bytes()});},
+            Codec::Cp1251|Codec::Cp866=>{
+                let encoding=if self.codec==Codec::Cp1251{encoding_rs::WINDOWS_1251}else{encoding_rs::IBM866};
+                let(encoded,_,errors)=encoding.encode(text);anyhow::ensure!(!errors,"Новый текст содержит символы, отсутствующие в {}. Файл не изменён",self.encoding());bytes.extend(encoded.as_ref());
+            }
+        }Ok(bytes)
+    }
+}
+pub fn decode(bytes:&[u8],requested:&str)->Result<DecodedText>{
+    let bom=bom(bytes);let codec=selected_codec(bom,requested)?;let prefix=bom.map_or(0,|value|value.1);
+    let mut reader=std::io::Cursor::new(&bytes[prefix..]);let mut text=String::new();
+    while let Some(character)=codec.next(&mut reader)?{anyhow::ensure!(character!='\0',"Текст содержит NUL; проверьте кодировку или формат файла");text.push(character);}
+    Ok(DecodedText{text,codec,prefix:bytes[..prefix].to_vec()})
+}
 fn revision(metadata:&Metadata)->Result<String>{
     let modified=metadata.modified()?.duration_since(std::time::UNIX_EPOCH)?;
     Ok(format!("{}-{}-{}",metadata.len(),modified.as_secs(),modified.subsec_nanos()))
@@ -49,11 +79,10 @@ pub fn page(path:&Path,options:&Value,cancel:&CancellationToken)->Result<Value>{
     if let Some(expected)=options["revision"].as_str(){anyhow::ensure!(expected==version,"Файл изменился между страницами. Перечитайте начало; старые результаты сохранены в наблюдениях");}
     anyhow::ensure!(offset.is_none_or(|value|value==0)||options["revision"].is_string(),"Для продолжения по offset передайте revision предыдущей страницы");
     let mut reader=BufReader::new(file);let mut prefix=[0;4];let n=reader.read(&mut prefix)?;
-    let bom=if prefix[..n].starts_with(&[0xff,0xfe,0,0]){Some((Codec::Utf32Le,4))}else if prefix[..n].starts_with(&[0,0,0xfe,0xff]){Some((Codec::Utf32Be,4))}else if prefix[..n].starts_with(&[0xef,0xbb,0xbf]){Some((Codec::Utf8,3))}else if prefix[..n].starts_with(&[0xff,0xfe]){Some((Codec::Utf16Le,2))}else if prefix[..n].starts_with(&[0xfe,0xff]){Some((Codec::Utf16Be,2))}else{None};
+    let bom=bom(&prefix[..n]);
     let requested=options["encoding"].as_str().unwrap_or("auto");
-    let codec=if requested=="auto"{bom.map_or(Codec::Utf8,|value|value.0)}else{Codec::parse(requested)?};
-    if let Some((actual,_))=bom{anyhow::ensure!(codec==actual,"Выбранная кодировка не соответствует BOM файла");}
-    let bom_bytes=bom.map_or(0,|value|value.1);
+    let codec=selected_codec(bom,requested)?;
+    let bom_bytes=bom.map_or(0,|value|value.1) as u64;
     let initial=offset.filter(|value|*value>0).unwrap_or(bom_bytes);
     anyhow::ensure!(initial>=bom_bytes&&initial<=metadata.len(),"Смещение вне текста файла");
     let alignment=match codec{Codec::Utf16Le|Codec::Utf16Be=>2,Codec::Utf32Le|Codec::Utf32Be=>4,_=>1};
