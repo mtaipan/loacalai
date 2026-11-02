@@ -33,9 +33,10 @@ fn connection(data:&Path)->Result<Connection>{
     std::fs::create_dir_all(data)?;let db=Connection::open(data.join("discovery.sqlite"))?;
     db.busy_timeout(std::time::Duration::from_millis(100))?;
     let version:i64=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
-    anyhow::ensure!((0..=1).contains(&version),"Неизвестная версия индекса файлов; файл сохранён");
-    if version==1{return Ok(db);}
-    db.execute_batch("PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS scans(id TEXT PRIMARY KEY,owner TEXT NOT NULL,project TEXT NOT NULL,root TEXT NOT NULL,kind TEXT NOT NULL,options TEXT NOT NULL,next INTEGER NOT NULL DEFAULT 0,checked INTEGER NOT NULL DEFAULT 0,skipped INTEGER NOT NULL DEFAULT 0);CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY AUTOINCREMENT,scan TEXT NOT NULL,path TEXT NOT NULL,state TEXT NOT NULL);CREATE INDEX IF NOT EXISTS queue_scan ON queue(scan,seq);CREATE TABLE IF NOT EXISTS packets(scan TEXT NOT NULL,page INTEGER NOT NULL,body TEXT NOT NULL,PRIMARY KEY(scan,page));PRAGMA user_version=1;")?;Ok(db)
+    anyhow::ensure!((0..=2).contains(&version),"Неизвестная версия индекса файлов; файл сохранён");
+    if version==2{return Ok(db);}
+    if version==0{db.execute_batch("PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS scans(id TEXT PRIMARY KEY,owner TEXT NOT NULL,project TEXT NOT NULL,root TEXT NOT NULL,kind TEXT NOT NULL,options TEXT NOT NULL,next INTEGER NOT NULL DEFAULT 0,checked INTEGER NOT NULL DEFAULT 0,skipped INTEGER NOT NULL DEFAULT 0);CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY AUTOINCREMENT,scan TEXT NOT NULL,path TEXT NOT NULL,state TEXT NOT NULL);CREATE INDEX IF NOT EXISTS queue_scan ON queue(scan,seq);CREATE TABLE IF NOT EXISTS packets(scan TEXT NOT NULL,page INTEGER NOT NULL,body TEXT NOT NULL,PRIMARY KEY(scan,page));PRAGMA user_version=1;")?;}
+    db.execute_batch("BEGIN IMMEDIATE;CREATE TABLE IF NOT EXISTS scan_index(sequence INTEGER PRIMARY KEY AUTOINCREMENT,scan TEXT UNIQUE NOT NULL);INSERT OR IGNORE INTO scan_index(scan) SELECT id FROM scans ORDER BY rowid;CREATE INDEX IF NOT EXISTS scans_owner ON scans(owner);PRAGMA user_version=2;COMMIT;")?;Ok(db)
 }
 struct WriteTransaction{db:Connection,committed:bool}
 impl std::ops::Deref for WriteTransaction{type Target=Connection;fn deref(&self)->&Connection{&self.db}}
@@ -60,10 +61,31 @@ pub async fn forget(data:PathBuf,tasks:Vec<String>,runs:Vec<String>)->Result<()>
         for owner in tasks.into_iter().map(|s|format!("task:{s}")).chain(runs.into_iter().map(|s|format!("run:{s}"))){
             tx.execute("DELETE FROM packets WHERE scan IN (SELECT id FROM scans WHERE owner=?1)",[&owner])?;
             tx.execute("DELETE FROM queue WHERE scan IN (SELECT id FROM scans WHERE owner=?1)",[&owner])?;
+            tx.execute("DELETE FROM scan_index WHERE scan IN (SELECT id FROM scans WHERE owner=?1)",[&owner])?;
             tx.execute("DELETE FROM scans WHERE owner=?1",[&owner])?;
         }
         tx.commit()?;Ok(())
     }).await?
+}
+/// List only this Task's committed discovery work. No source directory is opened.
+pub async fn catalog(data:PathBuf,task:String,before:Option<i64>,snapshot:Option<i64>,limit:usize)->Result<Value>{
+    tokio::task::spawn_blocking(move||catalog_page(&data,&format!("task:{task}"),before,snapshot,limit)).await?
+}
+fn catalog_page(data:&Path,owner:&str,before:Option<i64>,snapshot:Option<i64>,limit:usize)->Result<Value>{
+    anyhow::ensure!((1..=32).contains(&limit)&&before.is_none_or(|v|v>0)&&snapshot.is_none_or(|v|v>=0),"Некорректная страница сохранённых обходов");
+    if !data.join("discovery.sqlite").try_exists()?{return Ok(json!({"items":[],"has_more":false,"next_before_discovery":null,"discovery_snapshot":0}));}
+    let db=connection(data)?;let tx=db.unchecked_transaction()?;
+    let snapshot=match snapshot{Some(value)=>value,None=>tx.query_row("SELECT COALESCE(MAX(i.sequence),0) FROM scan_index i JOIN scans s ON s.id=i.scan WHERE s.owner=?1",[owner],|r|r.get(0))?};
+    let mut query=tx.prepare("SELECT i.sequence,s.id,s.root,s.kind,s.next,s.checked,s.skipped,SUBSTR(json_extract(s.options,'$.query'),1,120),EXISTS(SELECT 1 FROM queue q WHERE q.scan=s.id) FROM scan_index i JOIN scans s ON s.id=i.scan WHERE s.owner=?1 AND i.sequence<=?2 AND (?3 IS NULL OR i.sequence<?3) ORDER BY i.sequence DESC LIMIT ?4")?;
+    let mut items=query.query_map(params![owner,snapshot,before,i64::try_from(limit+1)?],|row|{
+        let sequence:i64=row.get(0)?;let id:String=row.get(1)?;let root:String=row.get(2)?;let kind:String=row.get(3)?;let next:i64=row.get(4)?;let checked:i64=row.get(5)?;let skipped:i64=row.get(6)?;let remains:bool=row.get(8)?;
+        let mut args=json!({if kind=="list_files"||kind=="inspect_project"{"path"}else{"directory"}:root});
+        args["cursor"]=json!(format!("{id}:{next}"));
+        let mut replay=args.clone();replay["cursor"]=json!(format!("{id}:{}",next.saturating_sub(1)));
+        Ok(json!({"sequence":sequence,"scan":id,"tool":kind,"root":root,"query_preview":row.get::<_,Option<String>>(7)?,"committed_packets":next,"checked_entries":checked,"inaccessible_or_excluded":skipped,"continuation_available":remains,"traversal_finished":!remains,"complete":!remains&&skipped==0,"resume_arguments":if remains{Some(args)}else{None},"last_receipt_arguments":if next>0{Some(replay)}else{None},"parameters_saved":true}))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let more=items.len()>limit;items.truncate(limit);let next=if more{items.last().map(|v|v["sequence"].clone()).unwrap_or(Value::Null)}else{Value::Null};
+    Ok(json!({"items":items,"has_more":more,"next_before_discovery":next,"discovery_snapshot":snapshot,"note":"Saved Task-only discovery receipts. Resume with tool + resume_arguments; original query/options are retained server-side. last_receipt_arguments replays the last committed packet. Reading this index does not access source files or verify their current state."}))
 }
 fn options(kind:&str,args:&Value)->Result<Value>{
     let query=if kind=="find_files"{args["name"].as_str().context("Укажите имя файла")?}else if kind=="search_files"{args["query"].as_str().context("Укажите текст поиска")?}else{""};
@@ -94,6 +116,7 @@ pub fn page(data:&Path,owner:&str,project:&Path,root:&Path,kind:&str,args:&Value
     }else{
         anyhow::ensure!(args["cursor"].is_null(),"Cursor не найден");let opts=options(kind,args)?;
         tx.execute("INSERT INTO scans(id,owner,project,root,kind,options) VALUES(?1,?2,?3,?4,?5,?6)",params![id,owner,project.to_string_lossy(),root.to_string_lossy(),kind,opts.to_string()])?;
+        tx.execute("INSERT INTO scan_index(scan) VALUES(?1)",[&id])?;
         tx.execute("INSERT INTO queue(scan,path,state) VALUES(?1,?2,'{}')",params![id,root.to_string_lossy()])?;(opts,0,0)
     };
     let mut matches=vec![];let mut errors=vec![];let mut processed=0;let mut text_bytes=0usize;let mut interrupted=false;
@@ -157,6 +180,30 @@ pub fn page(data:&Path,owner:&str,project:&Path,root:&Path,kind:&str,args:&Value
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn catalog_recovers_lost_first_receipt_with_task_scope_and_stable_pages(){
+        let(data,project,root)=fixture();std::fs::write(root.join("one.txt"),"data").unwrap();std::fs::write(root.join("two.txt"),"data").unwrap();
+        let owner="task:own";let cancel=CancellationToken::new();cancel.cancel();
+        let lost=page(&data,owner,&project,&root,"search_files",&json!({"query":"data"}),&cancel).unwrap();
+        assert_eq!(lost["cancelled"],true);assert_eq!(lost["has_more"],true);
+        let mut ids=vec![lost["cursor"].as_str().unwrap().split(':').next().unwrap().to_owned()];
+        for _ in 0..6{let p=page(&data,owner,&project,&root,"find_files",&json!({"name":"*.txt","limit":1}),&CancellationToken::new()).unwrap();ids.push(p["cursor"].as_str().unwrap().split(':').next().unwrap().to_owned());}
+        page(&data,"task:foreign",&project,&root,"list_files",&json!({}),&CancellationToken::new()).unwrap();
+        page(&data,"project:ui",&project,&root,"list_files",&json!({}),&CancellationToken::new()).unwrap();
+        // Upgrade an old database without replacing its scans or queued work.
+        {let db=connection(&data).unwrap();db.execute_batch("DROP TABLE scan_index;PRAGMA user_version=1").unwrap();}
+        let first=catalog_page(&data,owner,None,None,2).unwrap();let snapshot=first["discovery_snapshot"].as_i64().unwrap();assert_eq!(first["has_more"],true);
+        page(&data,owner,&project,&root,"list_files",&json!({}),&CancellationToken::new()).unwrap();
+        let mut all=first["items"].as_array().unwrap().clone();let mut result=first;
+        while result["has_more"]==true{result=catalog_page(&data,owner,result["next_before_discovery"].as_i64(),Some(snapshot),2).unwrap();all.extend(result["items"].as_array().unwrap().clone());}
+        assert_eq!(all.len(),7);assert_eq!(all.iter().map(|v|v["scan"].as_str().unwrap().to_owned()).collect::<Vec<_>>(),ids.into_iter().rev().collect::<Vec<_>>());
+        let recovered=all.last().unwrap();assert_eq!(recovered["committed_packets"],1);assert_eq!(recovered["query_preview"],"data");
+        let replay=page(&data,owner,&project,&root,"search_files",&recovered["last_receipt_arguments"],&CancellationToken::new()).unwrap();assert_eq!(replay,lost);
+        assert!(page(&data,"task:foreign",&project,&root,"search_files",&recovered["resume_arguments"],&CancellationToken::new()).is_err());
+        let resumed=page(&data,owner,&project,&root,"search_files",&recovered["resume_arguments"],&CancellationToken::new()).unwrap();assert_eq!(resumed["complete"],true);assert_eq!(resumed["matches"].as_array().unwrap().len(),2);
+        std::fs::remove_dir_all(&root).unwrap();assert_eq!(catalog_page(&data,owner,None,None,32).unwrap()["items"].as_array().unwrap().len(),8);
+        std::fs::remove_dir_all(data).unwrap();
+    }
     fn fixture()->(PathBuf,PathBuf,PathBuf){let data=std::env::temp_dir().join(format!("discovery-{}",uuid::Uuid::new_v4()));let root=data.join("project");std::fs::create_dir_all(&root).unwrap();let root=dunce::canonicalize(root).unwrap();(data.clone(),root.clone(),root)}
     fn collect(data:&Path,root:&Path,kind:&str,mut args:Value)->Vec<Value>{let mut all=vec![];loop{let body=page(data,"task:one",root,root,kind,&args,&CancellationToken::new()).unwrap();all.extend(body["matches"].as_array().unwrap().clone());if body["has_more"]!=true{assert_eq!(body["complete"],true,"{body}");break;}let cursor=body["next_cursor"].clone();let retry=page(data,"task:one",root,root,kind,&args,&CancellationToken::new()).unwrap();if args["cursor"].is_string(){assert_eq!(retry,body);}args["cursor"]=cursor;}all}
     #[test]

@@ -71,6 +71,12 @@ try:
     first=turn(chat,'find_files',{'name':'*.txt','limit':17});assert first['has_more'];cursor=first['next_cursor'];found=list(first['matches'])
     stop();start()
     second=turn(chat,'find_files',{'name':'*.txt','cursor':cursor,'limit':17});assert turn(chat,'find_files',{'name':'*.txt','cursor':cursor,'limit':100})==second
+    overview=turn(chat,'read_task',{})
+    assert overview['discovery']['items'] and 'discovery' in overview['sections']
+    catalog=turn(chat,'read_task',{'section':'discovery','limit':1})
+    saved=catalog['items'][0];assert saved['scan']==cursor.split(':')[0] and saved['tool']=='find_files'
+    assert turn(chat,saved['tool'],saved['last_receipt_arguments'])==second
+    assert saved['resume_arguments']['cursor']==second['next_cursor']
     found+=second['matches'];page=second
     while page['has_more']:
         page=turn(chat,'find_files',{'name':'*.txt','cursor':page['next_cursor'],'limit':100});found+=page['matches']
