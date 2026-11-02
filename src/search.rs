@@ -59,7 +59,7 @@ pub async fn results(app:&crate::api::Shared,input:&crate::api::ChatInput,option
     if let Some(id)=&options.page_source{args["page_source"]=json!(id);args["result_offset"]=json!(options.result_offset);}
     let id=uuid::Uuid::new_v4().to_string();tx.send(json!({"type":"tool_start","id":id,"name":name,"arguments":args})).await?;
     let result=if local{app.tasks.artifact_search(run.clone(),input.content.clone(),options.after,options.snapshot.clone()).await}else{
-        let session=crate::web_tools::session(app,&input.conversation,&input.content,true).await?;let mut session=session.lock().await;session.search_options=options.clone();session.execute(app,name,&args,cancel).await
+        let session=crate::web_tools::session(app,&input.conversation,&input.content,crate::web_tools::Egress::External).await?;let mut session=session.lock().await;session.search_options=options.clone();session.execute(app,name,&args,cancel).await
     };
     let record=crate::artifacts::archive_record(app,&run,json!({"id":id,"name":name,"arguments":args,"status":if result.is_ok(){"succeeded"}else if cancel.is_cancelled(){"cancelled"}else{"failed"},"result":match &result{Ok(value)=>value.to_string(),Err(error)=>format!("{error:#}")}})).await?;
     app.tasks.persist_tool(run,record.clone()).await?;tx.send(json!({"type":"tool_result","tool":record})).await?;

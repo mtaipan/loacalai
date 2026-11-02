@@ -226,7 +226,7 @@ try:
         assert 'DURABLE_RESULT' in page.locator('#conversation').inner_text()
         assert page.evaluate('currentSession().acceptedOptions') is None
         assert page.evaluate('searchOptions().focus')=='news'
-        assert 'Выключена' in page.locator('#web-menu summary').inner_text()
+        assert 'Только localhost' in page.locator('#web-menu summary').inner_text()
         response_delay=3
         page.locator('[data-action="new-chat"]').click()
         page.locator('[data-mode="agent"]').click()

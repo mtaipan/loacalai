@@ -27,7 +27,12 @@ class Fixture(BaseHTTPRequestHandler):
         if self.path!='/api/chat' or not body.get('messages'):return self.reply({'done':True})
         inferences.append(body);messages=body['messages'];tools=[m for m in messages if m.get('role')=='tool'];names={tool['function']['name'] for tool in body.get('tools',[])};text='\n'.join(m.get('content','') for m in messages if m['role']=='user')
         def call(name,args):return self.reply({'message':{'role':'assistant','content':'','tool_calls':[{'function':{'name':name,'arguments':args}}]},'done':True})
-        if 'MIXED_PROJECT' in text or 'CONCEPT_OPERATION' in text:
+        if 'LOCAL_OFFLINE' in text:
+            last_user=max(i for i,m in enumerate(messages) if m.get('role')=='user')
+            tools=[m for m in messages[last_user+1:] if m.get('role')=='tool']
+            assert 'web_search' not in names
+            if not any(m.get('tool_name')=='fetch_url' for m in tools):return call('fetch_url',{'url':site+'/page?number=0'})
+        elif 'MIXED_PROJECT' in text or 'CONCEPT_OPERATION' in text:
             if not any(m.get('tool_name')=='read_file' for m in tools):return call('read_file',{'path':'fixture.txt'})
             assert 'LOCAL_PROJECT_EVIDENCE' in tools[-1]['content'] or any('LOCAL_PROJECT_EVIDENCE' in m['content'] for m in tools)
         else:
@@ -63,8 +68,9 @@ def stop():
     except Exception:pass
     try:process.wait(timeout=8)
     except subprocess.TimeoutExpired:process.kill();process.wait(timeout=5)
-def turn(query,mode='search',options=None,chat=None,network='search',allow_error=False,attachments=None):
+def turn(query,mode='search',options=None,chat=None,network='search',allow_error=False,attachments=None,new_task=False):
     chat=chat or read('/api/chats',{'mode':mode});body={'conversation':chat['id'],'content':query,'mode':mode,'web':network,'source':'en','target':'ru','attachments':[]}
+    if new_task:body['new_task']=True
     if options is not None:body['search']=options
     if attachments:body['attachments']=attachments
     with call('/api/chat',body) as response:
@@ -94,6 +100,17 @@ try:
     local=turn('MATERIAL_NEEDLE',options={'depth':'results','focus':'materials'},network='off',attachments=[attachment]);result=local['messages'][-1]['diagnostics']['search']['result'];assert result['has_more'] and len(result['results'])==32
     local=turn('MATERIAL_NEEDLE',options={'depth':'results','focus':'materials','after':result['next_after'],'snapshot':result['snapshot']},network='off',chat=local);result=local['messages'][-1]['diagnostics']['search']['result'];assert result['results'] and not inferences and not shows and len(provider_calls)==first_calls
     print('PASS local materials use paged keyword retrieval with no external requests or LLM, including large uploaded sources')
+    for mode in ['chat','agent','team']:
+        calls=len(provider_calls)
+        local_chat=turn('LOCAL_OFFLINE read '+site+'/page',mode=mode,network='off')
+        assert any(tool['name']=='fetch_url' and tool['status']=='succeeded' for tool in local_chat['messages'][-1]['tools'])
+        assert len(provider_calls)==calls
+        if mode=='agent':
+            local_chat=turn('LOCAL_OFFLINE continue',mode=mode,network='off',chat=local_chat)
+            assert any(tool['name']=='fetch_url' and tool['status']=='succeeded' for tool in local_chat['messages'][-1]['tools'])
+            local_chat=turn('LOCAL_OFFLINE another task',mode=mode,network='off',chat=local_chat,new_task=True)
+            assert any(tool['name']=='fetch_url' and tool['status']=='failed' for tool in local_chat['messages'][-1]['tools'])
+    print('PASS Chat/Agent/Team loopback with external search off, same-task continuation, no inherited origin in a new Task')
     for mode in ['agent','team']:
         for network in ['search','research']:
             result=turn('MIXED_PROJECT: search docs and fix the project',mode=mode,network=network)['messages'][-1];assert any(tool['name']=='read_file' and tool['status']=='succeeded' for tool in result['tools'])

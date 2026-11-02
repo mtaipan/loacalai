@@ -150,7 +150,7 @@ impl Settings {
     pub fn accepted_options(&self,input:&ChatInput)->Value {
         let search=input.search_options();
         let results=input.mode=="search"&&search.depth=="results";
-        json!({"mode":input.mode,"model":if results{None}else{Some(self.model_for(&input.mode))},"web":input.web,"thinking":input.thinking,"search":search,"settings_revision":self.revision})
+        json!({"mode":input.mode,"model":if results{None}else{Some(self.model_for(&input.mode))},"web":input.web,"thinking":input.thinking,"search":search,"egress":input.egress(),"settings_revision":self.revision})
     }
 }
 fn default_true() -> bool {
@@ -1035,6 +1035,10 @@ pub struct ChatInput {
     pub retry: bool,
 }
 impl ChatInput {
+    pub fn egress(&self)->crate::web_tools::Egress {
+        let available=self.mode!="translate"&&self.search_options().focus!="materials";
+        crate::web_tools::Egress::for_request(available&&self.web!="off",available)
+    }
     pub fn search_options(&self)->crate::search::Options {
         let mut value=self.search.clone().unwrap_or_default();
         if self.search.is_none()&&self.web=="research"{value.depth="deep".into();}

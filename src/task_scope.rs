@@ -8,6 +8,7 @@ pub struct TaskScope {
     pub web_only: bool,
     pub searching: bool,
     pub web_enabled: bool,
+    pub local_web:bool,
     pub read_only: bool,
     pub research:bool,
     pub urls: Vec<reqwest::Url>,
@@ -209,6 +210,7 @@ impl TaskScope {
                 && !explicit_file_mutation,
             searching: crate::web_tools::search_requested(text),
             web_enabled: true,
+            local_web:true,
             read_only:false,
             research:false,
             urls,
@@ -237,10 +239,10 @@ impl TaskScope {
         if name=="discover_tools"{return !self.read_only;}
         if ["read_sources","read_task","read_artifact","search_artifacts","read_run_log"].contains(&name) {return true;}
         if matches!(name,"update_search_plan"|"read_search_plan"){return self.research;}
-        if self.read_only{return self.web_enabled&&["web_search","fetch_url","browser_open","browser_read"].contains(&name);}
-        if crate::web_tools::is_web_tool(name) && !self.web_enabled {
-            return false;
-        }
+        let web=crate::web_tools::is_web_tool(name);
+        if name=="web_search"&&!self.web_enabled{return false;}
+        if web&&!self.web_enabled&&!self.local_web{return false;}
+        if self.read_only{return web&&["web_search","fetch_url","browser_open","browser_read"].contains(&name);}
         if self.web_only {
             return crate::web_tools::is_web_tool(name)
                 || ["update_plan", "translate_text", "security_analyze"].contains(&name);
@@ -482,7 +484,8 @@ mod tests {
         let mut scope=TaskScope::new("Review this attached source and search the web");scope.read_only=true;
         for name in ["read_artifact","search_artifacts","read_task","read_run_log","web_search","fetch_url","browser_open","browser_read"]{assert!(scope.allows(name),"{name}");}
         for name in ["ingest_file","read_file","find_files","run_command","write_file","edit_file","browser_action","record_microphone","write_stdin"]{assert!(!scope.allows(name),"{name}");}
-        scope.web_enabled=false;assert!(!scope.allows("web_search"));assert!(scope.allows("read_artifact"));
+        scope.network_choice("off");assert!(!scope.allows("web_search"));assert!(scope.allows("fetch_url"));assert!(scope.allows("browser_read"));assert!(!scope.allows("browser_action"));assert!(scope.allows("read_artifact"));
+        scope.local_web=false;assert!(!scope.allows("fetch_url"));assert!(!scope.allows("browser_read"));
     }
     #[test]
     fn failed_write_is_not_evidence_of_creation() {
