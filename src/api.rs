@@ -227,6 +227,12 @@ pub struct Conversation {
     #[serde(default)]
     pub history: Vec<Value>,
 }
+/// Browser transport omits the model's private working history entirely.
+#[derive(Serialize,Deserialize)]
+pub struct ConversationView{pub id:String,pub title:String,pub updated:String,pub mode:String,pub messages:Vec<Message>}
+impl From<Conversation> for ConversationView{
+    fn from(chat:Conversation)->Self{Self{id:chat.id,title:chat.title,updated:chat.updated,mode:chat.mode,messages:chat.messages}}
+}
 pub struct Run {
     pub cancel: CancellationToken,
     pub conversation: String,
@@ -355,9 +361,25 @@ impl App {
         if self.tasks.is_deleted(id.into()).await? {
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Чат удалён").into());
         }
-        let bytes=tokio::fs::read(self.chat_path(id)?).await?;
-        let mut chat=tokio::task::spawn_blocking(move||serde_json::from_slice::<Conversation>(&bytes)).await??;
+        let path=self.chat_path(id)?;let expected=id.to_owned();
+        let mut chat=tokio::task::spawn_blocking(move||->anyhow::Result<Conversation>{
+            let chat:Conversation=serde_json::from_reader(std::io::BufReader::with_capacity(64*1024,std::fs::File::open(path)?))?;
+            anyhow::ensure!(chat.id==expected,"ID чата не соответствует имени файла");Ok(chat)
+        }).await??;
         crate::tools::public_chat(&mut chat);Ok(chat)
+    }
+    pub async fn header(&self,id:&str)->anyhow::Result<crate::chat_headers::Header>{
+        if self.tasks.is_deleted(id.into()).await?{return Err(std::io::Error::new(std::io::ErrorKind::NotFound,"Чат удалён").into());}
+        let path=self.chat_path(id)?;tokio::task::spawn_blocking(move||crate::chat_headers::read(&path)).await?
+    }
+    pub async fn load_view(&self,id:&str)->anyhow::Result<ConversationView>{
+        if self.tasks.is_deleted(id.into()).await?{return Err(std::io::Error::new(std::io::ErrorKind::NotFound,"Чат удалён").into());}
+        let path=self.chat_path(id)?;let expected=id.to_owned();
+        let mut chat=tokio::task::spawn_blocking(move||->anyhow::Result<ConversationView>{
+            let view:ConversationView=serde_json::from_reader(std::io::BufReader::with_capacity(64*1024,std::fs::File::open(path)?))?;
+            anyhow::ensure!(view.id==expected,"ID чата не соответствует имени файла");Ok(view)
+        }).await??;
+        for message in &mut chat.messages{for tool in &mut message.tools{crate::tools::public_record(tool);}}Ok(chat)
     }
     pub async fn save(&self, chat: &Conversation) -> anyhow::Result<()> {
         let _guard = self.storage.lock().await;
@@ -812,7 +834,7 @@ async fn chats(State(app):State<Shared>)->ApiResult<Value>{
     for header in headers{if !app.tasks.is_deleted(header.id.clone()).await?{items.push(header);}}
     Ok(Json(serde_json::to_value(items)?))
 }
-async fn new_chat(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<Conversation> {
+async fn new_chat(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<ConversationView> {
     let chat = Conversation {
         history_task:String::new(),
         history_workspace: String::new(),
@@ -825,16 +847,16 @@ async fn new_chat(State(app): State<Shared>, Json(value): Json<Value>) -> ApiRes
         history: vec![],
     };
     app.save(&chat).await?;
-    Ok(Json(chat))
+    Ok(Json(chat.into()))
 }
-async fn chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Conversation> {
-    Ok(Json(app.load(&id).await?))
+async fn chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<ConversationView> {
+    Ok(Json(app.load_view(&id).await?))
 }
 async fn rename(
     State(app): State<Shared>,
     Path(id): Path<String>,
     Json(value): Json<Value>,
-) -> ApiResult<Conversation> {
+) -> ApiResult<ConversationView> {
     let runs = app.runs.lock().await;
     require(
         !runs.values().any(|r| r.conversation == id),
@@ -848,7 +870,7 @@ async fn rename(
         .take(100)
         .collect();
     app.save(&chat).await?;
-    Ok(Json(chat))
+    Ok(Json(chat.into()))
 }
 async fn delete_chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     let runs = app.runs.lock().await;
@@ -1135,7 +1157,7 @@ async fn create_run(State(app): State<Shared>, Json(input): Json<ChatInput>) -> 
 }
 async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
     let _settings_guard = app.settings_write.lock().await;
-    let _chat = app.load(&input.conversation).await?;
+    let header=app.header(&input.conversation).await?;
     require(
         ["agent", "team", "translate", "chat", "search"].contains(&input.mode.as_str()),
         "Неизвестный режим работы",
@@ -1189,7 +1211,10 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
             !runs.values().any(|r| r.conversation == input.conversation),
             "В этом чате уже идёт ответ",
         )?;
-        if input.mode!="translate"&&!crate::agent::reply_only(&input.content){app.tasks.import_legacy_requests(&_chat,app.settings.lock().await.workspace.clone()).await?;}
+        if header.count>0&&input.mode!="translate"&&!crate::agent::reply_only(&input.content)&&app.tasks.needs_legacy_import(input.conversation.clone()).await?{
+            let legacy=app.load(&input.conversation).await?;
+            app.tasks.import_legacy_requests(&legacy,app.settings.lock().await.workspace.clone()).await?;
+        }
         app.tasks
             .begin_in_project(
                 run_id.clone(),
@@ -1433,7 +1458,7 @@ async fn permission_grants(State(app): State<Shared>) -> ApiResult<Value> {
     Ok(Json(values))
 }
 async fn conversation_tasks(State(app):State<Shared>,Path(id):Path<String>)->ApiResult<Value>{
-    app.load(&id).await?;
+    app.header(&id).await?;
     Ok(Json(app.tasks.task_list(id).await?))
 }
 async fn task_state(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{

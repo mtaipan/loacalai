@@ -16,9 +16,12 @@ fn substantive(content:&str)->bool{
     !text.is_empty()&&!["привет","здравствуйте","спасибо","ок","окей","хорошо","понял","hello","hi","thanks","thank you","ok","okay"].contains(&text.as_str())
 }
 impl Store{
+    pub async fn needs_legacy_import(&self,conversation:String)->Result<bool>{
+        self.access(move|conn|Ok(!conn.query_row("SELECT EXISTS(SELECT 1 FROM work_tasks WHERE conversation=?1)",[conversation],|row|row.get::<_,bool>(0))?)).await
+    }
     pub async fn import_legacy_requests(&self,chat:&Conversation,project:String)->Result<bool>{
         let conversation=chat.id.clone();let workspace=chat.history_workspace.clone();
-        let check=conversation.clone();if self.access(move|conn|Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM work_tasks WHERE conversation=?1)",[check],|row|row.get::<_,bool>(0))?)).await?{return Ok(false);}
+        if !self.needs_legacy_import(conversation.clone()).await?{return Ok(false);}
         let check=conversation.clone();let mut known=self.access(move|conn|{
             let mut requests=HashMap::<String,Vec<KnownRequest>>::new();let mut query=conn.prepare("SELECT id,input,created,updated FROM runs WHERE conversation=?1 ORDER BY created DESC,id DESC")?;
             for row in query.query_map([check],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?)))?{

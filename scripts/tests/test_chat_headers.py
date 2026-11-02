@@ -42,6 +42,10 @@ try:
     if before is not None:
         growth=after-before;assert growth<48*1024*1024,{'peak_growth':growth,'source_bytes':path.stat().st_size}
         print(f'PASS 64 MiB legacy chat lists metadata only; own server peak grew {growth/1024/1024:.2f} MiB')
+    view=call('/api/chats/'+id);assert 'history' not in view and 'history_model' not in view
+    assert len(view['messages'][0]['content'])==32*1024*1024 and view['messages'][1]['content']=='second'
+    assert path.stat().st_size>64*1024*1024
+    print('PASS browser conversation view excludes working model history while retaining full visible messages and original file')
     new=call('/api/chats',{});assert len(call('/api/chats'))==2
     request=urllib.request.Request(base+'/api/chats/'+id,method='DELETE',headers={'X-Studio-Token':token})
     with http.open(request):pass
