@@ -8,6 +8,7 @@ pub struct TaskScope {
     pub web_only: bool,
     pub searching: bool,
     pub web_enabled: bool,
+    pub read_only: bool,
     pub urls: Vec<reqwest::Url>,
     names: BTreeSet<String>,
     desktop: bool,
@@ -205,6 +206,7 @@ impl TaskScope {
                 && !explicit_file_mutation,
             searching: crate::web_tools::search_requested(text),
             web_enabled: true,
+            read_only:false,
             urls,
             names,
             desktop,
@@ -221,6 +223,7 @@ impl TaskScope {
     }
     pub fn allows(&self, name: &str) -> bool {
         if ["read_task","read_artifact","search_artifacts","read_run_log"].contains(&name) {return true;}
+        if self.read_only{return self.web_enabled&&["web_search","fetch_url","browser_open","browser_read"].contains(&name);}
         if crate::web_tools::is_web_tool(name) && !self.web_enabled {
             return false;
         }
@@ -447,6 +450,13 @@ mod tests {
         }
         assert!(!s.allows("inspect_project"));
         assert!(TaskScope::new("исправь app.rs в проекте").allows("inspect_project"));
+    }
+    #[test]
+    fn chat_retrieval_can_read_selected_sources_without_action_capabilities(){
+        let mut scope=TaskScope::new("Review this attached source and search the web");scope.read_only=true;
+        for name in ["read_artifact","search_artifacts","read_task","read_run_log","web_search","fetch_url","browser_open","browser_read"]{assert!(scope.allows(name),"{name}");}
+        for name in ["ingest_file","read_file","find_files","run_command","write_file","edit_file","browser_action","record_microphone","write_stdin"]{assert!(!scope.allows(name),"{name}");}
+        scope.web_enabled=false;assert!(!scope.allows("web_search"));assert!(scope.allows("read_artifact"));
     }
     #[test]
     fn failed_write_is_not_evidence_of_creation() {

@@ -48,3 +48,5 @@ button,input,select,textarea{font:inherit}
 @media(forced-colors:active){.button,.approval,.tool-card,.settings-nav button[aria-selected=true]{border:1px solid CanvasText}:focus-visible{outline:2px solid Highlight}}
 
 .run-history-dialog{max-width:900px}.run-history-content{min-width:0;overflow-wrap:anywhere}.run-history-content .artifact-content{max-height:none}.run-history-links{margin:12px 0}
+
+.material-list{display:grid;gap:8px}.material-list .button{white-space:normal;overflow-wrap:anywhere;text-align:left}

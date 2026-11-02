@@ -196,8 +196,12 @@ impl Store {
     }
     pub async fn task(&self,id:String,after:i64)->Result<Value>{self.access(move|conn|crate::task_state::snapshot(conn,&id,after)).await}
     pub async fn task_request(&self,id:String,sequence:i64,offset:usize)->Result<Value>{
+        self.task_request_slice(id,sequence,offset,16000).await
+    }
+    pub async fn task_request_slice(&self,id:String,sequence:i64,offset:usize,max_characters:usize)->Result<Value>{
+        anyhow::ensure!((1..=16000).contains(&max_characters),"Размер страницы запроса от 1 до 16000 символов");
         self.access(move|conn|{
-            let (text,total):(String,i64)=conn.query_row("SELECT substr(content,?3+1,16000),length(content) FROM task_requests WHERE task=?1 AND sequence=?2",params![id,sequence,i64::try_from(offset)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(MissingResource("Запрос задачи не найден"))?;
+            let (text,total):(String,i64)=conn.query_row("SELECT substr(content,?3+1,?4),length(content) FROM task_requests WHERE task=?1 AND sequence=?2",params![id,sequence,i64::try_from(offset)?,i64::try_from(max_characters)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(MissingResource("Запрос задачи не найден"))?;
             let next=offset.saturating_add(text.chars().count());
             Ok(json!({"sequence":sequence,"text":text,"offset":offset,"next_offset":next,"characters":total,"has_more":(next as u64)<total as u64}))
         }).await
@@ -244,7 +248,7 @@ impl Fold {
             "tool_result"=>{if let Some(tool)=self.tools.iter_mut().find(|t|t["id"]==event["tool"]["id"]){*tool=event["tool"].clone();}else{self.tools_total+=1;self.tools.push(event["tool"].clone());}},
             "approval"=>{self.approvals.push(event.clone());if let Some(tool)=self.tools.iter_mut().find(|t|t["id"]==event["tool_id"]){tool["status"]=json!("awaiting_approval");}},
             "approval_closed"=>{self.approvals.retain(|a|a["id"]!=event["id"]);if let Some(tool)=self.tools.iter_mut().find(|t|t["id"]==event["tool_id"]){tool["status"]=event["status"].clone();}},
-            "extracted"=>self.tools.push(json!({"name":event["name"],"arguments":{"file":event["name"]},"result":text,"status":"succeeded"})),
+            "extracted"=>self.tools.push(json!({"id":event["id"],"name":event["name"],"arguments":{"file":event["name"]},"result":text,"material_artifact":event["material_artifact"],"status":"succeeded"})),
             _=>{}
         }
         if matches!(event["type"].as_str(),Some("tool_start"|"extracted")){self.tools_total+=1;}

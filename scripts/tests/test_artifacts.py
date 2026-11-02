@@ -7,6 +7,10 @@ model='qwen2.5:3b';artifact_id=None
 source=''.join(f'Line {i}: Материал 🦀 INDEX_NEEDLE <button data-action="settings">literal</button> '+('source-data '*10)+'\r\n' for i in range(1,301))
 (root/'data/workspace/long-source.txt').write_bytes(source.encode())
 def payload(message):
+    text=message['content']
+    if text.startswith('STATUS: succeeded\nSOURCE_TOOL: '):
+        metadata=json.loads(next(line[len('SOURCE_PAGE: '):] for line in text.splitlines() if line.startswith('SOURCE_PAGE: ')))
+        metadata['text']=text.split('\nSOURCE_TEXT_BEGIN\n',1)[1].rsplit('\nSOURCE_TEXT_END',1)[0];return metadata
     value=json.loads(message['content']);result=value.get('result',value)
     if isinstance(result,str):
         try:return json.loads(result)

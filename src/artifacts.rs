@@ -45,14 +45,23 @@ impl Store {
         self.access(move|conn|descriptor(conn,&id)).await
     }
     pub async fn artifact_page(&self,id:String,offset:usize)->Result<Value>{
+        self.artifact_slice(id,offset,8000).await
+    }
+    pub async fn artifact_slice(&self,id:String,offset:usize,max_characters:usize)->Result<Value>{
+        anyhow::ensure!((1..=8000).contains(&max_characters),"Размер страницы от 1 до 8000 символов");
         self.access(move|conn|{
             let descriptor=descriptor(conn,&id)?;let hash=descriptor["sha256"].as_str().context("Нет хеша артефакта")?;
             let offset=i64::try_from(offset)?;let mut text=String::new();
+            anyhow::ensure!(offset as u64<=descriptor["characters"].as_u64().unwrap_or(0),"Смещение вне сохранённого материала");
             let mut query=conn.prepare("SELECT char_start,text FROM artifact_chunks WHERE hash=?1 AND char_start>=COALESCE((SELECT char_start FROM artifact_chunks WHERE hash=?1 AND char_start<=?2 ORDER BY char_start DESC LIMIT 1),0) ORDER BY char_start LIMIT 5")?;
             let rows=query.query_map(params![hash,offset],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?;
-            let mut remaining=8000usize;
-            for row in rows {let(start,block)=row?;let skip=(offset-start).max(0) as usize;let part:String=block.chars().skip(skip).take(remaining).collect();remaining-=part.chars().count();text.push_str(&part);if remaining==0{break;}}
+            let mut remaining=max_characters;let mut expected=offset;let mut first=true;
+            for row in rows {let(start,block)=row?;
+                anyhow::ensure!(if first{start<=expected}else{start==expected},"В сохранённом материале отсутствует ожидаемый диапазон; источник повреждён");first=false;
+                let skip=usize::try_from(expected-start)?;let part:String=block.chars().skip(skip).take(remaining).collect();let count=part.chars().count();remaining-=count;expected+=i64::try_from(count)?;text.push_str(&part);if remaining==0{break;}}
             let next=(offset as u64).checked_add(text.chars().count() as u64).context("Переполнение смещения")?;
+            anyhow::ensure!(next<=descriptor["characters"].as_u64().unwrap_or(0),"Размер сохранённого материала не соответствует его данным");
+            anyhow::ensure!(next>offset as u64||next>=descriptor["characters"].as_u64().unwrap_or(0),"В сохранённом материале нет ожидаемых данных; подготовка или восстановление не завершены");
             Ok(json!({"artifact":descriptor,"text":text,"offset":offset,"next_offset":next,"has_more":next<descriptor["characters"].as_u64().unwrap_or(0),"offset_unit":"unicode_scalar"}))
         }).await
     }
@@ -145,6 +154,14 @@ pub fn context_reference(context:String,artifact:&Value)->String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn missing_saved_chunk_is_an_error_instead_of_a_skipped_range_or_infinite_cursor(){
+        let root=std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());std::fs::create_dir_all(&root).unwrap();let store=Store::open(&root).unwrap();store.begin("run".into(),"chat".into(),json!({})).await.unwrap();
+        let source=store.put_artifact("run".into(),"material_text".into(),"x".repeat(40000),json!({})).await.unwrap();let hash=source["sha256"].as_str().unwrap().to_string();
+        store.access(move|conn|{conn.execute("DELETE FROM artifact_chunks WHERE hash=?1 AND part=1",[hash])?;Ok(())}).await.unwrap();
+        assert!(store.artifact_page(source["id"].as_str().unwrap().into(),18000).await.is_err());
+        assert!(store.artifact_page(source["id"].as_str().unwrap().into(),999999).await.is_err());drop(store);std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn unicode_pages_hashes_scopes_and_shared_body_deletion_are_consistent(){
         let dir=std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());std::fs::create_dir(&dir).unwrap();let store=Store::open(&dir).unwrap();

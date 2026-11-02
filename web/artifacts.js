@@ -1,4 +1,15 @@
 'use strict';
+function materialListLink(message){
+  const sources=message.diagnostics?.material_sources||[];if(!sources.length)return '';
+  return `<button class="button" data-material-sources="${escapeHtml(message.id)}">Материалы · ${sources.length}</button>`;
+}
+function showMaterialList(sources){
+  const dialog=document.createElement('dialog');dialog.className='workspace-dialog';dialog.setAttribute('aria-labelledby','material-list-title');
+  dialog.innerHTML='<h2 id="material-list-title">Материалы</h2><div class="dialog-body"><div class="material-list"></div><p class="form-help" role="status"></p></div><div class="dialog-footer"><button class="button material-previous">Назад</button><button class="button material-next">Дальше</button><button class="button material-close">Закрыть</button></div>';
+  document.body.append(dialog);let start=0;const find=selector=>dialog.querySelector(selector);dialog.onclose=()=>dialog.remove();find('.material-close').onclick=()=>dialog.close();
+  function render(){const body=find('.material-list');body.replaceChildren();for(const source of sources.slice(start,start+32)){const button=document.createElement('button');button.className='button';const name=source.metadata?.name||source.metadata?.path||'Текстовый материал';button.textContent=name+' · '+source.characters+' символов'+(source.metadata?.encoding?' · '+source.metadata.encoding:'');button.onclick=()=>showArtifact(source.id);body.append(button);}find('[role="status"]').textContent=(start+1)+'–'+Math.min(start+32,sources.length)+' из '+sources.length;find('.material-previous').disabled=start===0;find('.material-next').disabled=start+32>=sources.length;}
+  find('.material-previous').onclick=()=>{start=Math.max(0,start-32);render();};find('.material-next').onclick=()=>{start+=32;render();};dialog.showModal();render();
+}
 function artifactLinks(tool){
   const links=[];
   for(const [field,label] of [['material_artifact','Исходный материал'],['result_artifact','Сохранённый результат'],['arguments_artifact','Полные параметры']]){
@@ -16,7 +27,8 @@ async function showArtifact(id){
   async function render(){
     controller?.abort();controller=new AbortController();const generation=++version;find('.artifact-previous').disabled=true;find('.artifact-next').disabled=true;
     try{const value=await api('/api/artifacts/'+id+'?offset='+offset,{signal:controller.signal});if(!dialog.open||generation!==version)return;page=value;
-      find('.artifact-content').textContent=page.text;find('.artifact-caption').textContent=(page.artifact.metadata?.tool_name?toolTitle(page.artifact.metadata.tool_name):'Текстовый материал')+' · сохранено '+new Date(page.artifact.created).toLocaleString('ru-RU');
+      find('.artifact-content').textContent=page.text;find('.artifact-caption').textContent=(page.artifact.metadata?.name|| (page.artifact.metadata?.tool_name?toolTitle(page.artifact.metadata.tool_name):'Текстовый материал'))+' · сохранено '+new Date(page.artifact.created).toLocaleString('ru-RU');
+      if(page.artifact.kind==='material_text')find('#artifact-title').textContent='Материал';
       find('.artifact-position').textContent='Символы '+offset+'–'+page.next_offset+' из '+page.artifact.characters;
       find('.artifact-metadata').textContent=JSON.stringify(page.artifact,null,2);find('.artifact-previous').disabled=offset===0;find('.artifact-next').disabled=!page.has_more;
     }catch(error){if(error.name!=='AbortError'&&dialog.open)find('.artifact-position').textContent='Не удалось прочитать материал: '+error.message;}

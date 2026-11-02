@@ -15,10 +15,14 @@ function trimRunView(session){
     session[offset]=(session[offset]||0)+cut;session[field]=text.slice(cut);
   }
 }
-function runHistoryLinks(run,session=null){
+function runHistoryLinks(run,session=null,diagnostics=null){
   if(!/^[0-9a-f-]{36}$/i.test(run||''))return '';
   const partial=session&&((session.toolsTotal||0)>session.streamTools.length||session.textOffset||session.thinkingOffset);
-  return `<div class="run-history-links">${partial?'<p class="form-help">Показана последняя часть. Предыдущие действия и текст доступны в журнале.</p>':''}<div class="project-actions"><button class="button" data-tool-history="${run}">Действия запуска</button><button class="button" data-run-text="${run}" data-kind="thinking">Рассуждения</button><button class="button" data-run-text="${run}" data-kind="content">Вывод запуска</button></div></div>`;
+  const tools=session?(session.toolsTotal||0)>0:(diagnostics?.execution?.actions||0)>0;
+  const thinking=session?session.thinkingOffset>0:diagnostics?.thinking_partial;
+  const content=session?.textOffset>0;
+  if(!tools&&!thinking&&!content)return '';
+  return `<div class="run-history-links">${partial?'<p class="form-help">Показана последняя часть. Предыдущие действия и текст доступны в журнале.</p>':''}<div class="project-actions">${tools?`<button class="button" data-tool-history="${run}">Действия запуска</button>`:''}${thinking?`<button class="button" data-run-text="${run}" data-kind="thinking">Все рассуждения</button>`:''}${content?`<button class="button" data-run-text="${run}" data-kind="content">Вывод запуска</button>`:''}</div></div>`;
 }
 async function showRunHistory(run,kind='tools',local=null){
   const dialog=document.createElement('dialog');dialog.className='workspace-dialog run-history-dialog';dialog.setAttribute('aria-labelledby','run-history-title');
