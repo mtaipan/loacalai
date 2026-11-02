@@ -3,7 +3,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json,os,socket,subprocess,threading,time,urllib.request,urllib.parse,urllib.error,uuid,sqlite3,hashlib
 project=Path(__file__).resolve().parents[2];root=project/'build-tools'/('search-test-'+uuid.uuid4().hex[:8]);(root/'data/workspace').mkdir(parents=True);(root/'data/workspace/fixture.txt').write_text('LOCAL_PROJECT_EVIDENCE')
-model='qwen2.5:3b';foundation='hf.co/DevQuasar/huihui-ai.Foundation-Sec-8B-abliterated-GGUF:Q4_K_M';provider_calls=[];inferences=[];shows=[];provider_fails=False;waiting=threading.Event();release_wait=threading.Event()
+model='qwen2.5:3b';foundation='hf.co/DevQuasar/huihui-ai.Foundation-Sec-8B-abliterated-GGUF:Q4_K_M';provider_calls=[];inferences=[];shows=[];provider_fails=False;waiting=threading.Event();release_wait=threading.Event();planning_waiting=threading.Event();release_planning=threading.Event()
 class Fixture(BaseHTTPRequestHandler):
     def log_message(self,*args):pass
     def reply(self,value):
@@ -27,6 +27,18 @@ class Fixture(BaseHTTPRequestHandler):
         if self.path!='/api/chat' or not body.get('messages'):return self.reply({'done':True})
         inferences.append(body);messages=body['messages'];tools=[m for m in messages if m.get('role')=='tool'];names={tool['function']['name'] for tool in body.get('tools',[])};text='\n'.join(m.get('content','') for m in messages if m['role']=='user')
         def call(name,args):return self.reply({'message':{'role':'assistant','content':'','tool_calls':[{'function':{'name':name,'arguments':args}}]},'done':True})
+        if 'CURRENT PHASE: prepare a public search query.' in messages[0].get('content',''):
+            assert names <= {'web_search','read_task','read_artifact','search_artifacts','read_run_log','read_sources','read_search_plan','update_search_plan'},names
+            latest=next(m['content'] for m in reversed(messages) if m['role']=='user')
+            if 'PLANNER_CANCEL' in latest:planning_waiting.set();release_planning.wait(15);return
+            if 'PLANNER_CLARIFY' in latest:return self.reply({'message':{'role':'assistant','content':'Which Rust version should be checked?'},'done':True})
+            if 'PLANNER_BAD_BATCH' in latest:return self.reply({'message':{'role':'assistant','content':'','tool_calls':[{'function':{'name':'web_search','arguments':{'query':'Rust ownership'}}},{'function':{'name':'run_command','arguments':{'command':'echo forbidden'}}}]},'done':True})
+            if 'PLANNER_CONTEXT' in latest:
+                last_user=max(i for i,m in enumerate(messages) if m.get('role')=='user')
+                if not any(m.get('tool_name')=='read_task' for m in messages[last_user+1:]):return call('read_task',{'section':'requests'})
+                assert 'Rust E0382 ownership' in text or any('Rust E0382 ownership' in m.get('content','') for m in tools)
+                return call('web_search',{'query':'Rust E0382 ownership official documentation'})
+            return call('web_search',{'query':'primary fixture official documentation'})
         if 'LOCAL_OFFLINE' in text:
             last_user=max(i for i,m in enumerate(messages) if m.get('role')=='user')
             tools=[m for m in messages[last_user+1:] if m.get('role')=='tool']
@@ -57,7 +69,7 @@ def read(path,body=None):
     with call(path,body) as response:return json.load(response)
 def start():
     global process,token
-    process=subprocess.Popen([str(project/'target/release/local-gemma-studio.exe'),'--server'],cwd=root,env={**os.environ,'LOCAL_GEMMA_HOME':str(root),'LOCAL_GEMMA_PORT':str(port),'LOCAL_GEMMA_OLLAMA':site},stdout=log,stderr=log)
+    process=subprocess.Popen([os.environ.get('LOCAL_GEMMA_TEST_EXE',str(project/'target/release/local-gemma-studio.exe')),'--server'],cwd=root,env={**os.environ,'LOCAL_GEMMA_HOME':str(root),'LOCAL_GEMMA_PORT':str(port),'LOCAL_GEMMA_OLLAMA':site},stdout=log,stderr=log)
     for _ in range(100):
         if process.poll() is not None:raise AssertionError((root/'test.log').read_text(encoding='utf-8'))
         try:token=read('/api/bootstrap')['token'];return
@@ -123,6 +135,16 @@ try:
     for depth in ['quick','detailed','deep']:
         answer=turn('Read primary fixture sources '+site+'/page?number=0',options={'depth':depth,'focus':'web'})['messages'][-1];assert 'SEARCH_FLOW_DONE' in answer['content'] and any(tool['name']=='fetch_url' and tool['status']=='succeeded' for tool in answer['tools']);assert answer['diagnostics']['sampling']['chat_temperature']==.67
         if depth!='quick':assert any(tool['name']=='update_search_plan' and tool['status']=='succeeded' for tool in answer['tools'])
+    sensitive='Rust E0382 ownership PLANNER_CONTEXT\nPrivate project detail PRIVATE_SENTINEL '+('private internal note '*40)
+    before=len(provider_calls);contextual=turn(sensitive,mode='chat');assert len(provider_calls)==before+1 and provider_calls[-1]['q']==['Rust E0382 ownership official documentation']
+    assert 'PRIVATE_SENTINEL' not in json.dumps(provider_calls[before:]);assert any(t['name']=='read_task' for t in contextual['messages'][-1]['tools'])
+    stop();start();before=len(provider_calls);contextual=turn('PLANNER_CONTEXT continue the same topic',mode='chat',chat=contextual)
+    assert len(provider_calls)==before+1 and provider_calls[-1]['q']==['Rust E0382 ownership official documentation']
+    for marker in ['PLANNER_CLARIFY','PLANNER_BAD_BATCH']:
+        before=len(provider_calls);failed=turn(marker,mode='chat',allow_error=True);assert len(provider_calls)==before
+        if marker=='PLANNER_CLARIFY':assert 'Which Rust version' in failed['messages'][-1]['content'] and failed['messages'][-1]['diagnostics']['search']['status']=='needs_query'
+        else:assert not failed['messages'][-1]['tools']
+    print('PASS local query planning, read-only context recovery after restart, private-message minimization, clarification and atomic unsafe-batch rejection')
     answer=turn('HOSTILE_CHAT search this topic',mode='chat')['messages'][-1];assert any(tool['name']=='read_file' and tool['status']=='failed' for tool in answer['tools'])
     print('PASS search depths use selected model, reading and chat sampling; Chat cannot gain OS actions through retrieval')
     cited=turn('CITATION_CASE read the primary source '+site+'/page?number=0',options={'depth':'quick','domains':['127.0.0.1']});answer=cited['messages'][-1];report=answer['diagnostics']['citations'];assert report['resolved']==1 and report['missing_ids']==1 and report['unverified_links']==1 and report['semantic_support_verified'] is False
@@ -149,6 +171,15 @@ try:
     else:raise AssertionError('Search did not stop')
     assert read('/api/chats/'+cancelled['id'])['messages'][-1]['tools'][0]['status']=='cancelled';release_wait.set()
     print('PASS cancellation interrupts the waiting provider worker and persists cancelled rather than failed/successful action')
+    before=len(provider_calls);planning_chat=read('/api/chats',{'mode':'search'});accepted=read('/api/runs',{'conversation':planning_chat['id'],'content':'PLANNER_CANCEL private request','mode':'search','web':'search','source':'en','target':'ru','attachments':[],'search':{'depth':'quick'}});assert planning_waiting.wait(5)
+    read('/api/stop/'+accepted['run_id'],{})
+    for _ in range(100):
+        if read('/api/runs/'+accepted['run_id'])['status']=='cancelled':break
+        time.sleep(.05)
+    else:raise AssertionError('Local query planner did not stop')
+    cancelled_view=read('/api/chats/'+planning_chat['id']);assert not cancelled_view['messages'][-1]['tools'] and len(provider_calls)==before;assert any('PLANNER_CANCEL private request' in m.get('content','') for m in cancelled_view['messages'] if m['role']=='user');release_planning.set()
+    retry=turn('Retry: primary fixture source '+site+'/page',chat=planning_chat);assert len(provider_calls)==before+1 and any(t['name']=='web_search' and t['status']=='succeeded' for t in retry['messages'][-1]['tools'])
+    print('PASS local planner cancellation preserves request without provider egress; retry performs focused search')
     # Own headless browser only; no user session, clipboard or inference.
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
@@ -158,6 +189,6 @@ try:
         page.locator('.source-receipts').first.click();page.wait_for_selector('.source-history .source-index-row');assert page.locator('.source-history .source-index-row').count()>=2;assert page.locator('.source-history .source-close').bounding_box()['y']<760;page.locator('.source-history .source-close').click();page.wait_for_selector('.source-history',state='detached');page.locator('.source-close').click();browser.close()
     print('PASS Edge 320px search controls, literal source cards and no JS errors')
 finally:
-    release_wait.set()
+    release_wait.set();release_planning.set()
     if process:stop()
     fixture.shutdown();log.close()
