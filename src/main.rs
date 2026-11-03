@@ -16,6 +16,7 @@ mod discovery;
 mod lifecycle;
 mod legacy;
 mod instance;
+mod install_guard;
 mod model_adapter;
 mod materials;
 mod material_review;
@@ -87,9 +88,14 @@ fn root_dir() -> PathBuf {
 }
 
 fn main() -> Result<()> {
-    let root = root_dir();
-    // Resolve shortcuts/junctions so Ollama receives the physical storage path.
-    let root = dunce::canonicalize(&root).unwrap_or(root);
+    let root = std::path::absolute(root_dir())?;
+    // Resolve the parent too when an installer has temporarily renamed the root.
+    let root = dunce::canonicalize(&root).or_else(|_| {
+        let parent=root.parent().ok_or_else(||std::io::Error::new(std::io::ErrorKind::InvalidInput,"Не указана папка приложения"))?;
+        Ok::<_,std::io::Error>(dunce::canonicalize(parent)?.join(root.file_name().unwrap_or_default()))
+    }).unwrap_or(root);
+    // Publication and startup admission share a mutex outside the renamed tree.
+    let install_admission=install_guard::acquire(&root)?;
     std::fs::create_dir_all(root.join("data"))?;
     for name in ["temp", "cache", "home", "webview"] {
         std::fs::create_dir_all(root.join("data").join(name))?;
@@ -102,6 +108,7 @@ fn main() -> Result<()> {
     std::env::set_var("OLLAMA_HOME", root.join("data/home"));
     // No database/recovery is allowed before the data-home owner is known.
     let home_lease=instance::acquire(&root)?;
+    drop(install_admission);
     let port: u16 = std::env::var("LOCAL_GEMMA_PORT").ok().map(|value|value.parse()).transpose()?.unwrap_or(3210);
     anyhow::ensure!(port>0,"LOCAL_GEMMA_PORT должен быть от 1 до 65535");
     let runtime = tokio::runtime::Runtime::new()?;
