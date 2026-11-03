@@ -24,11 +24,21 @@ payload += [r/'scripts/ensure-webview.ps1',r/'scripts/install_models.py',r/'scri
 payload += [p for p in (r/'runtime/python').rglob('*') if p.is_file() and '__pycache__' not in p.parts and not p.name.endswith(('.pyc','.pyo'))]
 payload += [r/'runtime/ollama/ollama.exe']+[p for p in (r/'runtime/ollama/lib/ollama').iterdir() if p.is_file()]
 webview=r/'build-tools/MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
-if not webview.is_file():
- import urllib.request
- urllib.request.urlretrieve('https://go.microsoft.com/fwlink/p/?LinkId=2124701', webview)
-signature=subprocess.run(['powershell.exe','-NoProfile','-Command',"if((Get-AuthenticodeSignature -LiteralPath $env:LOCAL_GEMMA_WEBVIEW_COMPONENT).Status -ne 'Valid'){exit 1}"],env={**os.environ,'LOCAL_GEMMA_WEBVIEW_COMPONENT':str(webview)},check=False)
-assert signature.returncode==0, 'Offline WebView2 signature verification failed'
+def signed_component(path):
+ if not path.is_file():return False
+ return subprocess.run(['powershell.exe','-NoProfile','-Command',"if((Get-AuthenticodeSignature -LiteralPath $env:LOCAL_GEMMA_WEBVIEW_COMPONENT).Status -ne 'Valid'){exit 1}"],env={**os.environ,'LOCAL_GEMMA_WEBVIEW_COMPONENT':str(path)},check=False).returncode==0
+if not signed_component(webview):
+ import sys
+ sys.path.insert(0,str(r/'runtime'))
+ from compute_packages import RangeZip
+ temporary=webview.with_suffix('.download')
+ with RangeZip('https://go.microsoft.com/fwlink/p/?LinkId=2124701',r/'build-tools/webview-downloads') as remote,temporary.open('wb') as out:
+  while remote.tell()<remote.size:
+   out.write(remote.read(min(remote.block_size,remote.size-remote.tell())))
+   print('WebView2: '+str(remote.tell())+'/'+str(remote.size),flush=True)
+  out.flush();os.fsync(out.fileno())
+ assert signed_component(temporary), 'Offline WebView2 signature verification failed'
+ os.replace(temporary,webview)
 # The component is placed under runtime in the payload, outside source archives.
 archive(r/'build-tools/payload.zip',payload)
 with zipfile.ZipFile(r/'build-tools/payload.zip','a',compression=zipfile.ZIP_STORED) as z:
