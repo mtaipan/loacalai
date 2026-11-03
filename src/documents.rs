@@ -100,6 +100,21 @@ pub async fn translate(
         !units.is_empty() && !sample.trim().is_empty(),
         "Текст документа не найден. Для сканированного PDF включите OCR."
     );
+    let owner=if let Ok(run)=crate::permissions::TASK.try_with(Clone::clone){
+        if let Some((task,_))=app.tasks.permission_task(run.clone()).await?{format!("task:{task}")}else{
+            let stored=app.tasks.get(run.clone()).await?;stored["conversation"].as_str().filter(|s|!s.is_empty()).map(|id|format!("conversation:{id}")).unwrap_or_else(||format!("run:{run}"))
+        }
+    }else{"document-ui".into()};
+    let tags=crate::model_storage::tags(app).await;
+    let digest=tags["models"].as_array().into_iter().flatten().find(|row|row["name"]==selected||row["model"]==selected||row["name"].as_str().is_some_and(|name|name==format!("{selected}:latest"))).and_then(|row|row["digest"].as_str()).filter(|s|!s.is_empty()).map(str::to_owned);
+    static SESSION:std::sync::OnceLock<String>=std::sync::OnceLock::new();
+    let identity=digest.clone().unwrap_or_else(||SESSION.get_or_init(||uuid::Uuid::new_v4().to_string()).clone());
+    let settings=app.settings.lock().await.clone();
+    let definition=json!({"version":1,"path":path,"source_sha256":plan["source_sha256"],"plan_sha256":crate::document_checkpoints::hash(&plan)?,"source":source,"target":target,"model":selected,"model_identity":identity,"model_identity_verified":digest.is_some(),"endpoint_scope":if engine::owns_engine(){"managed-engine".to_owned()}else{engine::ollama_url()},"configuration":crate::document_checkpoints::hash(&json!({"assistant":settings.assistant,"context":settings.context}))?});
+    let checkpoint=app.tasks.document_begin(owner,definition,units.len()).await?;
+    let checkpoint_id=checkpoint["id"].as_str().context("Нет ID сохранённого перевода")?.to_string();
+    engine::emit(tx,json!({"type":"document_checkpoint","checkpoint":checkpoint,"model_identity_verified":digest.is_some()})).await?;
+    let mut resumed_units=0;
     let mut translations = serde_json::Map::new();
     let mut markdown = String::new();
     let mut count = 0;
@@ -116,6 +131,10 @@ pub async fn translate(
             text
         };
         let unchanged = source == target || !text.chars().any(char::is_alphabetic);
+        let cached=app.tasks.document_part(checkpoint_id.clone(),unit.clone(),None).await?;
+        let result=if let Some(cached)=cached{
+            resumed_units+=1;cached["text"].as_str().context("Повреждён сохранённый перевод")?.to_owned()
+        }else{
         let mut result = if text.trim().is_empty() {
             String::new()
         } else if unchanged {
@@ -162,9 +181,6 @@ pub async fn translate(
                 anyhow::ensure!(check["valid"] == true, "Модель не сохранила форматирование абзаца {}: {}. Документ не создан. Попробуйте другую переводческую модель.", index+1, check["validation_error"].as_str().unwrap_or("неверные метки"));
             }
         }
-        if !unchanged && !text.trim().is_empty() {
-            translated_count += 1;
-        }
         if paragraph_mode && !unchanged && unit["marked"] != true {
             result = edges(text, &result);
         }
@@ -173,9 +189,12 @@ pub async fn translate(
             "Пустой перевод фрагмента {}",
             index + 1
         );
-        if !text.trim().is_empty() {
-            count += 1;
-        }
+        app.tasks.document_part(checkpoint_id.clone(),unit.clone(),Some(json!({"text":result,"unchanged":unchanged}))).await?.context("Не удалось сохранить фрагмент")?["text"].as_str().context("Повреждён сохранённый перевод")?.to_owned()
+        };
+        anyhow::ensure!(text.trim().is_empty()||!result.trim().is_empty(),"Пустой сохранённый перевод фрагмента {}",index+1);
+        engine::emit(tx,json!({"type":"document_checkpoint","checkpoint":{"id":checkpoint_id,"saved_units":index+1,"total_units":units.len()}})).await?;
+        if !unchanged&&!text.trim().is_empty(){translated_count+=1;}
+        if !text.trim().is_empty() {count += 1;}
         if plan["format"] == "docx" {
             translations.insert(
                 unit["id"].as_str().context("Нет ID фрагмента")?.to_owned(),
@@ -195,6 +214,7 @@ pub async fn translate(
     report["translated_units"] = json!(translated_count);
     report["inference_calls"] = json!(inference_calls);
     report["format_retries"] = json!(format_retries);
+    report["checkpoint"]=json!({"id":checkpoint_id,"reused_units":resumed_units,"model_identity_verified":digest.is_some(),"resume_scope":if digest.is_some(){"same_model_digest"}else{"current_app_process"}});
     report["model"] = json!(selected);
     report["unit_kind"] = json!(if paragraph_mode { "paragraph" } else { "page" });
     report["source"] = json!(source);

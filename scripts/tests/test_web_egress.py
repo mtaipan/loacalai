@@ -58,6 +58,9 @@ db.execute('INSERT INTO runs VALUES (?,?)',('foreign',json.dumps({'content':'dif
 db.execute('INSERT INTO web_user_origins VALUES (?,?)',('0',local))
 for port in range(8100,8400):db.execute('INSERT INTO web_user_origins VALUES (?,?)',('0',f'http://localhost:{port}'))
 db.commit();db.close()
+# The new document tables do not change the web-authority contract.
+compat=worker.Authority(str(database),'20');compat.db.close()
+with worker.sqlite3.connect(database) as upgrade:upgrade.execute('PRAGMA user_version=10')
 authority=worker.Authority(str(database),'20')
 assert authority.user_origin(local) and authority.supplied('secret-from-original-message') and not authority.supplied('invented')
 for port in range(8100,8400):assert authority.user_origin(f'http://localhost:{port}')

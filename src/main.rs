@@ -8,6 +8,7 @@ mod chat_pages;
 mod compute;
 mod context;
 mod documents;
+mod document_checkpoints;
 mod engine;
 mod executions;
 mod filesystem;
