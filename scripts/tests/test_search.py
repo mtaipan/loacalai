@@ -32,6 +32,10 @@ class Fixture(BaseHTTPRequestHandler):
             latest=next(m['content'] for m in reversed(messages) if m['role']=='user')
             if 'PLANNER_CANCEL' in latest:planning_waiting.set();release_planning.wait(15);return
             if 'PLANNER_CLARIFY' in latest:return self.reply({'message':{'role':'assistant','content':'Which Rust version should be checked?'},'done':True})
+            if 'PLANNER_BAD_BATCH' in latest and any('Поисковый пакет не выполнен' in m.get('content','') for m in tools):return self.reply({'message':{'role':'assistant','content':'Which Rust version should be checked?'},'done':True})
+            if 'COUNT_PACKET' in latest:
+                if not any('Поисковый пакет не выполнен' in m.get('content','') for m in tools):return call('web_search',{'query':'primary fixture official documentation','count':'24'})
+                return call('web_search',{'query':'primary fixture official documentation','count':24})
             if 'PLANNER_BAD_BATCH' in latest:return self.reply({'message':{'role':'assistant','content':'','tool_calls':[{'function':{'name':'web_search','arguments':{'query':'Rust ownership'}}},{'function':{'name':'run_command','arguments':{'command':'echo forbidden'}}}]},'done':True})
             if 'PLANNER_CONTEXT' in latest:
                 last_user=max(i for i,m in enumerate(messages) if m.get('role')=='user')
@@ -39,6 +43,15 @@ class Fixture(BaseHTTPRequestHandler):
                 assert 'Rust E0382 ownership' in text or any('Rust E0382 ownership' in m.get('content','') for m in tools)
                 return call('web_search',{'query':'Rust E0382 ownership official documentation'})
             return call('web_search',{'query':'primary fixture official documentation'})
+        if 'COUNT_PACKET' in text:
+            pages=[]
+            for observation in tools:
+                if observation.get('tool_name')!='web_search':continue
+                try:value=json.loads(observation.get('content',''))
+                except ValueError:continue
+                if value.get('page_source'):pages.append(value)
+            if pages and pages[-1].get('next_result_offset') is not None:
+                page=pages[-1];return call('web_search',{'query':'primary fixture official documentation','count':1000,'page_source':page['page_source']['id'],'result_offset':page['next_result_offset']})
         if 'LOCAL_OFFLINE' in text:
             last_user=max(i for i,m in enumerate(messages) if m.get('role')=='user')
             tools=[m for m in messages[last_user+1:] if m.get('role')=='tool']
@@ -143,8 +156,14 @@ try:
     for marker in ['PLANNER_CLARIFY','PLANNER_BAD_BATCH']:
         before=len(provider_calls);failed=turn(marker,mode='chat',allow_error=True);assert len(provider_calls)==before
         if marker=='PLANNER_CLARIFY':assert 'Which Rust version' in failed['messages'][-1]['content'] and failed['messages'][-1]['diagnostics']['search']['status']=='needs_query'
-        else:assert not failed['messages'][-1]['tools']
+        else:assert len(failed['messages'][-1]['tools'])==2 and all(t['status']=='failed' for t in failed['messages'][-1]['tools'])
     print('PASS local query planning, read-only context recovery after restart, private-message minimization, clarification and atomic unsafe-batch rejection')
+    before=len(provider_calls);repaired=turn('COUNT_PACKET primary fixture '+site+'/page?number=0',mode='chat',options={'depth':'quick','domains':['127.0.0.1']});items=repaired['messages'][-1]['tools'];assert len(provider_calls)==before+1
+    searches=[t for t in items if t['name']=='web_search'];assert searches[0]['status']=='failed' and searches[1]['status']=='succeeded',searches
+    result=json.loads(searches[1]['result']);assert result['requested_count']==24 and result['packet_limit']==8 and result['returned_count']==8 and result['next_result_offset']==8,result
+    assert len(searches)==4 and all(t['status']=='succeeded' for t in searches[1:]),searches
+    pages=[json.loads(t['result']) for t in searches[1:]];assert [p['returned_count'] for p in pages]==[8,8,4] and pages[-1]['next_result_offset'] is None and pages[-1]['requested_count']==1000,pages
+    print('PASS invalid planning parameters return failed tool feedback for repair; count24 returns8 plus continuation without aborting the task or sending invalid query')
     answer=turn('HOSTILE_CHAT search this topic',mode='chat')['messages'][-1];assert any(tool['name']=='read_file' and tool['status']=='failed' for tool in answer['tools'])
     print('PASS search depths use selected model, reading and chat sampling; Chat cannot gain OS actions through retrieval')
     cited=turn('CITATION_CASE read the primary source '+site+'/page?number=0',options={'depth':'quick','domains':['127.0.0.1']});answer=cited['messages'][-1];report=answer['diagnostics']['citations'];assert report['resolved']==1 and report['missing_ids']==1 and report['unverified_links']==1 and report['semantic_support_verified'] is False

@@ -40,6 +40,13 @@ fn check(value:&Value,schema:&Value,path:&str)->Result<()> {
 mod tests {
     use super::*;use serde_json::json;
     #[test]
+    fn search_packet_request_does_not_become_a_total_result_quota(){
+        assert_eq!(crate::tools::arguments("web_search",json!({"query":"public topic","count":null,"page":null})).unwrap(),json!({"query":"public topic"}));
+        assert!(crate::tools::arguments("web_search",json!({"query":null})).is_err());
+        for count in [1i64,8,10,24,1000,i64::MAX]{assert!(validate("web_search",&json!({"query":"public topic","count":count})).is_ok());}
+        for count in [json!(0),json!(-1),json!(1.5),json!("24"),json!(true),json!(u64::MAX)]{assert!(validate("web_search",&json!({"query":"public topic","count":count})).is_err());}
+    }
+    #[test]
     fn malformed_deadlines_offsets_and_nested_arguments_do_not_fall_back_to_defaults(){
         for timeout in [json!(-1),json!(1.5),json!("60"),json!(true)]{assert!(validate("run_command",&json!({"command":"never execute","timeout_seconds":timeout})).is_err());assert!(validate("start_process",&json!({"command":"never execute","timeout_seconds":timeout})).is_err());}
         assert!(validate("poll_process",&json!({"execution_id":"id","stdout_offset":-1})).is_err());

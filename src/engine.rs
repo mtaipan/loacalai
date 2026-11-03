@@ -1103,12 +1103,16 @@ pub async fn run(
                 if reduced { emit(tx,json!({"type":"notice","message":"Старый контекст сокращён. Текущая задача и статусы действий сохранены."})).await?; }
                 let mode = if use_tools { InferenceMode::Agent(definitions.clone()) } else if simple_reply { InferenceMode::Reply } else { InferenceMode::Chat };
                 let team_evidence=crate::specialists::team_evidence(&answer.tools);
+                let mut planning_batch_error:Option<String>=None;
                 let mut response = if initial_task {initial_task=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_task","arguments":{}}}]})} else if let Some(url)=initial_browser.take() {json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_open","arguments":{"url":url}}}]})} else if team && !initial_search && !team_consulted && !team_evidence.is_empty() {crate::specialists::consultation(&input.content,&team_evidence)} else if refresh_browser {refresh_browser=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_read","arguments":{"offset":0}}}]})} else if initial_material {initial_material=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"search_artifacts","arguments":{"query":input.content}}}]})} else if initial_search {
                     emit(tx,json!({"type":"notice","message":"Подготовка поискового запроса на локальной модели…"})).await?;
                     let mut planning_history=history.clone();
                     planning_history[0]["content"]=json!(format!("{}\nCURRENT PHASE: prepare a public search query. Only the supplied read-only evidence tools and web_search may be called. Call web_search with a focused query when ready; retrieve missing task context first if needed. Do not answer the research question before search. If clarification is required, return a concise question without tool calls. No browser navigation, specialist consultation or project actions in this phase.",planning_history[0]["content"].as_str().unwrap_or("")));
                     let response=crate::lifecycle::bounded(deadline,model(&app,&selected,&planning_history,InferenceMode::Configured(Box::new(InferenceMode::Agent(definitions.clone())),thinking.clone(),team,false),tx,&cancel)).await?;
-                    if crate::search::validate_planning_calls(&response,&input.content)?{initial_search=false;}
+                    match crate::search::validate_planning_calls(&response,&input.content){
+                        Ok(searches)=>{if searches{initial_search=false;}},
+                        Err(error)=>{planning_batch_error=Some(format!("Поисковый пакет не выполнен: {error}. Исправьте параметры и используйте только разрешённые инструменты подготовки поиска. Ни одно действие из этого пакета не выполнялось."));}
+                    }
                     response
                 } else { crate::lifecycle::bounded(deadline, model(&app,&selected,&history,InferenceMode::Configured(Box::new(mode),thinking.clone(),team,["agent","team"].contains(&input.mode.as_str())),tx,&cancel)).await? };
                 if let Some(reason)=response["thinking"].as_str(){if let Some(d)=answer.diagnostics.as_mut(){let old=d["thinking"].as_str().unwrap_or("");let mut text=format!("{old}{reason}\n");let removed=crate::timeline::tail(&mut text,16384);d["thinking"]=json!(text);if removed>0{d["thinking_partial"]=json!(true);}}}
@@ -1222,6 +1226,7 @@ pub async fn run(
                     let raw_args=call["function"]["arguments"].clone();
                     let (mut args,mut invalid)=match tools::arguments(name,raw_args.clone()){Ok(value)=>(value,None),Err(error)=>(raw_args,Some(error))};
                     if name=="web_search" && invalid.is_none(){invalid=crate::search::validate_query(&args,&input.content).err();}
+                    if let Some(error)=&planning_batch_error{invalid=Some(anyhow::anyhow!(error.clone()));}
                     history[assistant_index]["tool_calls"][index]["function"]["arguments"]=tools::public_arguments(name,&args);
                     let id=uuid::Uuid::new_v4().to_string();
                     let action_started=std::time::Instant::now();

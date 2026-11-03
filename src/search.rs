@@ -88,12 +88,12 @@ pub async fn results(app:&crate::api::Shared,input:&crate::api::ChatInput,option
     Ok((result,record))
 }
 pub async fn saved_page(app:&crate::api::Shared,run:&str,id:&str,query:&str,offset:usize,count:usize,cancel:&tokio_util::sync::CancellationToken)->Result<Value>{
-    anyhow::ensure!((1..=8).contains(&count),"Размер пакета поиска: 1–8 результатов");
+    anyhow::ensure!(count>0,"Размер пакета поиска должен быть положительным");let requested_count=count;let count=count.min(8);
     anyhow::ensure!(app.tasks.artifact_owned(id.into(),run.into()).await?,"Страница поиска не принадлежит этой задаче");
     let descriptor=app.tasks.artifact(id.into()).await?;anyhow::ensure!(descriptor["kind"]=="search_results"&&descriptor["metadata"]["query"]==query,"Страница относится к другому запросу");
     let mut body=String::new();let mut at=0;loop{anyhow::ensure!(!cancel.is_cancelled(),"Остановлено пользователем");let page=app.tasks.artifact_page(id.into(),at).await?;body.push_str(page["text"].as_str().unwrap_or(""));if page["has_more"]!=true{break;}at=page["next_offset"].as_u64().unwrap() as usize;}
     let value:Value=serde_json::from_str(&body)?;let rows=value["results"].as_array().ok_or_else(||anyhow::anyhow!("Повреждена страница поиска"))?;anyhow::ensure!(offset<=rows.len(),"Курсор за пределами страницы");
-    let mut result=value.clone();result["results"]=json!(rows.iter().skip(offset).take(count).cloned().collect::<Vec<_>>());let next=(offset+count).min(rows.len());result["result_offset"]=json!(offset);result["next_result_offset"]=if next<rows.len(){json!(next)}else{Value::Null};result["page_source"]=descriptor;result["page_result_count"]=json!(rows.len());Ok(result)
+    let mut result=value.clone();result["results"]=json!(rows.iter().skip(offset).take(count).cloned().collect::<Vec<_>>());let next=(offset+count).min(rows.len());result["result_offset"]=json!(offset);result["next_result_offset"]=if next<rows.len(){json!(next)}else{Value::Null};result["page_source"]=descriptor;result["page_result_count"]=json!(rows.len());result["requested_count"]=json!(requested_count);result["packet_limit"]=json!(8);result["returned_count"]=json!(next-offset);Ok(result)
 }
 pub async fn last_plan(app:&crate::api::Shared,run:String)->Result<Value>{
     let source=app.tasks.search_plan_source(run).await?;
