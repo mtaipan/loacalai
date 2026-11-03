@@ -89,6 +89,8 @@ pub struct Plan {
     pub resources: Option<Value>,
     pub window_tokens: usize,
     pub output_tokens: usize,
+    pub requested_output_tokens: usize,
+    pub output_reduced: bool,
     pub input_estimate: usize,
     pub tools_estimate: usize,
     pub history_budget: usize,
@@ -103,20 +105,22 @@ pub fn plan(
     thinking: bool,
     base: usize,
 ) -> Plan {
+    plan_at_cap(config,show,input,tools,thinking,base,None,true)
+}
+fn plan_at_cap(config:&Config,show:&Value,input:usize,tools:usize,thinking:bool,base:usize,effective_cap:Option<usize>,fit_input:bool)->Plan {
     let trained = model_limit(show);
     let cap = (if config.window_tokens == 0 {
         config.auto_max_tokens
     } else {
         config.window_tokens
     })
-    .min(trained);
-    let output = (if thinking {
+    .min(trained).min(effective_cap.unwrap_or(usize::MAX));
+    let requested_output = if thinking {
         config.output_tokens.max(8192)
     } else {
         config.output_tokens
-    })
-    .min(cap.saturating_sub(1536))
-    .max(256);
+    };
+    let mut output=requested_output.min(cap.saturating_sub(1536)).max(256);
     let need = input
         .saturating_add(tools)
         .saturating_add(output)
@@ -133,16 +137,38 @@ pub fn plan(
             .unwrap_or(cap)
             .min(cap);
     }
+    if fit_input{output=output.min(window.saturating_sub(input.saturating_add(tools).saturating_add(512))).max(256);}
     Plan {
         resources: None,
         window_tokens: window,
         output_tokens: output,
+        requested_output_tokens:requested_output,
+        output_reduced:output<requested_output,
         input_estimate: input,
         tools_estimate: tools,
         history_budget: window.saturating_sub(output + tools + 512),
         model_limit: trained,
         estimated: true,
     }
+}
+#[derive(Debug)]
+struct Capacity {window:usize,minimum:usize,tools:usize,output:usize,model:usize}
+impl std::fmt::Display for Capacity{
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{write!(f,"Запрос и обязательные инструкции не помещаются в окно {} токенов: нужно около {} с минимальным резервом ответа (инструменты: около {}, текущий резерв ответа: {}). Текущий запрос сохранён полностью. Выберите большее окно или меньшую часть материала; предел модели — {}. Оценка приблизительная.",self.window,self.minimum,self.tools,self.output,self.model)}
+}
+impl std::error::Error for Capacity{}
+fn capacity(p:&Plan)->anyhow::Error{Capacity{window:p.window_tokens,minimum:p.input_estimate.saturating_add(p.tools_estimate).saturating_add(512+256),tools:p.tools_estimate,output:p.output_tokens,model:p.model_limit}.into()}
+fn resource_error(config:&Config,show:&Value,resources:&Value,error:anyhow::Error)->anyhow::Error{
+    if config.window_tokens!=0{return error;}
+    let Some(issue)=error.downcast_ref::<Capacity>() else{return error;};
+    let cap=config.auto_max_tokens.min(model_limit(show));
+    if resources["safe_window_tokens"].as_u64().is_some_and(|safe|safe<(issue.minimum as u64))&&issue.minimum<=cap{
+        if resources["physical_safe_window_tokens"].as_u64().is_some_and(|safe|safe>=issue.minimum as u64){
+            return crate::resources::MemoryPressure(format!("Для сохранённого запроса и инструментов нужно окно около {} токенов; по текущей RAM доступно около {}. Ожидание освобождения памяти; оценка приблизительная.",issue.minimum,resources["safe_window_tokens"])).into();
+        }
+        return anyhow::anyhow!("Для текущего запроса и инструментов нужно около {} токенов, а оценка RAM устройства допускает около {}. Запрос сохранён. Выберите меньшую модель или обработку материала частями; увеличение предела Авто не добавит RAM. Оценка приблизительная.",issue.minimum,resources["physical_safe_window_tokens"]);
+    }
+    error
 }
 pub fn tools_tokens(tools: &Value) -> usize {
     if tools.is_null() || tools.as_array().is_some_and(|a| a.is_empty()) {
@@ -168,19 +194,31 @@ pub fn prepare(
     thinking: bool,
     base: usize,
 ) -> Result<(Plan, bool)> {
+    prepare_with_cap(history,tools,config,show,thinking,base,None)
+}
+fn prepare_with_cap(history:&mut Vec<Value>,tools:&Value,config:&Config,show:&Value,thinking:bool,base:usize,effective_cap:Option<usize>)->Result<(Plan,bool)>{
     config.validate()?;
-    let mut p = plan(
+    let mut p = plan_at_cap(
         config,
         show,
         history_tokens(history),
         tools_tokens(tools),
         thinking,
         base,
+        effective_cap,false,
     );
-    let reduced=crate::agent::fit_history(history,p.history_budget).map_err(|_|anyhow::anyhow!(
-        "Запрос и обязательные инструкции не помещаются в выбранное окно {} токенов (инструменты: около {}, резерв ответа: {}). Полный текущий запрос сохранён. Увеличьте контекст или предел Авто в настройках; предел модели — {}. Оценка токенов приблизительная.",p.window_tokens,p.tools_estimate,p.output_tokens,p.model_limit))?;
+    // Compact recoverable old rounds before reducing the response reserve. The
+    // mandatory current request and tools receive space before optional thinking.
+    let initial=history_tokens(history);
+    if crate::agent::fit_history(history,p.history_budget).is_err(){
+        p.input_estimate=history_tokens(history);
+        let remaining=p.window_tokens.saturating_sub(p.input_estimate.saturating_add(p.tools_estimate).saturating_add(512));
+        if remaining>=256 {p.output_tokens=p.output_tokens.min(remaining);p.output_reduced=p.output_tokens<p.requested_output_tokens;p.history_budget=p.window_tokens.saturating_sub(p.output_tokens+p.tools_estimate+512);}
+    }
+    p.input_estimate=history_tokens(history);
+    let reduced=crate::agent::fit_history(history,p.history_budget).map_err(|_|capacity(&p))?;
     p.input_estimate = history_tokens(history);
-    Ok((p, reduced))
+    Ok((p, reduced||history_tokens(history)!=initial))
 }
 pub async fn configure_payload(
     app: &crate::api::Shared,
@@ -189,22 +227,24 @@ pub async fn configure_payload(
     base: usize,
 ) -> Result<Plan> {
     let settings = app.settings.lock().await.clone();
-    let mut config = settings.context.clone();
+    let config = settings.context.clone();
     config.validate()?;
+    let mut fitted=config.clone();
     let show = crate::thinking::show(app, model).await?;
     let owned=crate::engine::owns_engine();
     let mut resources=if owned{
         let memory=tokio::task::spawn_blocking(crate::resources::memory).await?;
-        crate::resources::fit_context(&mut config,&show,&memory,settings.compute.backend=="cpu"||crate::compute::force_cpu(app,&settings.compute).await)?
+        crate::resources::fit_context(&mut fitted,&show,&memory,settings.compute.backend=="cpu"||crate::compute::force_cpu(app,&settings.compute).await)?
     }else{json!({"estimated":false,"reason":"external_engine_resources_unknown"})};
     resources["engine_owned"]=json!(owned);
     let requested=settings.compute.cpu_threads;
     let cpu=tokio::task::spawn_blocking(move||crate::resources::cpu_threads(requested,owned)).await??;
     if let Some(threads)=cpu["effective_threads"].as_u64(){payload["options"]["num_thread"]=json!(threads);}
     resources["cpu_threads"]=cpu;
+    let effective_cap=if config.window_tokens==0{Some(fitted.auto_max_tokens)}else{None};
     let definitions=payload["tools"].clone();let thinking=thinking_enabled(&payload["think"],&show);
     if let Some(messages)=payload.get_mut("messages").and_then(Value::as_array_mut){
-        let(mut p,_)=prepare(messages,&definitions,&config,&show,thinking,base)?;p.resources=Some(resources);
+        let(mut p,_)=prepare_with_cap(messages,&definitions,&config,&show,thinking,base,effective_cap).map_err(|error|resource_error(&config,&show,&resources,error))?;p.resources=Some(resources);
         payload["options"]["num_ctx"]=json!(p.window_tokens);payload["options"]["num_predict"]=json!(p.output_tokens);return Ok(p);
     }
     let tools = tools_tokens(&payload["tools"]);
@@ -218,16 +258,16 @@ pub async fn configure_payload(
                 .unwrap_or(&[]),
         )
     };
-    let mut p = plan(
+    let mut p = plan_at_cap(
         &config,
         &show,
         input,
         tools,
         thinking_enabled(&payload["think"], &show),
-        base,
+        base,effective_cap,true,
     );
     p.resources = Some(resources);
-    anyhow::ensure!(input<=p.history_budget,"Для этого запроса нужно больше выбранного контекста {}. Запрос сохранён; увеличьте окно или предел Авто в настройках. Предел модели: {}.",p.window_tokens,p.model_limit);
+    if input>p.history_budget{return Err(resource_error(&config,&show,p.resources.as_ref().unwrap(),capacity(&p)));}
     payload["options"]["num_ctx"] = json!(p.window_tokens);
     payload["options"]["num_predict"] = json!(p.output_tokens);
     Ok(p)
@@ -235,6 +275,33 @@ pub async fn configure_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resource_constrained_required_input_waits_but_real_model_or_manual_limits_do_not(){
+        let config=Config::default();let show=json!({"model_info":{"x.context_length":262144}});let resources=json!({"safe_window_tokens":9987,"physical_safe_window_tokens":65536});
+        let error=Capacity{window:9987,minimum:12000,tools:2286,output:256,model:262144};
+        assert!(resource_error(&config,&show,&resources,error.into()).is::<crate::resources::MemoryPressure>());
+        let p=plan(&config,&show,40000,0,false,8192);
+        assert!(!resource_error(&config,&show,&resources,capacity(&p)).is::<crate::resources::MemoryPressure>());
+        let manual=Config{window_tokens:9987,..config};
+        assert!(!resource_error(&manual,&show,&resources,Capacity{window:9987,minimum:12000,tools:2286,output:256,model:262144}.into()).is::<crate::resources::MemoryPressure>());
+    }
+    #[test]
+    fn response_reserve_never_crowds_out_short_request_and_tool_definitions(){
+        let show=json!({"model_info":{"qwen.context_length":262144}});
+        let mut history=vec![json!({"role":"system","content":"s".repeat(1800)}),json!({"role":"user","content":"симонс"})];
+        let tools=json!([{"function":{"name":"search","description":"t".repeat(6700)}}]);
+        let original=history.clone();let (p,_)=prepare_with_cap(&mut history,&tools,&Config::default(),&show,true,16384,Some(9987)).unwrap();
+        assert_eq!(history,original);assert_eq!(p.window_tokens,9987);assert_eq!(p.requested_output_tokens,8192);assert!(p.output_reduced);
+        assert!(p.output_tokens>=256);assert!(p.input_estimate+p.tools_estimate+p.output_tokens+512<=p.window_tokens);
+        // Runtime RAM ceilings are not invalid user preferences (Auto minimum8k).
+        let (p,_)=prepare_with_cap(&mut history,&json!([]),&Config::default(),&show,true,16384,Some(4096)).unwrap();assert_eq!(p.window_tokens,4096);
+        let p=plan_at_cap(&Config::default(),&show,1500,2286,true,16384,Some(9987),true);assert_eq!(p.output_tokens,5689);assert_eq!(p.history_budget,1500);
+    }
+    #[test]
+    fn recoverable_history_is_removed_before_optional_response_reserve_is_reduced(){
+        let mut history=vec![json!({"role":"system","content":"rules"}),json!({"role":"user","content":"old".repeat(20000)}),json!({"role":"assistant","content":"old reply"}),json!({"role":"user","content":"current task"})];
+        let (p,changed)=prepare_with_cap(&mut history,&json!([]),&Config::default(),&json!({}),true,16384,Some(9987)).unwrap();assert!(changed);assert_eq!(p.output_tokens,8192);assert!(!p.output_reduced);assert_eq!(history.last().unwrap()["content"],"current task");
+    }
     #[test]
     fn accounting_includes_tools_output_and_model_limit() {
         let show = json!({"model_info":{"qwen3moe.context_length":262144}});

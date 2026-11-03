@@ -206,7 +206,7 @@ pub fn fit_context(
     anyhow::ensure!(physical_safe>=required as u64,"Контекст {} превышает оценку RAM устройства (около {physical_safe} токенов после резерва ОС). Выберите Авто или уменьшите окно; запрос сохранён",required);
     if safe<required{return Err(MemoryPressure(format!("Для контекста {required} токенов пока доступно около {safe}; оценка приблизительная.")).into());}
     if config.window_tokens==0{config.auto_max_tokens=config.auto_max_tokens.min(safe);}
-    Ok(json!({"estimated":true,"kv_bytes_per_token":per_token,"weights_bytes":weights,"os_reserve_bytes":reserve,"safe_window_tokens":safe,"memory":memory}))
+    Ok(json!({"estimated":true,"kv_bytes_per_token":per_token,"weights_bytes":weights,"os_reserve_bytes":reserve,"safe_window_tokens":safe,"physical_safe_window_tokens":physical_safe,"memory":memory}))
 
 }
 
