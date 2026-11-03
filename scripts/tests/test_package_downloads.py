@@ -48,7 +48,7 @@ try:
         except RuntimeError as e:assert 'identity changed' in str(e)
     assert old.exists(),'previous bytes remain separate'
     print('PASS changed same-length archive gets separate cache; mid-download identity change fails before publication')
-    for validator in [None,'W/"weak-version"']:
+    for validator in [None,'W/"weak-version"','not-a-valid-etag']:
         etag=validator;before=len(calls)
         for _ in range(2):
             with package.RangeZip(url,root) as archive:assert archive.disk is None and archive.read(8)==body[:8]

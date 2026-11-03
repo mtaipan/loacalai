@@ -6,6 +6,9 @@ Every ZIP member is CRC checked by zipfile; extracted paths are allowlisted.
 import argparse,hashlib,io,json,os,re,shutil,sys,time,urllib.request,uuid,zipfile
 from pathlib import Path,PurePosixPath
 
+def strong_etag(value):
+    return value is not None and re.fullmatch(r'"[\x21\x23-\x7e\x80-\xff]*"',value) is not None
+
 class RangeZip(io.RawIOBase):
     block_size=4*1024*1024
     def __init__(self,url,cache_directory=None):
@@ -18,7 +21,7 @@ class RangeZip(io.RawIOBase):
             if len(response.read(2))!=1:raise RuntimeError('Invalid archive length response')
         # A Last-Modified timestamp/weak ETag cannot identify bytes across restarts.
         # Keep those sessions usable, but do not reuse their blocks from disk.
-        if cache_directory is not None and self.etag and not self.etag.lstrip().startswith('W/'):
+        if cache_directory is not None and strong_etag(self.etag):
             base=Path(cache_directory).absolute()
             if base.resolve()!=base:raise RuntimeError('Download cache follows a link')
             base.mkdir(parents=True,exist_ok=True)
@@ -31,7 +34,7 @@ class RangeZip(io.RawIOBase):
     def _open(self,start,end):
         last=None
         headers={'Range':f'bytes={start}-{end}','User-Agent':'LocalGemmaStudio','Accept-Encoding':'identity'}
-        if self.etag and not self.etag.lstrip().startswith('W/'):headers['If-Range']=self.etag
+        if strong_etag(self.etag):headers['If-Range']=self.etag
         elif self.modified:headers['If-Range']=self.modified
         for attempt in range(3):
             try:return self.opener.open(urllib.request.Request(self.url,headers=headers),timeout=60)
