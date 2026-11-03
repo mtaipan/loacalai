@@ -1,5 +1,6 @@
 """Offline document processing; PDFium is isolated in this worker process."""
-import hashlib,json,re,tempfile,zipfile
+import hashlib,json,re,tempfile,zipfile,sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -33,11 +34,10 @@ def paragraph_text(p):
         for child in node:yield from walk(child)
     return ''.join(walk(p))
 
-def paragraph_units(tree,name):
+def iter_paragraph_units(tree,name):
     """Merge adjacent text with identical formatting, retaining every XML node."""
     parents={child:parent for parent in tree.iter() for child in parent}
     ids={node:name+'#'+str(i) for i,node in enumerate(tree.iter(W+'t'))}
-    units=[]
     for index,p in enumerate(tree.iter(W+'p')):
         segments=[]
         def walk(node):
@@ -63,8 +63,9 @@ def paragraph_units(tree,name):
         text=''.join(part['text'] for part in segments)
         if not text.strip():continue
         for number,part in enumerate(segments):part.pop('_key',None);part['id']='lg'+str(number)
-        units.append({'id':name+'#p'+str(index),'text':text,'marked':len(segments)!=1,'segments':segments})
-    return units
+        yield {'id':name+'#p'+str(index),'text':text,'marked':len(segments)!=1,'segments':segments}
+
+def paragraph_units(tree,name):return list(iter_paragraph_units(tree,name))
 
 
 def paragraph_input(unit):
@@ -74,7 +75,7 @@ def paragraph_input(unit):
 
 
 def paragraph_translation(unit,translated):
-    if not isinstance(translated,str) or not translated.strip() or len(translated)>40000:raise ValueError('Пустой или слишком большой перевод абзаца.')
+    if not isinstance(translated,str) or not translated.strip():raise ValueError('Пустой перевод абзаца.')
     text_segments=[s for s in unit['segments'] if s['kind']=='text']
     if not unit['marked']:return {text_segments[0]['id']:translated}
     value=translated.strip()
@@ -102,42 +103,61 @@ def paragraph_translation(unit,translated):
     return mapping
 
 
-def docx_read(path,plan=False,paragraph_mode=False):
+class CheckpointTranslations(Mapping):
+    def __init__(self,database,job):
+        self.db=sqlite3.connect(Path(database).resolve().as_uri()+'?mode=ro',uri=True)
+        self.db.execute('PRAGMA query_only=ON');self.job=job
+        if self.db.execute('PRAGMA user_version').fetchone()[0] not in (10,11):self.db.close();raise ValueError('Неизвестная версия сохранённых переводов.')
+    def __len__(self):return self.db.execute('SELECT COUNT(*) FROM document_parts WHERE job=?',(self.job,)).fetchone()[0]
+    def __iter__(self):return (row[0] for row in self.db.execute('SELECT unit FROM document_parts WHERE job=? ORDER BY unit',(self.job,)))
+    def __getitem__(self,key):
+        row=self.db.execute('SELECT result FROM document_parts WHERE job=? AND unit=?',(self.job,key)).fetchone()
+        if row is None:raise KeyError(key)
+        return json.loads(row[0])
+
+def docx_spool(path,output):
     archive,trees=docx_parts(path)
     try:
-        units=[];paragraphs=[];whole=[]
+        count=0;sample='';digest=hashlib.sha256()
+        with Path(output).open('wb') as stream:
+            for name,tree in trees.items():
+                for unit in iter_paragraph_units(tree,name):
+                    unit['input']=paragraph_input(unit)
+                    block=(json.dumps(unit,ensure_ascii=False,separators=(',',':'),sort_keys=True)+'\n').encode('utf-8')
+                    stream.write(block);digest.update(block);count+=1
+                    if len(sample)<4096:sample+=(unit['text']+'\n')[:4096-len(sample)]
+        return {'format':'docx','translation_mode':'paragraph-v2','units_count':count,'paragraphs_count':count,'complete':True,'plan_sha256':digest.hexdigest(),'sample_text':sample,'plan_storage':'jsonl-v1','warnings':['Перевод абзацами с проверкой меток форматирования. Разрывы страниц могут сместиться; текст в изображениях и диаграммах не переводится.']}
+    finally:archive.close()
+
+def docx_read(path,plan=False,paragraph_mode=False,offset=0,max_characters=20000):
+    if plan:raise ValueError('Для плана перевода используйте дисковую подготовку prepare.')
+    if offset<0 or not 1<=max_characters<=20000:raise ValueError('Неверный диапазон текста DOCX.')
+    archive,trees=docx_parts(path)
+    try:
+        units_count=0;paragraphs_count=0;paragraphs=[]
         for name,tree in trees.items():
-            whole.extend(paragraph_units(tree,name))
+
             if name!='word/document.xml':
                 label='Верхний колонтитул' if '/header' in name else 'Нижний колонтитул' if '/footer' in name else 'Концевые сноски' if '/endnotes' in name else 'Сноски'
                 paragraphs.append('\n['+label+']')
             for index,p in enumerate(tree.iter(W+'p')):
                 text=paragraph_text(p)
                 if not text.strip():continue
+                paragraphs_count+=1
                 style=p.find('./'+W+'pPr/'+W+'pStyle');style=style.get(W+'val','') if style is not None else ''
                 level=re.search(r'(?:heading|заголовок)\s*([1-6])',style,re.I)
                 paragraphs.append(('#'*int(level[1])+' ' if level else '')+text)
             for index,t in enumerate(tree.iter(W+'t')):
-                if (t.text or '').strip():units.append({'id':name+'#'+str(index),'text':t.text})
+                if (t.text or '').strip():units_count+=1
         text='\n\n'.join(paragraphs)
-        result={'format':'docx','units_count':len(units),'complete':True,'warnings':['Перевод выполняется по текстовым фрагментам с сохранением таблиц и стилей. Контекст между фрагментами и исходные разрывы страниц могут измениться. Текст внутри изображений и диаграмм не переводится.']}
-        result['paragraphs_count']=len(whole)
+        result={'format':'docx','units_count':units_count,'complete':True,'warnings':['Перевод выполняется по текстовым фрагментам с сохранением таблиц и стилей. Контекст между фрагментами и исходные разрывы страниц могут измениться. Текст внутри изображений и диаграмм не переводится.']}
+        result['paragraphs_count']=paragraphs_count
         if paragraph_mode:
             result['translation_mode']='paragraph-v2'
             result['warnings']=['Перевод целыми абзацами с сохранением таблиц, стилей и ссылок. Метки форматирования проверяются перед сохранением; при ошибке документ не создаётся. Разрывы страниц могут сместиться; текст внутри изображений и диаграмм не переводится.']
-        if plan and paragraph_mode:
-            if len(whole)>300 or len(units)>3000 or sum(len(u['text']) for u in whole)>40000:raise ValueError('Для перевода DOCX: до 300 абзацев, 3000 текстовых узлов и 40000 символов. Разделите документ.')
-            for unit in whole:
-                if len(unit['text'])>4000 or len(unit['segments'])>60:raise ValueError('Абзац слишком большой: до 4000 символов и 60 участков форматирования. Разделите длинный абзац.')
-                unit['input']=paragraph_input(unit)
-                if len(unit['input'])>9000:raise ValueError('Слишком сложная разметка абзаца. Разделите его.')
-            result['units']=whole
-        elif plan:
-            if len(units)>300 or sum(len(u['text']) for u in units)>40000:raise ValueError('Для перевода DOCX: до 300 текстовых фрагментов и 40000 символов. Разделите документ.')
-            result['units']=units
-        else:
-            result['text']=text[:40000];result['complete']=len(text)<=40000
-            if not result['complete']:result['warnings'].append('Чтение сокращено до 40000 символов. Для полного чтения разделите DOCX.')
+        if offset>len(text):raise ValueError('Начало диапазона вне текста DOCX.')
+        end=min(len(text),offset+max_characters)
+        result.update({'text':text[offset:end],'start_offset':offset,'end_offset':end,'total_characters':len(text),'next_offset':end if end<len(text) else None,'has_more':end<len(text),'complete':offset==0 and end==len(text),'range_complete':end==len(text)})
         return result
     finally:archive.close()
 
@@ -145,8 +165,9 @@ def docx_export(path,output,translations,paragraph_mode=False):
     archive,trees=docx_parts(path)
     try:
         if paragraph_mode:
-            units=[u for name,tree in trees.items() for u in paragraph_units(tree,name)]
-            if not isinstance(translations,dict) or set(translations)!={u['id'] for u in units}:raise ValueError('Набор переводов не совпадает с исходными абзацами DOCX.')
+            expected_units={u['id'] for name,tree in trees.items() for u in iter_paragraph_units(tree,name)}
+            if not isinstance(translations,Mapping) or set(translations)!=expected_units:raise ValueError('Набор переводов не совпадает с исходными абзацами DOCX.')
+            units=(u for name,tree in trees.items() for u in iter_paragraph_units(tree,name))
             nodes={name+'#'+str(i):node for name,tree in trees.items() for i,node in enumerate(tree.iter(W+'t'))}
             expected=set()
             for unit in units:
@@ -199,11 +220,12 @@ def docx_export(path,output,translations,paragraph_mode=False):
         return {'verified':True,'translated_units':len(expected)}
     finally:archive.close()
 
-def pdf_read(path,start=1,count=5,ocr=False,language='en-US',plan=False):
+def pdf_read(path,start=1,count=5,ocr=False,language='en-US',plan=False,offset=0,max_characters=20000):
     try:import pypdfium2 as pdfium
     except ImportError:raise ValueError('Модуль PDF не установлен. Обновите компоненты приложения (pypdfium2).')
     if not 1<=count<=5 or start<1:raise ValueError('PDF: начальная страница от 1, за один раз от 1 до 5 страниц.')
-    document=pdfium.PdfDocument(str(path))
+    if offset<0 or not 1<=max_characters<=20000:raise ValueError('Неверный диапазон текста PDF.')
+    document=pdfium.PdfDocument(path if isinstance(path,bytes) else str(path))
     try:
         total=len(document)
         if start>total:raise ValueError(f'В PDF {total} страниц; начальная страница вне диапазона.')
@@ -227,12 +249,18 @@ def pdf_read(path,start=1,count=5,ocr=False,language='en-US',plan=False):
                 if not text:warnings.append(f'Страница {number}: текст не извлечён. Если это скан, включите OCR; смешанные страницы могут требовать ручного OCR области.')
                 units.append({'id':str(number),'page':number,'text':text})
             finally:page.close()
-        if sum(len(u['text']) for u in units)>40000:raise ValueError('Извлечено больше 40000 символов. Уменьшите число страниц.')
+
         end=units[-1]['page'];result={'format':'pdf','total_pages':total,'start_page':start,'end_page':end,'has_more':end<total,'next_page':end+1 if end<total else None,'complete':start==1 and end==total,'warnings':warnings+['PDF переводится в Markdown по страницам; исходная вёрстка и таблицы PDF не восстанавливаются.'],'ocr_pages':ocr_pages}
         if plan:result['units']=units
-        else:result['text']='\n\n'.join(f"## Страница {u['page']}\n\n{u['text']}" for u in units)
+        else:
+            text='\n\n'.join(f"## Страница {u['page']}\n\n{u['text']}" for u in units)
+            if offset>len(text):raise ValueError('Начало диапазона вне текста PDF.')
+            text_end=min(len(text),offset+max_characters);more_text=text_end<len(text)
+            result.update({'text':text[offset:text_end],'text_scope':{'start_page':start,'max_pages':count},'start_offset':offset,'end_offset':text_end,'total_characters':len(text),'next_offset':text_end if more_text else None,'has_more_text':more_text,'has_more':more_text or end<total,'complete':result['complete'] and offset==0 and not more_text,'range_complete':not more_text})
         return result
     finally:document.close()
+
+class SourceChanged(ValueError):code='source_changed'
 
 def process(request):
     operation=request.get('operation','extract')
@@ -247,16 +275,30 @@ def process(request):
         if hashlib.sha256(source_bytes).hexdigest()!=request.get('source_sha256'):raise ValueError('Исходный DOCX изменён во время перевода. Повторите операцию.')
         import io
         mode=request.get('translation_mode')=='paragraph-v2'
-        result=docx_export(io.BytesIO(source_bytes),Path(request['output']),request['translations'],mode)
-        if mode and all(v['unchanged'] for v in request['translations'].values()):Path(request['output']).write_bytes(source_bytes)
-        return result
+        translations=CheckpointTranslations(request['checkpoint_database'],request['checkpoint']) if request.get('checkpoint_database') else request['translations']
+        try:
+            result=docx_export(io.BytesIO(source_bytes),Path(request['output']),translations,mode)
+            if mode and all(v['unchanged'] for v in translations.values()):Path(request['output']).write_bytes(source_bytes)
+            return result
+        finally:
+            if isinstance(translations,CheckpointTranslations):translations.db.close()
     plan=operation=='plan'
     if path.suffix.lower()=='.docx':
         import io
         source_bytes=path.read_bytes()
         if len(source_bytes)>80*1024*1024:raise ValueError('Документ больше 80 МБ.')
-        result=docx_read(io.BytesIO(source_bytes),plan,bool(request.get('paragraph_mode')))
-    elif path.suffix.lower()=='.pdf':result=pdf_read(path,int(request.get('start_page',1)),int(request.get('max_pages',5)),bool(request.get('ocr',False)),request.get('language') or 'en-US',plan)
+        result=docx_spool(io.BytesIO(source_bytes),request['_plan_path']) if operation=='prepare' else docx_read(io.BytesIO(source_bytes),plan,bool(request.get('paragraph_mode')),int(request.get('text_offset',0)),int(request.get('max_characters',20000)))
+    elif path.suffix.lower()=='.pdf':
+        source_bytes=path.read_bytes()
+        result=pdf_read(source_bytes,int(request.get('start_page',1)),int(request.get('max_pages',5)),bool(request.get('ocr',False)),request.get('language') or 'en-US',plan or operation=='prepare',int(request.get('text_offset',0)),int(request.get('max_characters',20000)))
+        if operation=='prepare':
+            units=result.pop('units');digest=hashlib.sha256();sample=''
+            with Path(request['_plan_path']).open('wb') as stream:
+                for unit in units:
+                    block=(json.dumps(unit,ensure_ascii=False,separators=(',',':'),sort_keys=True)+'\n').encode('utf-8');stream.write(block);digest.update(block)
+                    if len(sample)<4096:sample+=(unit['text']+'\n')[:4096-len(sample)]
+            result.update({'units_count':len(units),'plan_sha256':digest.hexdigest(),'sample_text':sample,'plan_storage':'jsonl-v1'})
     else:raise ValueError('Поддерживаются PDF и DOCX.')
-    result['source_sha256']=hashlib.sha256(source_bytes if path.suffix.lower()=='.docx' else path.read_bytes()).hexdigest()
+    result['source_sha256']=hashlib.sha256(source_bytes).hexdigest()
+    if request.get('source_sha256') and request['source_sha256']!=result['source_sha256']:raise SourceChanged('Документ изменился между диапазонами. Откройте его заново; прежний текст сохранён в истории.')
     return result

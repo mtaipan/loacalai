@@ -11,4 +11,4 @@ try:
         Path(request['_result_path']).write_text(output,encoding='utf-8');print('{"result_file":true}')
     else:print(output)
 except Exception as error:
-    print(json.dumps({'error':str(error)},ensure_ascii=False));sys.exit(1)
+    print(json.dumps({'error':str(error),'code':getattr(error,'code',None)},ensure_ascii=False));sys.exit(1)
