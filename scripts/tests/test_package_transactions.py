@@ -103,13 +103,13 @@ try:
     with zipfile.ZipFile(archive,'w',compression=zipfile.ZIP_STORED) as output:
         output.writestr(str(paths[0]),b'ARCHIVE_ONE');output.writestr(str(paths[1]),b'ARCHIVE_TWO')
     data=archive.getvalue();corrupt=data.replace(b'ARCHIVE_TWO',b'CORRUPT_TWO',1)
-    original=package.RangeZip;package.RangeZip=lambda url:io.BytesIO(corrupt)
+    original=package.RangeZip;package.RangeZip=lambda url,cache_directory=None:io.BytesIO(corrupt)
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             try:package.install(case,'cuda','1.2.3');raise AssertionError('CRC failure ignored')
             except zipfile.BadZipFile:pass
         old(target);assert not list(package.jobs_root(case).iterdir())
-        package.RangeZip=lambda url:io.BytesIO(data)
+        package.RangeZip=lambda url,cache_directory=None:io.BytesIO(data)
         with contextlib.redirect_stdout(io.StringIO()):package.install(case,'cuda','1.2.3')
         assert target.joinpath(*paths[0].parts).read_bytes()==b'ARCHIVE_ONE'
         assert json.loads((target/'cuda-package.json').read_bytes())['version']=='1.2.3'

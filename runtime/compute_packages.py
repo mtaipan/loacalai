@@ -8,37 +8,83 @@ from pathlib import Path,PurePosixPath
 
 class RangeZip(io.RawIOBase):
     block_size=4*1024*1024
-    def __init__(self,url):
-        super().__init__();self.opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));self.url=url;self.pos=0;self.cache_start=-1;self.cache=b''
+    def __init__(self,url,cache_directory=None):
+        super().__init__();self.opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));self.url=url;self.pos=0;self.cache_start=-1;self.cache=b'';self.etag=None;self.modified=None;self.disk=None
+        original_url=url
         with self._open(0,0) as response:
             match=re.fullmatch(r'bytes 0-0/(\d+)',response.headers.get('Content-Range',''))
             if response.status!=206 or not match:raise RuntimeError('Server must support HTTP byte ranges')
-            self.size=int(match[1]);self.url=response.geturl();response.read()
+            self.size=int(match[1]);self.url=response.geturl();self.etag=response.headers.get('ETag');self.modified=response.headers.get('Last-Modified')
+            if len(response.read(2))!=1:raise RuntimeError('Invalid archive length response')
+        # A Last-Modified timestamp/weak ETag cannot identify bytes across restarts.
+        # Keep those sessions usable, but do not reuse their blocks from disk.
+        if cache_directory is not None and self.etag and not self.etag.lstrip().startswith('W/'):
+            base=Path(cache_directory).absolute()
+            if base.resolve()!=base:raise RuntimeError('Download cache follows a link')
+            base.mkdir(parents=True,exist_ok=True)
+            identity={'version':1,'url':original_url,'etag':self.etag,'size':self.size,'block_size':self.block_size}
+            key=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
+            self.disk=base/key
+            if self.disk.resolve()!=self.disk:raise RuntimeError('Download cache entry follows a link')
+            self.disk.mkdir(exist_ok=True)
+            atomic_json(self.disk/'identity.json',identity)
     def _open(self,start,end):
         last=None
+        headers={'Range':f'bytes={start}-{end}','User-Agent':'LocalGemmaStudio','Accept-Encoding':'identity'}
+        if self.etag and not self.etag.lstrip().startswith('W/'):headers['If-Range']=self.etag
+        elif self.modified:headers['If-Range']=self.modified
         for attempt in range(3):
-            try:return self.opener.open(urllib.request.Request(self.url,headers={'Range':f'bytes={start}-{end}','User-Agent':'LocalGemmaStudio'}),timeout=60)
+            try:return self.opener.open(urllib.request.Request(self.url,headers=headers),timeout=60)
             except Exception as e:last=e;time.sleep(attempt)
         raise last
+    def _cached(self,start,length):
+        if self.disk is None:return None
+        block=self.disk/str(start);metadata=self.disk/(str(start)+'.json')
+        if block.resolve()!=block or metadata.resolve()!=metadata:raise RuntimeError('Download block follows a link')
+        try:
+            if block.stat().st_size!=length or metadata.stat().st_size>4096:return None
+            record=json.loads(metadata.read_text(encoding='utf-8'))
+            with block.open('rb') as source:data=source.read(length+1)
+            if len(data)==length and record=={'length':length,'sha256':hashlib.sha256(data).hexdigest()}:return data
+        except (FileNotFoundError,ValueError,KeyError):pass
+        return None
+    def _save(self,start,data):
+        if self.disk is None:return
+        block=self.disk/str(start);metadata=self.disk/(str(start)+'.json')
+        if block.resolve()!=block or metadata.resolve()!=metadata:raise RuntimeError('Download block follows a link')
+        temporary=self.disk/(str(start)+'.'+uuid.uuid4().hex+'.part')
+        try:
+            with temporary.open('xb') as output:output.write(data);output.flush();os.fsync(output.fileno())
+            os.replace(temporary,block)
+            atomic_json(metadata,{'length':len(data),'sha256':hashlib.sha256(data).hexdigest()})
+        finally:
+            if temporary.exists():temporary.unlink()
+    def _block(self,start,end):
+        data=self._cached(start,end-start+1)
+        if data is not None:return data
+        with self._open(start,end) as response:
+            if response.status!=206 or response.headers.get('Content-Range')!=f'bytes {start}-{end}/{self.size}':raise RuntimeError('Archive changed or invalid HTTP byte range response')
+            if self.etag!=response.headers.get('ETag') or self.modified!=response.headers.get('Last-Modified'):raise RuntimeError('Archive identity changed during download; retry uses a separate cache')
+            data=response.read(end-start+2)
+        if len(data)!=end-start+1:raise RuntimeError('Incomplete HTTP byte range')
+        self._save(start,data)
+        return data
     def seekable(self):return True
     def readable(self):return True
     def tell(self):return self.pos
     def seek(self,offset,whence=0):
-        self.pos=offset if whence==0 else self.pos+offset if whence==1 else self.size+offset
-        if self.pos<0:raise ValueError('Negative ZIP position')
-        return self.pos
+        if whence not in (0,1,2):raise ValueError('Invalid seek mode')
+        position=offset if whence==0 else self.pos+offset if whence==1 else self.size+offset
+        if position<0:raise ValueError('Negative ZIP position')
+        self.pos=position;return self.pos
     def read(self,n=-1):
-        if n<0:n=self.size-self.pos
-        n=min(n,self.size-self.pos)
+        if n<0:n=max(0,self.size-self.pos)
+        n=min(n,max(0,self.size-self.pos))
         result=bytearray()
         while n>0:
             if not self.cache_start<=self.pos<self.cache_start+len(self.cache):
                 start=self.pos//self.block_size*self.block_size;end=min(self.size-1,start+self.block_size-1)
-                with self._open(start,end) as response:
-                    if response.status!=206 or response.headers.get('Content-Range')!=f'bytes {start}-{end}/{self.size}':raise RuntimeError('Invalid HTTP byte range response')
-                    self.cache=response.read(end-start+2)
-                if len(self.cache)!=end-start+1:raise RuntimeError('Incomplete HTTP byte range')
-                self.cache_start=start
+                self.cache=self._block(start,end);self.cache_start=start
             offset=self.pos-self.cache_start;take=min(n,len(self.cache)-offset)
             result.extend(self.cache[offset:offset+take]);self.pos+=take;n-=take
         return bytes(result)
@@ -198,7 +244,7 @@ def install(root,backend,version,list_only=False):
     asset='ollama-windows-'+arch+('-rocm' if backend=='rocm' else '')+'.zip'
     url=f'https://github.com/ollama/ollama/releases/download/v{version}/{asset}'
     print(json.dumps({'status':'index','backend':backend,'version':version}),flush=True)
-    with RangeZip(url) as remote,zipfile.ZipFile(remote) as archive:
+    with RangeZip(url,root/'data/package-downloads') as remote,zipfile.ZipFile(remote) as archive:
         selected=list(members(archive,backend))
         if not selected:raise RuntimeError('Matching GPU libraries are absent from the release archive')
         total=sum(e.file_size for e,_ in selected)
