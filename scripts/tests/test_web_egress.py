@@ -61,6 +61,8 @@ db.commit();db.close()
 # The new document tables do not change the web-authority contract.
 compat=worker.Authority(str(database),'20');compat.db.close()
 with worker.sqlite3.connect(database) as upgrade:upgrade.execute('PRAGMA user_version=10')
+# The browser reads authority independently of additional application tables.
+with worker.sqlite3.connect(database) as upgrade:upgrade.execute('PRAGMA user_version=11')
 authority=worker.Authority(str(database),'20')
 assert authority.user_origin(local) and authority.supplied('secret-from-original-message') and not authority.supplied('invented')
 for port in range(8100,8400):assert authority.user_origin(f'http://localhost:{port}')

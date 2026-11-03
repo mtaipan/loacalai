@@ -92,7 +92,7 @@ async function pageConversation(direction){
   const version=navigationVersion,request=++historyPageRequest,id=chat.id;
   document.querySelectorAll('[data-message-page]').forEach(button=>button.disabled=true);
   try{
-    const options=direction==='latest'?{}:{before:direction==='older'?p.start:Math.min(p.total,p.end+p.limit),revision:p.revision};
+    const options=direction==='latest'?{}:{before:direction==='older'?p.before:p.newer_before,revision:p.revision};
     const next=await fetchChat(id,options);
     if(request!==historyPageRequest||version!==navigationVersion||state.chat!==chat)return;
     state.chat=next;if(currentSession().busy)currentSession().chat=next;state.scrollFollow=false;renderMessages();
@@ -105,7 +105,7 @@ async function finishConversationRun(session,id,run=session.run){
   // clear the stream of the next run in this conversation.
   if(!run||session.run!==run)return;
   let finished= session.chat;
-  if(visibleConversation()===id)try{finished=await fetchChat(id,state.chat?.message_page?.at_latest===false?{before:state.chat.message_page.end}:{});}catch(error){
+  if(visibleConversation()===id)try{finished=await fetchChat(id,state.chat?.message_page?.at_latest===false?{before:state.chat.message_page.cursor_end??state.chat.message_page.end}:{});}catch(error){
     toast('Не удалось загрузить сохранённую историю. Показана полученная часть ответа: '+error.message,true);
     const chat=session.chat||state.chat;
     if(chat?.id===id)finished={...chat,messages:[...chat.messages,{id:run+'-local',role:'assistant',content:session.streamText,tools:session.streamTools,created:new Date().toISOString(),diagnostics:{recovery_pending:true}}]};

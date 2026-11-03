@@ -52,7 +52,7 @@ pub fn local_inference() -> bool {
         })
 }
 pub async fn ensure_ollama(app: &Shared) -> Result<()> {
-    let config = app.settings.lock().await.compute.clone();
+    let config = crate::generation::capture(app).await.compute.clone();
     crate::compute::ensure(app, &config).await
 }
 pub async fn emit(tx: &mpsc::Sender<Value>, value: Value) -> Result<()> {
@@ -89,7 +89,7 @@ async fn model_attempt(
         .resources
         .acquire(app.client.clone(), model, cancel)
         .await?;
-    let config = app.settings.lock().await.compute.clone();
+    let config = crate::generation::capture(app).await.compute.clone();
     let force = crate::compute::force_cpu(app, &config).await;
     if force && config.backend != "cpu" {
         emit(tx,json!({"type":"notice","message":"Используется резервный режим CPU. Причина доступна в настройках вычислений."})).await?;
@@ -179,7 +179,7 @@ async fn model_once(
     crate::model_adapter::prepare(app, model).await?;
     let mut payload = json!({"model":model,"messages":messages,"stream":true,"think":think,"keep_alive":0,"options":{"temperature":0.1}});
     if messages.first().is_some_and(|m| m["role"] == "system") {
-        let config = app.settings.lock().await.assistant.clone();
+        let config = crate::generation::capture(app).await.assistant.clone();
         payload["options"]["temperature"] = json!(if agent_style {
             config.agent_temperature
         } else {
@@ -213,7 +213,7 @@ async fn model_once(
     if crate::models::valid(model, "translate") {
         payload["options"]["temperature"] = json!(0);
     }
-    let config=app.settings.lock().await.compute.clone();
+    let config=crate::generation::capture(app).await.compute.clone();
     if force_cpu {
         payload["options"]["num_gpu"] = json!(0);
     }
@@ -534,7 +534,7 @@ pub async fn translate_tool(
     target: &str,
     cancel: &CancellationToken,
 ) -> Result<String> {
-    let selected = app.settings.lock().await.translation_model.clone();
+    let selected = crate::generation::capture(app).await.translation_model.clone();
     translate_tool_with_model(app, text, source, target, &selected, cancel).await
 }
 pub async fn translate_tool_with_model(
@@ -738,7 +738,7 @@ pub(crate) async fn review_call(
     stats: &mut Vec<Value>,
 ) -> Result<String> {
     let mut history = review_history(question, material);
-    let config = app.settings.lock().await.context.clone();
+    let config = crate::generation::capture(app).await.context.clone();
     let show = crate::thinking::show_cancellable(app, selected, cancel).await?;
     crate::context::prepare(
         &mut history,
@@ -781,7 +781,7 @@ async fn review_attachment(
     // to page it. Current task text is never silently discarded.
     let mut stats = vec![];
     let mut trial = review_history(question, material);
-    let config = app.settings.lock().await.context.clone();
+    let config = crate::generation::capture(app).await.context.clone();
     let show = crate::thinking::show_cancellable(app, selected, cancel).await?;
     if crate::context::prepare(
         &mut trial,
@@ -856,6 +856,13 @@ pub async fn run(
     tx: &mpsc::Sender<Value>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let config=std::sync::Arc::new(crate::generation::Config::from(&settings));
+    crate::generation::scope(config,run_inner(app,input,settings,tx,cancel)).await
+}
+async fn run_inner(
+    app: Shared, input: ChatInput, settings: crate::api::Settings,
+    tx: &mpsc::Sender<Value>, cancel: CancellationToken,
+) -> Result<()> {
     let started = std::time::Instant::now();
     let selected = settings.model_for(&input.mode).to_owned();
     // Apply stricter policies before attachment preprocessing or model acquisition.
@@ -865,22 +872,15 @@ pub async fn run(
         if let Some(session)=existing{session.lock().await.set_policy(crate::web_tools::Egress::Disabled).await;}
         None
     }else{Some(crate::web_tools::session(&app,&input.conversation,input.egress()).await?)};
-    let mut chat = app.load(&input.conversation).await?;
+    let storage_run=crate::permissions::TASK.try_with(Clone::clone).context("Нет активного запуска")?;
+    let window=if settings.context.window_tokens==0{settings.context.auto_max_tokens}else{settings.context.window_tokens};
+    let mut chat=app.tasks.chat_runtime(input.conversation.clone(),storage_run.clone(),window.saturating_sub(settings.context.output_tokens+4096)).await?;
     chat.mode = input.mode.clone();
-    if input.retry {
-        if chat.messages.last().is_some_and(|m| m.role == "assistant") {
-            chat.messages.pop();
-        }
-        if chat.messages.last().is_some_and(|m| m.role == "user") {
-            chat.messages.pop();
-        }
-        chat.history.clear();
-    }
     let mut attachments = vec![];
     for id in &input.attachments {
         attachments.push(crate::api::attachment(&app, id).await?);
     }
-    if chat.messages.is_empty() {
+    if app.tasks.chat_header(input.conversation.clone()).await?["count"].as_u64().unwrap_or(0)<=1 {
         chat.title = input.content.chars().take(55).collect();
         if chat.title.is_empty() {
             chat.title = attachments
@@ -905,7 +905,7 @@ pub async fn run(
         created: now(),
     });
     chat.updated = now();
-    chat=app.save(chat).await?;
+    chat=app.tasks.chat_checkpoint(storage_run.clone(),chat).await?;
     let mut context = input.content.clone();
     let mut extracted = vec![];
     let mut translation_input = input.content.clone();
@@ -957,7 +957,7 @@ pub async fn run(
     if let Some(user) = chat.messages.last_mut() {
         user.material = Some(context.clone());
     }
-    chat=app.save(chat).await?;
+    chat=app.tasks.chat_checkpoint(storage_run.clone(),chat).await?;
     let mut answer = Message {
         material: None,
         diagnostics: None,
@@ -1217,7 +1217,7 @@ pub async fn run(
                 // whole batch before storing it, including calls never executed.
                 for call in response["tool_calls"].as_array_mut().into_iter().flatten(){
                     let name=call["function"]["name"].as_str().unwrap_or("").to_string();
-                    call["function"]["arguments"]=tools::public_arguments(&name,&call["function"]["arguments"]);
+                    call["function"]["arguments"]=tools::model_arguments(&name,&call["function"]["arguments"]);
                 }
                 let assistant_index=history.len();
                 history.push(response);
@@ -1227,7 +1227,7 @@ pub async fn run(
                     let (mut args,mut invalid)=match tools::arguments(name,raw_args.clone()){Ok(value)=>(value,None),Err(error)=>(raw_args,Some(error))};
                     if name=="web_search" && invalid.is_none(){invalid=crate::search::validate_query(&args,&input.content).err();}
                     if let Some(error)=&planning_batch_error{invalid=Some(anyhow::anyhow!(error.clone()));}
-                    history[assistant_index]["tool_calls"][index]["function"]["arguments"]=tools::public_arguments(name,&args);
+                    history[assistant_index]["tool_calls"][index]["function"]["arguments"]=tools::model_arguments(name,&args);
                     let id=uuid::Uuid::new_v4().to_string();
                     let action_started=std::time::Instant::now();
                     let run=crate::permissions::TASK.try_with(Clone::clone).context("Нет источника журнала инструмента")?;
@@ -1352,8 +1352,9 @@ pub async fn run(
     answer.duration_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
     chat.messages.push(answer);
     chat.updated = now();
-    chat=app.save(chat).await?;
-    emit(tx, json!({"type":"saved","conversation_id":chat.id,"updated":chat.updated,"message_count":chat.messages.len(),"ref_only":true})).await?;
+    chat=app.tasks.chat_checkpoint(storage_run.clone(),chat).await?;
+    let stored_header=app.tasks.chat_header(chat.id.clone()).await?;
+    emit(tx, json!({"type":"saved","conversation_id":chat.id,"updated":chat.updated,"message_count":stored_header["count"],"ref_only":true})).await?;
     result
 }
 pub async fn pull_models(app: &Shared, models: &[String], tx: &mpsc::Sender<Value>) -> Result<()> {

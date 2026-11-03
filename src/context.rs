@@ -226,7 +226,7 @@ pub async fn configure_payload(
     payload: &mut Value,
     base: usize,
 ) -> Result<Plan> {
-    let settings = app.settings.lock().await.clone();
+    let settings = crate::generation::capture(app).await;
     let config = settings.context.clone();
     config.validate()?;
     let mut fitted=config.clone();
@@ -237,6 +237,7 @@ pub async fn configure_payload(
         crate::resources::fit_context(&mut fitted,&show,&memory,settings.compute.backend=="cpu"||crate::compute::force_cpu(app,&settings.compute).await)?
     }else{json!({"estimated":false,"reason":"external_engine_resources_unknown"})};
     resources["engine_owned"]=json!(owned);
+    resources["generation_settings_revision"]=json!(settings.revision);
     let requested=settings.compute.cpu_threads;
     let cpu=tokio::task::spawn_blocking(move||crate::resources::cpu_threads(requested,owned)).await??;
     if let Some(threads)=cpu["effective_threads"].as_u64(){payload["options"]["num_thread"]=json!(threads);}

@@ -93,6 +93,13 @@ pub async fn translate(
     tx: &mpsc::Sender<Value>,
     cancel: &CancellationToken,
 ) -> Result<(Vec<u8>, String, Value)> {
+    let config=crate::generation::capture(app).await;
+    crate::generation::scope(config,translate_inner(app,path,options,tx,cancel)).await
+}
+async fn translate_inner(
+    app: &Shared, path: &Path, options: &Value, tx: &mpsc::Sender<Value>,
+    cancel: &CancellationToken,
+) -> Result<(Vec<u8>, String, Value)> {
     validate_options(options)?;
     engine::ensure_ollama(app).await?;
     let spool=app.data.join("temp").join(format!("{}.document-units.jsonl",uuid::Uuid::new_v4()));
@@ -106,7 +113,7 @@ pub async fn translate(
         anyhow::ensure!(format!("{:x}",digest.finalize())==expected,"Контрольная сумма плана документа не совпадает");Ok(())
     }).await??;
     let paragraph_mode = plan["translation_mode"] == "paragraph-v2";
-    let selected = app.settings.lock().await.translation_model.clone();
+    let selected = crate::generation::capture(app).await.translation_model.clone();
     let total=usize::try_from(plan["units_count"].as_u64().context("Нет числа фрагментов документа")?)?;
     let sample=plan["sample_text"].as_str().unwrap_or("");
     let source = crate::system_translate::source_language(
@@ -127,7 +134,7 @@ pub async fn translate(
     let digest=tags["models"].as_array().into_iter().flatten().find(|row|row["name"]==selected||row["model"]==selected||row["name"].as_str().is_some_and(|name|name==format!("{selected}:latest"))).and_then(|row|row["digest"].as_str()).filter(|s|!s.is_empty()).map(str::to_owned);
     static SESSION:std::sync::OnceLock<String>=std::sync::OnceLock::new();
     let identity=digest.clone().unwrap_or_else(||SESSION.get_or_init(||uuid::Uuid::new_v4().to_string()).clone());
-    let settings=app.settings.lock().await.clone();
+    let settings=crate::generation::capture(app).await;
     let definition=json!({"version":2,"path":path,"source_sha256":plan["source_sha256"],"plan_sha256":plan["plan_sha256"],"source":source,"target":target,"model":selected,"model_identity":identity,"model_identity_verified":digest.is_some(),"endpoint_scope":if engine::owns_engine(){"managed-engine".to_owned()}else{engine::ollama_url()},"configuration":crate::document_checkpoints::hash(&json!({"assistant":settings.assistant,"context":settings.context}))?});
     let checkpoint=app.tasks.document_begin(owner,definition,total).await?;
     let checkpoint_id=checkpoint["id"].as_str().context("Нет ID сохранённого перевода")?.to_string();

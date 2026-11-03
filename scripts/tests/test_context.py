@@ -3,7 +3,7 @@ Never executes the user's banking task or downloads models.
 """
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import json, os, socket, subprocess, threading, time, uuid, urllib.request, urllib.error
+import json, os, socket, subprocess, threading, time, uuid, urllib.request, urllib.error, sqlite3
 
 project = Path(__file__).resolve().parents[2]
 root = project/'build-tools'/('context-'+uuid.uuid4().hex[:8])
@@ -110,9 +110,9 @@ try:
     goal=turn('Build TASK_GOAL_FIXTURE and preserve its tests','agent')
     task=read('/api/chats/'+goal['id']+'/tasks')[0]
     # Remove the model working history to simulate a fresh context window.
-    saved_path=root/'data/chats'/f"{goal['id']}.json"
-    saved=json.loads(saved_path.read_text(encoding='utf-8'));saved['history']=[];saved['messages']=[]
-    saved_path.write_text(json.dumps(saved),encoding='utf-8')
+    with sqlite3.connect(root/'data/tasks.sqlite3') as db:
+        db.execute('DELETE FROM chat_history WHERE conversation=?',(goal['id'],))
+        db.execute("UPDATE chat_working SET generation='',model='' WHERE conversation=?",(goal['id'],))
     continued=turn('продолжай работу','agent',chat=goal)
     assert 'TASK_GOAL_FIXTURE' in requests[-1]['messages'][0]['content']
     assert any(t['name']=='read_task' and t['status']=='succeeded' for t in continued['messages'][-1]['tools'])

@@ -25,6 +25,7 @@ class Fixture(BaseHTTPRequestHandler):
         if self.path=='/api/generate' and body.get('prompt'):
             inferences.append(body);return self.reply({'response':'Specialist advice from supplied evidence only.','done':True})
         if self.path!='/api/chat' or not body.get('messages'):return self.reply({'done':True})
+        assert all(isinstance(c['function']['arguments'],dict) for m in body['messages'] for c in (m.get('tool_calls') or [])),body
         inferences.append(body);messages=body['messages'];tools=[m for m in messages if m.get('role')=='tool'];names={tool['function']['name'] for tool in body.get('tools',[])};text='\n'.join(m.get('content','') for m in messages if m['role']=='user')
         def call(name,args):return self.reply({'message':{'role':'assistant','content':'','tool_calls':[{'function':{'name':name,'arguments':args}}]},'done':True})
         if 'CURRENT PHASE: prepare a public search query.' in messages[0].get('content',''):
@@ -35,6 +36,7 @@ class Fixture(BaseHTTPRequestHandler):
             if 'PLANNER_BAD_BATCH' in latest and any('Поисковый пакет не выполнен' in m.get('content','') for m in tools):return self.reply({'message':{'role':'assistant','content':'Which Rust version should be checked?'},'done':True})
             if 'COUNT_PACKET' in latest:
                 if not any('Поисковый пакет не выполнен' in m.get('content','') for m in tools):return call('web_search',{'query':'primary fixture official documentation','count':'24'})
+                if sum('Поисковый пакет не выполнен' in m.get('content','') for m in tools)==1:return call('web_search',['malformed','arguments'])
                 return call('web_search',{'query':'primary fixture official documentation','count':24})
             if 'PLANNER_BAD_BATCH' in latest:return self.reply({'message':{'role':'assistant','content':'','tool_calls':[{'function':{'name':'web_search','arguments':{'query':'Rust ownership'}}},{'function':{'name':'run_command','arguments':{'command':'echo forbidden'}}}]},'done':True})
             if 'PLANNER_CONTEXT' in latest:
@@ -159,11 +161,11 @@ try:
         else:assert len(failed['messages'][-1]['tools'])==2 and all(t['status']=='failed' for t in failed['messages'][-1]['tools'])
     print('PASS local query planning, read-only context recovery after restart, private-message minimization, clarification and atomic unsafe-batch rejection')
     before=len(provider_calls);repaired=turn('COUNT_PACKET primary fixture '+site+'/page?number=0',mode='chat',options={'depth':'quick','domains':['127.0.0.1']});items=repaired['messages'][-1]['tools'];assert len(provider_calls)==before+1
-    searches=[t for t in items if t['name']=='web_search'];assert searches[0]['status']=='failed' and searches[1]['status']=='succeeded',searches
-    result=json.loads(searches[1]['result']);assert result['requested_count']==24 and result['packet_limit']==8 and result['returned_count']==8 and result['next_result_offset']==8,result
-    assert len(searches)==4 and all(t['status']=='succeeded' for t in searches[1:]),searches
-    pages=[json.loads(t['result']) for t in searches[1:]];assert [p['returned_count'] for p in pages]==[8,8,4] and pages[-1]['next_result_offset'] is None and pages[-1]['requested_count']==1000,pages
-    print('PASS invalid planning parameters return failed tool feedback for repair; count24 returns8 plus continuation without aborting the task or sending invalid query')
+    searches=[t for t in items if t['name']=='web_search'];assert all(t['status']=='failed' for t in searches[:2]) and searches[2]['status']=='succeeded',searches
+    result=json.loads(searches[2]['result']);assert result['requested_count']==24 and result['packet_limit']==8 and result['returned_count']==8 and result['next_result_offset']==8,result
+    assert len(searches)==5 and all(t['status']=='succeeded' for t in searches[2:]),searches
+    pages=[json.loads(t['result']) for t in searches[2:]];assert [p['returned_count'] for p in pages]==[8,8,4] and pages[-1]['next_result_offset'] is None and pages[-1]['requested_count']==1000,pages
+    print('PASS invalid scalar/array planning arguments return repair feedback and stay objects in inference history; count24 returns8 plus continuation without aborting the task or sending invalid query')
     answer=turn('HOSTILE_CHAT search this topic',mode='chat')['messages'][-1];assert any(tool['name']=='read_file' and tool['status']=='failed' for tool in answer['tools'])
     print('PASS search depths use selected model, reading and chat sampling; Chat cannot gain OS actions through retrieval')
     cited=turn('CITATION_CASE read the primary source '+site+'/page?number=0',options={'depth':'quick','domains':['127.0.0.1']});answer=cited['messages'][-1];report=answer['diagnostics']['citations'];assert report['resolved']==1 and report['missing_ids']==1 and report['unverified_links']==1 and report['semantic_support_verified'] is False

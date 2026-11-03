@@ -99,7 +99,7 @@ async fn run(
     drop(listener);
     let key = uuid::Uuid::new_v4().to_string();
     let url = format!("http://127.0.0.1:{port}");
-    let requested=app.settings.lock().await.compute.cpu_threads;
+    let requested=crate::generation::capture(app).await.compute.cpu_threads;
     let policy=tokio::task::spawn_blocking(move||crate::resources::cpu_threads(requested,true)).await??;
     let threads=policy["effective_threads"].as_u64().context("Не определены потоки реранкера")?;
     let mut command = tokio::process::Command::new(binary);
@@ -185,7 +185,7 @@ async fn run(
     result
 }
 pub async fn apply(app: &Shared, query: &str, value: &mut Value, cancel: &CancellationToken) {
-    if !app.settings.lock().await.web.reranker_enabled {
+    if !crate::generation::capture(app).await.reranker_enabled {
         return;
     }
     if value["results"].as_array().is_none_or(|a| a.len() < 2) {

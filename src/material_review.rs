@@ -25,7 +25,7 @@ impl Reviewer<'_>{
     }
 }
 pub async fn review(app:&Shared,model:&str,question:&str,sources:&[Value],think:&Value,tx:&mpsc::Sender<Value>,cancel:&CancellationToken)->Result<(String,usize,Value)>{
-    let config=app.settings.lock().await.context.clone();let show=crate::thinking::show_cancellable(app,model,cancel).await?;
+    let config=crate::generation::capture(app).await.context.clone();let show=crate::thinking::show_cancellable(app,model,cancel).await?;
     let mut baseline=crate::engine::review_history(question,"");
     let(budget,_)=crate::context::prepare(&mut baseline,&json!([]),&config,&show,crate::context::thinking_enabled(think,&show),16384)?;
     let available=budget.history_budget.saturating_sub(crate::context::history_tokens(&baseline)+700);

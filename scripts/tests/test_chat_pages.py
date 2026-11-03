@@ -1,7 +1,7 @@
 """Bounded browser history, revision fences and full explicit export; isolated data."""
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-import ctypes,json,os,socket,subprocess,threading,time,urllib.request,urllib.error,uuid
+import ctypes,json,os,socket,subprocess,threading,time,urllib.request,urllib.error,uuid,sqlite3,hashlib
 project=Path(__file__).resolve().parents[2];root=project/'build-tools'/('chat-pages-'+uuid.uuid4().hex[:8]);(root/'data/chats').mkdir(parents=True);(root/'data/workspace').mkdir()
 (root/'data/settings.json').write_text(json.dumps({'workspace':str(root/'data/workspace'),'theme':'dark','source':'en','target':'ru','cpu_only':True}))
 id=str(uuid.uuid4());path=root/'data/chats'/f'{id}.json';count=320
@@ -42,7 +42,7 @@ try:
     before=peak();latest=call('/api/chats/'+id+'/messages');p=latest['message_page'];assert (p['start'],p['end'],p['total'],p['at_latest'])==(296,320,320,True)
     assert len(latest['messages'])==24 and latest['messages'][0]['id']=='296' and latest['messages'][-1]['id']=='319'
     assert all('material' not in m for m in latest['messages']) and 'history' not in latest
-    query=urllib.parse.urlencode({'before':p['start'],'limit':24,'revision':p['revision']})
+    query=urllib.parse.urlencode({'before':p['before'],'limit':24,'revision':p['revision']})
     older=call('/api/chats/'+id+'/messages?'+query);assert older['message_page']['start']==272 and older['messages'][-1]['id']=='295'
     first=call('/api/chats/'+id+'/messages?before=8');assert [m['id'] for m in first['messages']]==[str(i) for i in range(8)]
     after=peak()
@@ -58,7 +58,16 @@ try:
         page.locator('[data-message-page="older"]').click();page.wait_for_function("()=>document.querySelector('[data-history-position]')?.textContent.includes('273–296')")
         assert page.locator('#conversation .message').count()==24 and page.evaluate("()=>document.activeElement.dataset.messagePage==='older'")
         assert not page.locator('#conversation [data-action="retry"]').count()
-        page.locator('[data-edit-message="0"]').click();assert page.locator('#prompt').input_value().startswith('VISIBLE_MARKER_0272 ')
+        page.locator('#prompt').fill('DRAFT_RETAINED ')
+        page.locator('[data-edit-message="0"]').click();page.wait_for_selector('#message-text-dialog pre');page.wait_for_function("()=>document.querySelector('#message-text-dialog [role=status]').textContent.includes('1–8000')");assert page.locator('#prompt').input_value()=='DRAFT_RETAINED '
+        part=page.locator('#message-text-dialog pre').text_content();assert part.startswith('VISIBLE_MARKER_0272 ') and len(part)==8000
+        page.evaluate("copy=async text=>{globalThis.copiedFixture=text}");page.locator('.text-copy').click();assert page.evaluate('globalThis.copiedFixture')==part
+        page.locator('.text-next').click();page.wait_for_function("()=>document.querySelector('#message-text-dialog [role=status]').textContent.includes('8001–16000')");assert len(page.locator('#message-text-dialog pre').text_content())==8000
+        page.locator('.text-previous').click();page.wait_for_function("()=>document.querySelector('#message-text-dialog [role=status]').textContent.includes('1–8000')")
+        with page.expect_download() as text_download:page.locator('.text-download').click()
+        assert Path(text_download.value.path()).read_text(encoding='utf-8')=='VISIBLE_MARKER_0272 '+('x'*16384)
+        page.locator('.text-insert').click();page.wait_for_selector('#message-text-dialog',state='detached');page.wait_for_function("()=>document.activeElement.id==='prompt'")
+        assert page.locator('#prompt').input_value()=='DRAFT_RETAINED '+part
         page.locator('[data-message-page="newer"]').click();page.wait_for_function("()=>document.querySelector('[data-history-position]')?.textContent.includes('297–320')")
         assert page.locator('#conversation .message').count()==24
         with page.expect_download() as download:page.locator('[data-action="export"]').click()
@@ -71,13 +80,23 @@ try:
         assert pending;page.locator('[data-action="new-chat"]').first.click();pending[0].continue_();page.wait_for_timeout(500)
         assert not page.locator('#conversation .message').count()
         assert not errors,errors;browser.close()
-    with path.open(encoding='utf-8') as file:source=json.load(file)
-    source['messages'].append({'id':'320','role':'user','created':'now','content':'new revision'})
-    path.write_text(json.dumps(source),encoding='utf-8');del source
-    try:call('/api/chats/'+id+'/messages?'+query);raise AssertionError('Stale revision accepted')
+    # Imported JSON becomes immutable provenance, not a second live write path.
+    with sqlite3.connect(root/'data/tasks.sqlite3') as db:archive=Path(db.execute('SELECT original FROM chat_conversations WHERE id=?',(id,)).fetchone()[0])
+    with archive.open('rb') as source:original_digest=hashlib.file_digest(source,'sha256').hexdigest()
+    with path.open('ab') as file:file.write(b' OWN_EXTERNAL_SOURCE_CHANGE')
+    assert call('/api/chats/'+id+'/messages')['message_page']['total']==320
+    with archive.open('rb') as source:assert hashlib.file_digest(source,'sha256').hexdigest()==original_digest
+    # A real new retry supersedes the old tail and invalidates old page cursors.
+    accepted=call('/api/runs',{'conversation':id,'content':'retry revised message','mode':'chat','web':'off','source':'en','target':'ru','retry':True,'attachments':[]})
+    for _ in range(100):
+        if call('/api/runs/'+accepted['run_id'])['status'] in ['failed','completed','interrupted']:break
+        time.sleep(.05)
+    else:raise AssertionError('Own rejected fake inference did not finish')
+    try:call('/api/chats/'+id+'/messages?'+query);raise AssertionError('Superseded tail left stale page revision accepted')
     except urllib.error.HTTPError as error:assert error.code==409
     assert call('/api/chats/'+id+'/messages')['message_page']['total']==321
-    print('PASS Edge history window stays24 DOM messages, previous/next focus, old-page edit and no incorrect retry, full320-message export, navigation fence and stale-revision409')
+    print('PASS SQL authority preserves immutable original and ignores obsolete JSON edits; real retry invalidates revision; Edge24 DOM/range reader/copy/insert/download focus and streaming full320-message export')
+
 finally:
     if process.poll() is None:
         try:call('/api/shutdown',{})

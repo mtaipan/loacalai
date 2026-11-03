@@ -64,7 +64,7 @@ pub async fn endpoint(app: &Shared, model: &str) -> Result<String> {
         crate::engine::ensure_ollama(app).await?;
         return Ok(crate::engine::ollama_url());
     };
-    let mut config = app.settings.lock().await.compute.clone();
+    let mut config = crate::generation::capture(app).await.compute.clone();
     if crate::compute::force_cpu(app, &config).await {
         config.backend = "cpu".into();
         config.device.clear();

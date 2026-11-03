@@ -340,7 +340,7 @@ class Authority:
         self.key=(database,run);self.run=run;self.origins={}
         self.db=sqlite3.connect(Path(database).resolve().as_uri()+'?mode=ro',uri=True,timeout=3,isolation_level=None)
         self.db.execute('PRAGMA query_only=ON')
-        if self.db.execute('PRAGMA user_version').fetchone()[0] not in (9,10):
+        if self.db.execute('PRAGMA user_version').fetchone()[0] not in (9,10,11):
             self.db.close();raise ValueError('Unsupported task authority database version')
     def user_origin(self,value):
         scheme,host,port=origin(value)

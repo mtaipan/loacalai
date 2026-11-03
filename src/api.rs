@@ -372,9 +372,11 @@ impl App {
         }).await??;
         crate::tools::public_chat(&mut chat);Ok(chat)
     }
+    pub async fn ensure_chat(&self,id:&str)->anyhow::Result<()> {self.tasks.ensure_chat(self.data.clone(),id.to_owned(),self.shutdown.child_token()).await}
     pub async fn header(&self,id:&str)->anyhow::Result<crate::chat_headers::Header>{
-        if self.tasks.is_deleted(id.into()).await?{return Err(std::io::Error::new(std::io::ErrorKind::NotFound,"Чат удалён").into());}
-        let path=self.chat_path(id)?;tokio::task::spawn_blocking(move||crate::chat_headers::read(&path)).await?
+        self.ensure_chat(id).await?;let h=self.tasks.chat_header(id.to_owned()).await?;
+        use anyhow::Context;
+        Ok(crate::chat_headers::Header{id:id.to_owned(),title:h["title"].as_str().context("Нет названия чата")?.into(),updated:h["updated"].as_str().context("Нет времени чата")?.into(),mode:h["mode"].as_str().context("Нет режима чата")?.into(),count:h["count"].as_u64().context("Нет количества сообщений")?})
     }
     pub async fn load_view(&self,id:&str)->anyhow::Result<ConversationView>{
         if self.tasks.is_deleted(id.into()).await?{return Err(std::io::Error::new(std::io::ErrorKind::NotFound,"Чат удалён").into());}
@@ -406,6 +408,13 @@ pub fn now() -> String {
 #[cfg(test)]
 mod storage_tests{
     use super::*;
+    #[tokio::test]
+    async fn indexed_header_reads_numeric_count_without_requiring_legacy_messages_array(){
+        let root=std::env::temp_dir().join(format!("indexed-header-{}",Uuid::new_v4()));let app=std::sync::Arc::new(App::new(root.clone()).unwrap());let id=Uuid::new_v4().to_string();
+        app.tasks.chat_create(id.clone(),"SQL only".into(),"chat".into()).await.unwrap();assert!(!app.chat_path(&id).unwrap().exists());assert_eq!(app.header(&id).await.unwrap().count,0);
+        app.tasks.begin_in_project("header-run".into(),id.clone(),json!({"mode":"chat","content":"SQL request"}),"project".into()).await.unwrap();let header=app.header(&id).await.unwrap();assert_eq!(header.count,1);assert_eq!(header.title,"SQL request");
+        app.tasks.delete_conversation(id).await.unwrap();drop(app);std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test(flavor="multi_thread",worker_threads=2)]
     async fn cancelled_save_worker_cannot_resurrect_a_deleted_conversation(){
         let root=std::env::temp_dir().join(format!("chat-save-{}",Uuid::new_v4()));let app=Arc::new(App::new(root.clone()).unwrap());
@@ -437,6 +446,9 @@ pub fn router(app: Shared) -> Router {
         .route("/api/compute/install", post(compute_install))
         .route("/api/chats", get(chats).post(new_chat))
         .route("/api/chats/{id}/messages",get(chat_messages))
+        .route("/api/chats/{id}/messages/{message}/content",get(chat_message_content))
+        .route("/api/chats/{id}/export",get(chat_export))
+        .route("/api/chats/{id}/messages/{message}/download",get(chat_text_download))
         .route(
             "/api/chats/{id}",
             get(chat).patch(rename).delete(delete_chat),
@@ -535,7 +547,8 @@ async fn quick_translate(State(app): State<Shared>, Json(value): Json<Value>) ->
     *app.quick.lock().await = json!({"id":id,"status":"translating","text":text,"translation":"","source":source,"target":target,"model":selected});
     let job = id.clone();
     let model_guard = app.model_lifecycle.clone().read_owned().await;
-    tokio::spawn(async move {
+    let generation=std::sync::Arc::new(crate::generation::Config::from(&settings));
+    tokio::spawn(crate::generation::scope(generation,async move {
         let _model_guard = model_guard;
         let (tx, mut rx) = mpsc::channel::<Value>(128);
         let updates = app.clone();
@@ -581,7 +594,7 @@ async fn quick_translate(State(app): State<Shared>, Json(value): Json<Value>) ->
                 }
             }
         }
-    });
+    }));
     Ok(Json(json!({"id":id})))
 }
 async fn shutdown(State(app): State<Shared>) -> Json<Value> {
@@ -848,69 +861,55 @@ async fn compute_install(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 async fn chats(State(app):State<Shared>)->ApiResult<Value>{
-    let path=app.data.join("chats");
-    let headers=tokio::task::spawn_blocking(move||->anyhow::Result<Vec<crate::chat_headers::Header>>{
-        let mut headers=vec![];
-        for entry in std::fs::read_dir(path)?{
-            let entry=entry?;
-            if entry.path().extension().is_some_and(|e|e=="json"){
-                // Legacy/corrupt files remain untouched. Listing does not validate their full Message schema.
-                if let Ok(header)=crate::chat_headers::read(&entry.path()){headers.push(header);}
-            }
-        }
-        headers.sort_by(|a,b|b.updated.cmp(&a.updated).then_with(||a.id.cmp(&b.id)));Ok(headers)
-    }).await??;
-    let mut items=vec![];
-    for header in headers{if !app.tasks.is_deleted(header.id.clone()).await?{items.push(header);}}
-    Ok(Json(serde_json::to_value(items)?))
+    let mut items=app.tasks.chat_list().await?;let known=items.iter().filter_map(|v|v["id"].as_str().map(str::to_owned)).collect::<std::collections::HashSet<_>>();let path=app.data.join("chats");
+    let headers=tokio::task::spawn_blocking(move||->anyhow::Result<Vec<crate::chat_headers::Header>>{let mut headers=vec![];for entry in std::fs::read_dir(path)?{let entry=entry?;if entry.path().extension().is_some_and(|e|e=="json")&&!entry.path().file_stem().and_then(|s|s.to_str()).is_some_and(|s|known.contains(s)){if let Ok(header)=crate::chat_headers::read(&entry.path()){headers.push(header);}}}Ok(headers)}).await??;
+    for header in headers{if !app.tasks.is_deleted(header.id.clone()).await?{items.push(serde_json::to_value(header)?);}}
+    items.sort_by(|a,b|b["updated"].as_str().cmp(&a["updated"].as_str()).then_with(||a["id"].as_str().cmp(&b["id"].as_str())));Ok(Json(json!(items)))
 }
-async fn new_chat(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<ConversationView> {
-    let chat = Conversation {
-        history_task:String::new(),
-        history_workspace: String::new(),
-        history_model: String::new(),
-        id: Uuid::new_v4().to_string(),
-        title: "Новый чат".into(),
-        updated: now(),
-        mode: value["mode"].as_str().unwrap_or("agent").into(),
-        messages: vec![],
-        history: vec![],
+async fn new_chat(State(app):State<Shared>,Json(value):Json<Value>)->ApiResult<ConversationView>{
+    let id=Uuid::new_v4().to_string();let mode=value["mode"].as_str().unwrap_or("agent").to_string();
+    app.tasks.chat_create(id.clone(),"Новый чат".into(),mode.clone()).await?;
+    Ok(Json(ConversationView{id,title:"Новый чат".into(),updated:now(),mode,messages:vec![]}))
+}
+async fn chat(State(app):State<Shared>,Path(id):Path<String>)->Result<Response,ApiError>{
+    app.ensure_chat(&id).await?;Ok(crate::chat_export::response(app,id,"view".into()).await?)
+}
+async fn chat_export(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->Result<Response,ApiError>{
+    app.ensure_chat(&id).await?;Ok(crate::chat_export::response(app,id,q.get("format").cloned().unwrap_or_else(||"markdown".into())).await?)
+}
+async fn chat_message_content(State(app):State<Shared>,Path((id,message)):Path<(String,String)>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
+    app.ensure_chat(&id).await?;let offset=q.get("offset").map(|v|v.parse::<u64>()).transpose()?.unwrap_or(0);let count=q.get("max_characters").map(|v|v.parse::<u64>()).transpose()?.unwrap_or(8000);
+    match app.tasks.chat_body_page(id,message,offset,count,q.get("revision").cloned()).await{
+        Ok(page)=>Ok(Json(page)),Err(error) if error.is::<crate::chat_pages::Changed>()=>Err(ApiError::status(StatusCode::CONFLICT,&error.to_string())),Err(error)=>Err(error.into())
+    }
+}
+async fn chat_text_download(State(app):State<Shared>,Path((id,message)):Path<(String,String)>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->Result<Response,ApiError>{
+    app.ensure_chat(&id).await?;
+    let first=match app.tasks.chat_body_page(id.clone(),message.clone(),0,16000,q.get("revision").cloned()).await{
+        Ok(page)=>page,Err(error) if error.is::<crate::chat_pages::Changed>()=>return Err(ApiError::status(StatusCode::CONFLICT,&error.to_string())),Err(error)=>return Err(error.into())
     };
-    let chat=app.save(chat).await?;
-    Ok(Json(chat.into()))
-}
-async fn chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<ConversationView> {
-    Ok(Json(app.load_view(&id).await?))
+    let hash=first["revision"].as_str().unwrap().to_string();let stream_hash=hash.clone();let bytes=first["bytes"].as_u64().unwrap();
+    let stream=async_stream::try_stream!{
+        let mut page=first;
+        loop{let text=page["text"].as_str().unwrap().as_bytes().to_vec();let more=page["has_more"]==true;let next=page["next_offset"].as_u64().unwrap();yield text;if !more{break;}
+            page=app.tasks.chat_body_page(id.clone(),message.clone(),next,16000,Some(stream_hash.clone())).await.map_err(|e|std::io::Error::other(e.to_string()))?;
+        }
+    };
+    let stream:futures_util::stream::BoxStream<'static,Result<Vec<u8>,std::io::Error>>=Box::pin(stream);
+    let mut headers=HeaderMap::new();headers.insert("content-type","text/plain; charset=utf-8".parse()?);headers.insert("content-length",bytes.to_string().parse()?);headers.insert("etag",format!("\"{hash}\"").parse()?);headers.insert("content-disposition","attachment; filename=\"message.md\"".parse()?);
+    Ok((headers,Body::from_stream(stream)).into_response())
 }
 #[derive(Deserialize)]
 struct MessageQuery{before:Option<u64>,#[serde(default="message_limit")]limit:u64,revision:Option<String>}
 fn message_limit()->u64{24}
 async fn chat_messages(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(query):axum::extract::Query<MessageQuery>)->ApiResult<Value>{
-    let guard=app.storage.clone().lock_owned().await;
-    if app.tasks.is_deleted(id.clone()).await?{return Err(ApiError::status(StatusCode::NOT_FOUND,"Чат удалён"));}
-    let path=app.chat_path(&id)?;
-    let result=tokio::task::spawn_blocking(move||{let _guard=guard;crate::chat_pages::page(&path,query.before,query.limit,query.revision.as_deref())}).await?;
+    app.ensure_chat(&id).await?;let result=app.tasks.chat_page(id,query.before,query.limit,query.revision).await;
     match result{Ok(value)=>Ok(Json(value)),Err(error) if error.is::<crate::chat_pages::Changed>()=>Err(ApiError::status(StatusCode::CONFLICT,&error.to_string())),Err(error)=>Err(error.into())}
 }
-async fn rename(
-    State(app): State<Shared>,
-    Path(id): Path<String>,
-    Json(value): Json<Value>,
-) -> ApiResult<ConversationView> {
-    let runs = app.runs.lock().await;
-    require(
-        !runs.values().any(|r| r.conversation == id),
-        "Дождитесь завершения ответа или остановите его",
-    )?;
-    let mut chat = app.load(&id).await?;
-    chat.title = value["title"]
-        .as_str()
-        .unwrap_or("Чат")
-        .chars()
-        .take(100)
-        .collect();
-    let chat=app.save(chat).await?;
-    Ok(Json(chat.into()))
+async fn rename(State(app):State<Shared>,Path(id):Path<String>,Json(value):Json<Value>)->ApiResult<Value>{
+    require(!app.runs.lock().await.values().any(|run|run.conversation==id),"Дождитесь завершения ответа или остановите его")?;
+    app.ensure_chat(&id).await?;let title=value["title"].as_str().unwrap_or("Чат").chars().take(100).collect::<String>();app.tasks.chat_rename(id.clone(),title).await?;
+    Ok(Json(app.tasks.chat_header(id).await?))
 }
 async fn delete_chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     let runs = app.runs.lock().await;
@@ -925,13 +924,14 @@ async fn delete_chat(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
     let path=app.chat_path(&id)?;
     let _storage=app.storage.lock().await;
     // Verify existence before accepting deletion, then make its intent durable first.
-    tokio::fs::metadata(&path).await?;
+    app.ensure_chat(&id).await?;
     let task_ids=app.tasks.work_task_ids(id.clone()).await?;
     app.grants.lock().await.forget_work_tasks(&app.data,&task_ids)?;
     let run_ids=app.tasks.conversation_run_ids(id.clone()).await?;
     crate::discovery::forget(app.data.clone(),task_ids,run_ids).await?;
-    app.tasks.delete_conversation(id).await?;
-    tokio::fs::remove_file(path).await?;
+    app.tasks.delete_conversation(id.clone()).await?;
+    match tokio::fs::remove_file(path).await{Ok(())=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.into())}
+    let originals=app.data.join("chat-originals").join(&id);if originals.exists(){tokio::fs::remove_dir_all(originals).await?;}
     Ok(Json(json!({"ok":true})))
 }
 async fn upload(State(app): State<Shared>, mut form: Multipart) -> ApiResult<Attachment> {
@@ -1231,8 +1231,9 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
         require(!app.tasks.is_deleted(input.conversation.clone()).await?,"Чат удалён")?;
         app.tasks.begin(run_id.clone(),input.conversation.clone(),serde_json::to_value(&input)?).await?;return Ok(run_id);
     }
+    let settings=app.settings.lock().await.clone();
     if let Some(expected)=&input.expected_workspace{
-        if expected!=&app.settings.lock().await.workspace{return Err(ApiError::status(StatusCode::CONFLICT,"Папка проекта изменилась. Запрос не запущен; проверьте папку и отправьте сообщение снова."));}
+        if expected!=&settings.workspace{return Err(ApiError::status(StatusCode::CONFLICT,"Папка проекта изменилась. Запрос не запущен; проверьте папку и отправьте сообщение снова."));}
     }
     let model_guard=app.model_lifecycle.clone().try_read_owned().map_err(|_|anyhow::anyhow!("Движок обновляется или меняет устройство. Дождитесь завершения операции."))?;
     let cancel=app.shutdown.child_token();
@@ -1241,8 +1242,7 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
     if header.count>0&&input.mode!="translate"&&!crate::agent::reply_only(&input.content)&&app.tasks.needs_legacy_import(input.conversation.clone()).await?{
         // Do not hold the runs mutex while reading a large legacy file: Stop must stay responsive.
         // Deletion/save use the storage guard, so a late import cannot resurrect a deleted chat.
-        let _storage=app.storage.lock().await;let legacy=app.load_locked(&input.conversation).await?;
-        app.tasks.import_legacy_requests(&legacy,app.settings.lock().await.workspace.clone()).await?;
+        app.tasks.import_indexed_legacy_requests(input.conversation.clone(),settings.workspace.clone()).await?;
     }
     {
         let mut runs = app.runs.lock().await;
@@ -1267,7 +1267,7 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
                 run_id.clone(),
                 input.conversation.clone(),
                 serde_json::to_value(&input)?,
-                app.settings.lock().await.workspace.clone(),
+                settings.workspace.clone(),
             )
             .await?;
         runs.insert(
@@ -1304,7 +1304,6 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
         journal.runs.lock().await.remove(&journal_id);
         journal.grants.lock().await.finish(&journal_id);
     });
-    let settings=app.settings.lock().await.clone();
     let accepted=settings.accepted_options(&input);
     let worker = app.clone();
     let id = run_id.clone();
@@ -1328,27 +1327,8 @@ async fn start_run(app: Shared, input: ChatInput) -> Result<String, ApiError> {
             cancel.cancel();
             crate::processes::cancel_run(&worker,&id).await;
             let diagnostic = format!("{error:#}");
-            if let Ok(mut chat) = worker.load(&conversation).await {
-                if chat.messages.last().is_some_and(|m| m.role == "user") {
-                    chat.messages.push(Message {
-                        material: None,
-                        diagnostics: None,
-                        duration_ms: Some(
-                            started.elapsed().as_millis().min(u64::MAX as u128) as u64
-                        ),
-                        model: None,
-                        id: Uuid::new_v4().to_string(),
-                        role: "assistant".into(),
-                        content: format!("⚠ {diagnostic}"),
-                        attachments: vec![],
-                        tools: vec![],
-                        created: now(),
-                    });
-                    chat.updated = now();
-                    if let Ok(chat)=worker.save(chat).await{
-                        let _ = tx.send(json!({"type":"saved","conversation_id":chat.id,"updated":chat.updated,"message_count":chat.messages.len(),"ref_only":true})).await;
-                    }
-                }
+            if let Ok(Some(header))=worker.tasks.chat_error(conversation.clone(),id.clone(),diagnostic.clone(),started.elapsed().as_millis().min(u64::MAX as u128) as u64).await{
+                let _=tx.send(json!({"type":"saved","conversation_id":conversation,"updated":header["updated"],"message_count":header["count"],"ref_only":true})).await;
             }
             eprintln!("Chat {conversation}: {diagnostic}");
             let _ = tx
@@ -1794,6 +1774,7 @@ async fn document_translate(
         },
     );
     let (tx, mut rx) = mpsc::channel::<Value>(128);
+    let generation=crate::generation::capture(&app).await;
     tokio::spawn(async move {
         let _model_guard = model_guard;
         let _ = tx.send(json!({"type":"start","run_id":id})).await;
@@ -1824,7 +1805,7 @@ async fn document_translate(
             disconnect_tx.closed().await;
             disconnect_cancel.cancel();
         });
-        let outcome = operation.await;
+        let outcome=crate::generation::scope(generation,operation).await;
         disconnect.abort();
         if let Err(error) = outcome {
             let _ = tx
