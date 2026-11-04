@@ -37,6 +37,7 @@ class Fixture(BaseHTTPRequestHandler):
             completion = {'done':True,'done_reason':'length' if limited else 'stop','prompt_eval_count':1234,'eval_count':77}
             if self.path=='/api/generate':completion['response']='Specialist observations only. No tests were executed.'
             else:completion['message']={'role':'assistant','content':'CONTEXT_ACCEPTED. This is a transport fixture, no project was created or tested.'}
+            if 'For this response use Russian (ru)' in text and self.path=='/api/chat':completion['message']['content']='Контекст принят. `CONTEXT_ACCEPTED` Это проверка транспорта; файлы проекта не создавались.'
             if 'PARTIAL_TOOL_CALL_FIXTURE' in text:
                 completion['done_reason']='length'
                 completion['message']['tool_calls']=[{'function':{'name':'write_file','arguments':{'path':'should-never-exist.txt','content':'incomplete'}}}]
@@ -116,8 +117,9 @@ try:
     print('PASS external loopback Auto leaves resource decisions to server; explicit threads are sent and recorded; retained private store paths ignored')
     turn('Explain the bug and fix it','agent')
     assert requests[-1]['tools'] and requests[-1]['options']['temperature']==.17
-    turn('Объясни ошибку и почини проект','agent')
-    assert requests[-1].get('tools'), 'an explanation prefix must not disable agent capabilities'
+    before=len(requests);corrected=turn('Объясни ошибку и почини проект','agent')
+    assert requests[before].get('tools'), 'an explanation prefix must not disable agent capabilities at admission'
+    if not requests[-1].get('tools'):assert corrected['messages'][-1]['diagnostics']['language_retry'] is True
     goal=turn('Build TASK_GOAL_FIXTURE and preserve its tests','agent')
     task=read('/api/chats/'+goal['id']+'/tasks')[0]
     # Remove the model working history to simulate a fresh context window.

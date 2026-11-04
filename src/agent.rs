@@ -730,8 +730,12 @@ pub fn wrong_reply_language(text: &str, expected: &str) -> bool {
     if !["en", "ru"].contains(&expected) {
         return false;
     }
-    let letters = text.chars().filter(|c| c.is_alphabetic()).count();
-    letters >= 4 && crate::system_translate::source_language(text, "auto") != expected
+    // Code, source quotations and URLs preserve their original language.
+    let mut prose=String::new();let mut fence=None;let mut inline=false;
+    for line in text.lines(){let trimmed=line.trim_start();let mark=if trimmed.starts_with("```"){Some('`')}else if trimmed.starts_with("~~~"){Some('~')}else{None};if let Some(mark)=mark{if fence==Some(mark){fence=None;}else if fence.is_none(){fence=Some(mark);}continue;}if fence.is_some()||trimmed.starts_with('>'){continue;}
+        for word in line.split_whitespace(){if word.starts_with("http://")||word.starts_with("https://"){continue;}for ch in word.chars(){if ch=='`'{inline=!inline;}else if !inline{prose.push(ch);}}prose.push(' ');}}
+    let letters = prose.chars().filter(|c| c.is_alphabetic()).count();
+    letters >= 4 && crate::system_translate::source_language(&prose, "auto") != expected
 }
 
 #[cfg(test)]
@@ -843,6 +847,10 @@ mod tests {
     }
     #[test]
     fn reply_language_follows_current_message_and_explicit_request() {
+        assert!(!wrong_reply_language("Исправлено.\n```python\nprint('English source code remains unchanged')\n```\n> Original English quote", "ru"));
+        assert!(!wrong_reply_language("```javascript\nconst result = 'English code only';\n```", "ru"));
+        assert!(wrong_reply_language("Continue by reading the latest research plan.\n```text\nрусская цитата\n```", "ru"));
+
         assert_eq!(reply_language("nice").as_deref(), Some("en"));
         assert_eq!(
             reply_language("Why are you responding in Russian?").as_deref(),

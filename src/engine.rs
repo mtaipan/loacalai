@@ -135,7 +135,7 @@ async fn model_attempt(
     if let Some(failed)=result.as_ref().err().and_then(|e|e.downcast_ref::<EmptyGeneration>()).map(|e|e.diagnostic.clone()).filter(|_|emitted.lock().unwrap().trim().is_empty()&&!cancel.is_cancelled()) {
         let mut repair_messages=messages.to_vec();
         if let Some(system)=repair_messages.first_mut().filter(|m|m["role"]=="system"){
-            let original=system["content"].as_str().unwrap_or("");system["content"]=json!(format!("{original}\nGeneration recovery: the previous inference ended without a usable answer or complete tool call. No proposed tool from that inference was executed. Continue the same request from the actual recorded observations. Provide a complete next tool call, a concrete answer, or a specific clarification. Do not repeat already successful actions merely to recover this generation. Do not present reasoning alone as the answer."));
+            let original=system["content"].as_str().unwrap_or("");system["content"]=json!(format!("{original}\nGeneration recovery: the previous inference ended without a usable answer or complete tool call. No proposed tool from that inference was executed. Continue the same request from the actual recorded observations. Respect the active phase output contract: provide its required tool call during search preparation, or the requested answer in conversation. Do not substitute self-instructions for an action. Do not repeat already successful actions merely to recover this generation. Do not present reasoning alone as the answer."));
         }
         let mut repair_mode=mode.clone();let mut auto_thinking_disabled=false;
         if let InferenceMode::Configured(_,think,_,_)=&mut repair_mode {if think.is_null(){let show=crate::thinking::show_cancellable(app,model,cancel).await?;if crate::thinking::choices(&show).contains(&json!(false)){*think=json!(false);auto_thinking_disabled=true;}}}
@@ -1075,18 +1075,20 @@ pub async fn run(
             if use_tools {system.push_str(&format!("\n{}",scope.guidance()));}
             let mut initial_task=false;
             let mut current_task=String::new();
+            let mut query_task=Value::Null;
             if let Some(run)=crate::permissions::TASK.try_with(Clone::clone).ok().filter(|_|use_tools) {
                 if let Some(task)=app.tasks.task_for_run(run).await? {
                     current_task=task["id"].as_str().unwrap_or("").into();
                     initial_task=use_tools && task["requests"].as_array().is_some_and(|requests|requests.len()>1) && ["продолжай","продолжай работу","продолжи","дальше","continue","continue work","resume"].contains(&input.content.trim().to_lowercase().trim_end_matches(['.','!']));
                     let brief=json!({"id":task["id"],"project":task["project"],"goal_preview":tools::truncate(task["goal_preview"].as_str().unwrap_or(""),4000),"goal_characters":task["goal_characters"],"plan_saved":!task["plan"].is_null(),"context_partial":true});
+                    query_task=json!({"task":task["id"],"goal_preview":tools::truncate(task["goal_preview"].as_str().unwrap_or(""),2000),"goal_characters":task["goal_characters"],"partial":true,"requests_available":true});
                     system.push_str(&format!("\nPersistent user task state (survives context trimming and restarts): {}\nThe original goal and requests are user-provided data. Do not lose their constraints when the latest message asks to continue. Before continuing, call read_task for the current plan and requests; read further index pages and full request text when necessary. A completed run or an agent plan checkmark is not verified completion of the goal. Inspect actual files/process state before repeating any interrupted mutation; an interrupted result has unknown effects. Saved observations remain available through search_artifacts/read_artifact; do not replay a mutation merely to recover its result. Explicitly report remaining work and missing verification.",brief));
                 }
             }
             if scope.web_enabled{system.push_str(&format!("\n{}",crate::search::QUERY_GUIDANCE));}
             if web_requested||input.mode=="search"{system.push_str(&format!("\n{}",search_options.instruction()));}
             answer.diagnostics=Some(json!({"system_prompt":system,"sampling":settings.assistant,"model":selected,"tools_enabled":use_tools,"grounding_retry":false,"thinking_mode":input.thinking,"web_mode":input.web}));
-            if web_requested||input.mode=="search"{answer.diagnostics.as_mut().unwrap()["search"]=json!({"options":search_options,"synthesis":true,"coverage_verified":false});}
+            if web_requested||input.mode=="search"{answer.diagnostics.as_mut().unwrap()["search"]=json!({"options":search_options,"synthesis":true,"coverage_verified":false,"status":if scope.searching{"preparing_query"}else{"reading_sources"},"queries_succeeded":0,"queries_failed":0});}
             if team {if let Some(d)=answer.diagnostics.as_mut(){d["team"]=json!({"controller":selected,"specialist":crate::specialists::FOUNDATION,"execution":"sequential","specialist_status":"pending"});}}
             let mut history=vec![json!({"role":"system","content":system})];
             let same_workspace=!use_tools || chat.history_workspace==settings.workspace;
@@ -1104,6 +1106,7 @@ pub async fn run(
             let mut browser_claim_retry=false;
             let mut completion_retry=false;
             let mut language_retry=false;
+            let mut planning_reply_retry=false;
             let mut initial_search=scope.searching && scope.web_enabled;
             let mut initial_material=use_tools&&search_options.focus=="materials";
             let mut initial_browser=if team && (scope.web_enabled||scope.local_web) && !initial_search && scope.urls.len()==1 && crate::web_tools::website_execution_requested(&input.content) {Some(scope.urls[0].to_string())} else {None};
@@ -1114,17 +1117,23 @@ pub async fn run(
             'agent_loop: loop {
                 if cancel.is_cancelled() { anyhow::bail!("Остановлено пользователем"); }
                 let planning_search=initial_search && !initial_task;
-                let definitions=if planning_search {crate::search::planning_definitions(&scope.definitions())}else if use_tools {crate::tool_catalog::visible(&scope.definitions(),&tool_group)}else{json!([])};
-                let (_,reduced)=crate::context::prepare(&mut history,&definitions,&settings.context,&model_show,crate::context::thinking_enabled(&thinking,&model_show),if use_tools {16384}else{8192})?;
+                let definitions=if planning_search {crate::search::planning_definitions(&scope.definitions())}else if use_tools && !language_retry {crate::tool_catalog::visible(&scope.definitions(),&tool_group)}else{json!([])};
+                let phase_thinking=if planning_search&&input.thinking=="auto"&&crate::thinking::choices(&model_show).contains(&json!(false)){json!(false)}else{thinking.clone()};
+                let query_prompt=crate::search::planning_prompt(&query_task,reply_language.as_deref(),planning_reply_retry);
+                // Budget the actual phase prompt, preserving the main task's original instructions.
+                let original_system=history[0]["content"].clone();if planning_search{history[0]["content"]=json!(query_prompt);}
+                let prepared=crate::context::prepare(&mut history,&definitions,&settings.context,&model_show,crate::context::thinking_enabled(&phase_thinking,&model_show),if use_tools {16384}else{8192});
+                if planning_search{history[0]["content"]=original_system;}let (_,reduced)=prepared?;
                 if reduced { emit(tx,json!({"type":"notice","message":"Старый контекст сокращён. Текущая задача и статусы действий сохранены."})).await?; }
-                let mode = if use_tools { InferenceMode::Agent(definitions.clone()) } else if simple_reply { InferenceMode::Reply } else { InferenceMode::Chat };
+                let mode = if language_retry {InferenceMode::Reply} else if use_tools { InferenceMode::Agent(definitions.clone()) } else if simple_reply { InferenceMode::Reply } else { InferenceMode::Chat };
                 let team_evidence=crate::specialists::team_evidence(&answer.tools);
                 let mut planning_batch_error:Option<String>=None;
                 let mut response = if initial_task {initial_task=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_task","arguments":{}}}]})} else if let Some(url)=initial_browser.take() {json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_open","arguments":{"url":url}}}]})} else if team && !initial_search && !team_consulted && !team_evidence.is_empty() {crate::specialists::consultation(&input.content,&team_evidence)} else if refresh_browser {refresh_browser=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"browser_read","arguments":{"offset":0}}}]})} else if initial_material {initial_material=false;json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"search_artifacts","arguments":{"query":input.content}}}]})} else if initial_search {
                     emit(tx,json!({"type":"notice","message":"Подготовка поискового запроса на локальной модели…"})).await?;
                     let mut planning_history=history.clone();
-                    planning_history[0]["content"]=json!(format!("{}\nCURRENT PHASE: prepare a public search query. Only the supplied read-only evidence tools and web_search may be called. Call web_search with a focused query when ready; retrieve missing task context first if needed. Do not answer the research question before search. If clarification is required, return a concise question without tool calls. No browser navigation, specialist consultation or project actions in this phase.",planning_history[0]["content"].as_str().unwrap_or("")));
-                    let response=crate::lifecycle::bounded(deadline,model(&app,&selected,&planning_history,InferenceMode::Configured(Box::new(InferenceMode::Agent(definitions.clone())),thinking.clone(),team,false),tx,&cancel)).await?;
+                    planning_history[0]["content"]=json!(query_prompt);
+                    if let Some(d)=answer.diagnostics.as_mut(){d["search"]["query_thinking"]=phase_thinking.clone();}
+                    let response=crate::lifecycle::bounded(deadline,model(&app,&selected,&planning_history,InferenceMode::Configured(Box::new(InferenceMode::Agent(definitions.clone())),phase_thinking.clone(),team,false),tx,&cancel)).await?;
                     match crate::search::validate_planning_calls(&response,&input.content){
                         Ok(searches)=>{if searches{initial_search=false;}},
                         Err(error)=>{planning_batch_error=Some(format!("Поисковый пакет не выполнен: {error}. Исправьте параметры и используйте только разрешённые инструменты подготовки поиска. Ни одно действие из этого пакета не выполнялось."));}
@@ -1139,12 +1148,26 @@ pub async fn run(
                 }
 
                 let mut calls = response["tool_calls"].as_array().cloned().unwrap_or_default();
-                if planning_search && calls.is_empty(){
-                    answer.content=format!("Поиск не запускался: модель не сформировала запрос.\n\n{}",response["content"].as_str().unwrap_or("Укажите публичную тему поиска."));
-                    if let Some(d)=answer.diagnostics.as_mut(){d["search"]["status"]=json!("needs_query");d["search"]["clarification"]=response["content"].clone();}
-                    emit(tx,json!({"type":"replace_content","text":answer.content})).await?;
-                    history.push(json!({"role":"assistant","content":answer.content}));
-                    break;
+                if language_retry&&!calls.is_empty(){anyhow::bail!("Модель запросила действие вместо исправления языка ответа. Дополнительные действия не выполнялись; результаты задачи сохранены.");}
+                if planning_search && planning_batch_error.is_none(){
+                    let question=crate::search::planning_question(&response)?;
+                    let wrong_language=question.as_ref().is_some_and(|question|reply_language.as_ref().is_some_and(|code|crate::agent::wrong_reply_language(question,code)));
+                    if calls.is_empty()||wrong_language{
+                        let rejected=app.tasks.put_artifact(crate::permissions::TASK.try_with(Clone::clone).context("Нет запуска подготовки поиска")?,"derived_result".into(),response["content"].as_str().unwrap_or("").to_string(),json!({"origin":"rejected_search_preparation","reason":if wrong_language{"clarification_language"}else{"plain_prose_without_query"},"tool_calls":response["tool_calls"],"provider_called":false})).await?;
+                        if let Some(d)=answer.diagnostics.as_mut(){d["search"]["preparation_rejected"]=rejected;}
+                        if !planning_reply_retry{
+                            planning_reply_retry=true;
+                            let language=reply_language.as_deref().unwrap_or("the current user's language");
+                            history[0]["content"]=json!(format!("{}\nSearch planning protocol correction: plain prose, self-instructions such as 'continue research' and a plan are not a search query or a user clarification. Use web_search with a public query derived from the actual task/context. Do not repeat successful context tools. If concrete missing user information prevents searching, call ask_search_question alone with question and missing_information in {language}. Do not answer in plain text during preparation. Never copy private context into the provider query.",history[0]["content"].as_str().unwrap_or("")));
+                            emit(tx,json!({"type":"notice","message":"Модель не передала запрос для поиска. Повторяю подготовку."})).await?;continue;
+                        }
+                        if let Some(d)=answer.diagnostics.as_mut(){d["search"]["status"]=json!("preparation_failed");}
+                        anyhow::bail!("Поиск не начался: модель не сформировала поисковый запрос или конкретное уточнение после исправления шага. Исходный запрос и результаты действий сохранены.");
+                    }
+                    if let Some(question)=question{
+                        answer.content=question.clone();if let Some(d)=answer.diagnostics.as_mut(){d["search"]["status"]=json!("needs_input");d["search"]["clarification"]=json!(question);}
+                        emit(tx,json!({"type":"search_needs_input","question":question,"provider_called":false})).await?;emit(tx,json!({"type":"replace_content","text":answer.content})).await?;history.push(json!({"role":"assistant","content":answer.content}));break;
+                    }
                 }
                 if team && !team_consulted && calls.is_empty() {
                     response=crate::specialists::consultation(&input.content,&format!("Only the user's supplied request and attachments; no verified tool observations yet:\n{}",crate::tools::truncate(&context,14000)));
@@ -1173,14 +1196,13 @@ pub async fn run(
                         history.push(json!({"role":"assistant","content":answer.content}));
                         break;
                     }
-                    if simple_reply && reply_language.as_ref().is_some_and(|code|crate::agent::wrong_reply_language(text,code)) {
+                    if (simple_reply||use_tools) && reply_language.as_ref().is_some_and(|code|crate::agent::wrong_reply_language(text,code)) {
                         let code=reply_language.as_deref().unwrap();
                         if !language_retry {
                             language_retry=true;
                             if let Some(d)=answer.diagnostics.as_mut(){d["language_retry"]=json!(true);}
-                            history.truncate(1);
-                            history[0]["content"]=json!(format!("{}\nFor this response use {} ({code}) only. Previous conversation language is not a user preference. Do not invent a saved preference. Answer the current message briefly and directly.",history[0]["content"].as_str().unwrap_or(""),language(code)));
-                            history.push(json!({"role":"user","content":context}));
+                            history.push(json!({"role":"assistant","content":text}));
+                            history[0]["content"]=json!(format!("{}\nFor this response use {} ({code}) only. Rewrite the last assistant draft in this language, preserving code, exact quotations and source links. All actual tool observations remain above. Do not repeat actions, request new tools, invent new findings or restart the research. This step only corrects the reply language.",history[0]["content"].as_str().unwrap_or(""),language(code)));
                             emit(tx,json!({"type":"notice","message":"Уточняю язык ответа…"})).await?;
                             continue;
                         }
@@ -1234,7 +1256,7 @@ pub async fn run(
                 // whole batch before storing it, including calls never executed.
                 for call in response["tool_calls"].as_array_mut().into_iter().flatten(){
                     let name=call["function"]["name"].as_str().unwrap_or("").to_string();
-                    call["function"]["arguments"]=tools::public_arguments(&name,&call["function"]["arguments"]);
+                    call["function"]["arguments"]=tools::model_arguments(&name,&call["function"]["arguments"]);
                 }
                 let assistant_index=history.len();
                 history.push(response);
@@ -1244,7 +1266,7 @@ pub async fn run(
                     let (mut args,mut invalid)=match tools::arguments(name,raw_args.clone()){Ok(value)=>(value,None),Err(error)=>(raw_args,Some(error))};
                     if name=="web_search" && invalid.is_none(){invalid=crate::search::validate_query(&args,&input.content).err();}
                     if let Some(error)=&planning_batch_error{invalid=Some(anyhow::anyhow!(error.clone()));}
-                    history[assistant_index]["tool_calls"][index]["function"]["arguments"]=tools::public_arguments(name,&args);
+                    history[assistant_index]["tool_calls"][index]["function"]["arguments"]=tools::model_arguments(name,&args);
                     let id=uuid::Uuid::new_v4().to_string();
                     let action_started=std::time::Instant::now();
                     let run=crate::permissions::TASK.try_with(Clone::clone).context("Нет источника журнала инструмента")?;
@@ -1286,6 +1308,7 @@ pub async fn run(
                     let status = if matches!(status,"repeated"|"limit") {"skipped"} else {status};
                     let text = if status=="skipped" { allowed.unwrap_err().to_string() } else {text};
                     if status=="succeeded" && matches!(name,"write_file"|"edit_file"|"move_file"|"copy_file"|"delete_file"|"translate_file") && serde_json::from_str::<Value>(&text).is_ok_and(|v|v["changed"]==true) { budget.files_changed(); }
+                    if name=="web_search"{if let Some(d)=answer.diagnostics.as_mut(){let search=&mut d["search"];if search.is_object(){let key=if status=="succeeded"{"queries_succeeded"}else{"queries_failed"};search[key]=json!(search[key].as_u64().unwrap_or(0)+1);search["status"]=json!(if search["queries_succeeded"].as_u64().unwrap_or(0)>0{if search["queries_failed"].as_u64().unwrap_or(0)>0{"partial"}else{"searched"}}else{"search_failed"});}}}
                     let record=json!({"id":id,"name":name,"arguments":tools::public_arguments(name,&args),"status":status,"result":text,"exit_code":exit_code,"duration_ms":action_started.elapsed().as_millis().min(u64::MAX as u128) as u64});
                     let run=crate::permissions::TASK.try_with(Clone::clone).context("Нет источника журнала инструмента")?;
                     let record=crate::artifacts::archive_record(&app,&run,record).await?;

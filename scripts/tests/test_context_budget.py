@@ -13,7 +13,10 @@ class Fake(BaseHTTPRequestHandler):
   body=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))) or '{}')
   if self.path=='/api/show':return self.reply({'model_info':{'qwen.context_length':262144},'thinking':{'values':[False,True]}})
   if not body.get('messages') and not body.get('prompt'):return self.reply({'done':True})
-  payloads.append(body);self.reply({'message':{'role':'assistant','content':'Transport response.'},'response':'Transport response.','done':True,'done_reason':'stop'})
+  payloads.append(body)
+  if any(tool['function']['name']=='ask_search_question' for tool in body.get('tools',[])):
+   return self.reply({'message':{'role':'assistant','content':'','tool_calls':[{'function':{'name':'ask_search_question','arguments':{'question':'Кого из Саймонсов найти?','missing_information':'Не указано, какого человека искать.'}}}]},'done':True,'done_reason':'stop'})
+  self.reply({'message':{'role':'assistant','content':'Transport response.'},'response':'Transport response.','done':True,'done_reason':'stop'})
 server=ThreadingHTTPServer(('127.0.0.1',0),Fake);threading.Thread(target=server.serve_forever,daemon=True).start()
 with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
 settings={'workspace':str(root/'data/workspace'),'source':'en','target':'ru','theme':'dark','cpu_only':True,'agent_model':model,'team_model':model,'chat_model':model,'search_model':model,'translation_model':translation,'context':{'window_tokens':9987,'auto_max_tokens':32768,'output_tokens':4096}}

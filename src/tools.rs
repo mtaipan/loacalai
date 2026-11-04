@@ -416,11 +416,14 @@ pub fn public_record(record:&mut Value){
         record.as_object_mut().unwrap().remove("arguments_artifact");
     }
 }
+pub fn model_arguments(name:&str,args:&Value)->Value{
+    let value=public_arguments(name,args);if value.is_object(){value}else{json!({})}
+}
 pub fn public_history(history:&mut [Value]){
     for message in history.iter_mut().filter(|message|message["role"]=="assistant"){
         for call in message["tool_calls"].as_array_mut().into_iter().flatten(){
             let name=call["function"]["name"].as_str().unwrap_or("").to_string();
-            call["function"]["arguments"]=public_arguments(&name,&call["function"]["arguments"]);
+            call["function"]["arguments"]=model_arguments(&name,&call["function"]["arguments"]);
         }
     }
 }

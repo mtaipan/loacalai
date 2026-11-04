@@ -66,6 +66,7 @@ pub fn history_tokens(messages: &[Value]) -> usize {
         .iter()
         .map(|m| {
             text_tokens(m["content"].as_str().unwrap_or(""))
+                + text_tokens(m["thinking"].as_str().unwrap_or(""))
                 + m.get("tool_calls")
                     .map(|c| text_tokens(&c.to_string()))
                     .unwrap_or(0)
@@ -272,6 +273,14 @@ pub async fn configure_payload(
     payload["options"]["num_predict"] = json!(p.output_tokens);
     Ok(p)
 }
+#[cfg(test)]mod thinking_accounting_tests{
+    use super::*;
+    #[test]fn reasoning_returned_with_tool_calls_is_part_of_the_next_request_budget(){
+        let plain=json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_search_plan","arguments":{}}}]});let mut thinking=plain.clone();thinking["thinking"]=json!("reasoning 🦀 ".repeat(1000));
+        assert_eq!(history_tokens(&[thinking.clone()])-history_tokens(&[plain]),text_tokens(thinking["thinking"].as_str().unwrap()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
