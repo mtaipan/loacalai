@@ -70,6 +70,7 @@ impl Broker {
 }
 impl Lease {
     pub fn endpoint(&mut self, endpoint: String) {
+        self.completed = false;
         self.endpoint = Some(endpoint);
     }
     pub fn completed(&mut self) {

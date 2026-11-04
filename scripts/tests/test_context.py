@@ -12,19 +12,22 @@ requests = []
 model_limit = 262144
 foundation = 'hf.co/DevQuasar/huihui-ai.Foundation-Sec-8B-abliterated-GGUF:Q4_K_M'
 model = 'qwen2.5:3b'
+repair_started=threading.Event();repair_release=threading.Event();repair_cleanup=threading.Event()
 
 class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def reply(self, body):
         data = json.dumps(body).encode()+b'\n'
         self.send_response(200); self.send_header('Content-Type','application/json')
-        self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
+        self.send_header('Content-Length',str(len(data))); self.end_headers()
+        try:self.wfile.write(data)
+        except ConnectionError:pass
     def do_GET(self):
         self.reply({'models':[{'name':model},{'name':foundation}]} if self.path=='/api/tags' else {'models':[]} if self.path=='/api/ps' else {'version':'0.40.13'})
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))) or '{}')
         if body.get('keep_alive')==0 and not body.get('messages') and not body.get('prompt'):
-            return self.reply({'done':True,'done_reason':'unload'})
+            repair_cleanup.set();return self.reply({'done':True,'done_reason':'unload'})
         if self.path=='/api/show':
             return self.reply({'model_info':{'qwen.context_length':model_limit},'thinking':{'values':[False,True]}})
         if self.path in ['/api/chat','/api/generate']:
@@ -39,6 +42,14 @@ class Fixture(BaseHTTPRequestHandler):
                 completion['message']['tool_calls']=[{'function':{'name':'write_file','arguments':{'path':'should-never-exist.txt','content':'incomplete'}}}]
             if 'BROKEN_STREAM_FIXTURE' in text:
                 completion['done']=False
+            if 'REPAIR_CANCEL_FIXTURE' in text and 'Generation recovery:' in text:repair_started.set();repair_release.wait(10)
+            if 'EMPTY_RECOVERY_FIXTURE' in text or 'ALWAYS_EMPTY_FIXTURE' in text:
+                if 'Generation recovery:' not in text or 'ALWAYS_EMPTY_FIXTURE' in text:
+                    completion['message']={'role':'assistant','content':'   ','thinking':'REASONING_WITHOUT_ANSWER'}
+                    if 'EMPTY_LENGTH_FIXTURE' in text:completion['done_reason']='length'
+            if 'NO_NEWLINE_FIXTURE' in text:
+                data=json.dumps(completion).encode();self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+
             return self.reply(completion)
         self.reply({'status':'success'})
 
@@ -51,7 +62,7 @@ http=urllib.request.build_opener(urllib.request.ProxyHandler({})); token=''
 settings={'workspace':str(root/'data/workspace'),'agent_model':model,'chat_model':model,'team_model':model,'cpu_only':True,'source':'en','target':'ru','theme':'dark','context':{'window_tokens':0,'auto_max_tokens':32768,'output_tokens':4096}}
 (root/'data/settings.json').write_text(json.dumps(settings))
 log=(root/'test.log').open('w')
-process=subprocess.Popen([str(project/'target/release/local-gemma-studio.exe'),'--server'],cwd=root,env={**os.environ,'LOCAL_GEMMA_HOME':str(root),'LOCAL_GEMMA_PORT':str(port),'LOCAL_GEMMA_OLLAMA':'http://127.0.0.1:'+str(server.server_port)},stdout=log,stderr=log)
+process=subprocess.Popen([os.environ.get('LOCAL_GEMMA_TEST_EXE',str(project/'target/release/local-gemma-studio.exe')),'--server'],cwd=root,env={**os.environ,'LOCAL_GEMMA_HOME':str(root),'LOCAL_GEMMA_PORT':str(port),'LOCAL_GEMMA_OLLAMA':'http://127.0.0.1:'+str(server.server_port)},stdout=log,stderr=log)
 
 def call(path, body=None):
     return http.open(urllib.request.Request(base+path,data=json.dumps(body).encode() if body is not None else None,headers={'Content-Type':'application/json','X-Studio-Token':token}),timeout=30)
@@ -154,6 +165,27 @@ try:
     requests.clear(); chat=turn('Multilingual current task:\n'+('Точный полный текст 中文 🦀\n'*900),'chat','on')
     body=requests[-1]; assert body['options']['num_ctx']==32768 and body['options']['num_predict']==8192,body
     print('PASS multilingual task expands Auto window with thinking reserve')
+    for mode in ['chat','agent','team']:
+        requests.clear();chat=turn('EMPTY_RECOVERY_FIXTURE Please explain this current request without file actions.',mode,thinking='auto')
+        assert 'CONTEXT_ACCEPTED' in chat['messages'][-1]['content'],chat
+        assert chat['messages'][-1]['diagnostics']['generation_recoveries'][0]['initial']['kind']=='reasoning_only',chat
+        assert requests[0]['think'] is None and requests[1]['think'] is False,requests
+        assert not any(tool['name'] in ['write_file','run_command'] for tool in chat['messages'][-1]['tools'])
+    requests.clear();chat=turn('EMPTY_RECOVERY_FIXTURE Please explain this request.','chat',thinking='on')
+    assert requests[0]['think'] is True and requests[1]['think'] is True and chat['messages'][-1]['diagnostics']['generation_recoveries'][0]['auto_thinking_disabled'] is False
+    repair_cleanup.clear();cancel_chat=read('/api/chats',{});accepted=read('/api/runs',{'conversation':cancel_chat['id'],'content':'EMPTY_RECOVERY_FIXTURE REPAIR_CANCEL_FIXTURE Explain this request.','mode':'chat','thinking':'auto','source':'en','target':'ru','web':'off','attachments':[]})
+    assert repair_started.wait(5);read('/api/stop/'+accepted['run_id'],{});assert repair_cleanup.wait(5),'Cancelled recovery did not release the inference lease';repair_release.set()
+    for _ in range(100):
+        if read('/api/runs/'+accepted['run_id'])['status'] not in ['queued','running','stopping']:break
+        time.sleep(.02)
+    else:raise AssertionError('Cancelled protocol recovery remained active')
+    requests.clear();chat=turn('ALWAYS_EMPTY_FIXTURE Please explain this request.','chat',allow_error=True)
+    assert len(requests)==2 and chat['messages'][-1]['diagnostics']['generation_incomplete']['kind']=='reasoning_only',chat
+    assert chat['messages'][-1]['diagnostics']['usage']['done_reason']=='stop',chat
+    chat=turn('EMPTY_RECOVERY_FIXTURE EMPTY_LENGTH_FIXTURE Explain this current request.','chat')
+    assert chat['messages'][-1]['diagnostics']['generation_recoveries'][0]['initial']['length_limited'] is True,chat
+    chat=turn('NO_NEWLINE_FIXTURE Explain this request.','chat');assert 'CONTEXT_ACCEPTED' in chat['messages'][-1]['content'],chat
+    print('PASS reasoning-only/length/whitespace recovery preserves request, Auto capability and diagnostics; repeated empty ends explicitly after protocol repair; terminal JSON without newline accepted')
     requests.clear(); chat=turn('OUTPUT_LIMIT_FIXTURE Please explain the response.','chat')
     answer=chat['messages'][-1]
     assert answer['diagnostics']['length_limited'] is True and '\u26a0' in answer['content'],answer
