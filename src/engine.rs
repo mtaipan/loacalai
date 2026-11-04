@@ -20,6 +20,12 @@ impl std::fmt::Display for Interrupted {
     }
 }
 impl std::error::Error for Interrupted {}
+#[derive(Debug)]
+struct EmptyGeneration { diagnostic:Value }
+impl std::fmt::Display for EmptyGeneration {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{
+    f.write_str(if self.diagnostic["kind"]=="truncated_tool_call"{"Модель не закончила вызов инструмента; он не выполнялся. Шаг сохранён, завершённость задачи не подтверждена."}else{"Модель завершила генерацию без текста ответа и вызова инструмента. Рассуждения, причина остановки и расход токенов сохранены; шаг не дал результата."})
+}}
+impl std::error::Error for EmptyGeneration {}
 #[derive(Clone)]
 enum InferenceMode {
     Chat,
@@ -120,13 +126,28 @@ async fn model_attempt(
             if emitted.lock().unwrap().is_empty() {
                 emit(tx,json!({"type":"notice","message":"Ускоритель не смог выполнить запрос. Повторяю на CPU; причина доступна в разделе вычислений."})).await?;
                 ensure_ollama(app).await?;
-                result = tokio::select! {_=cancel.cancelled()=>Err(anyhow::anyhow!("Остановлено пользователем")),value=model_once(app, model, messages, mode, tx, cancel, true, &emitted,&mut lease)=>value};
+                result = tokio::select! {_=cancel.cancelled()=>Err(anyhow::anyhow!("Остановлено пользователем")),value=model_once(app, model, messages, mode.clone(), tx, cancel, true, &emitted,&mut lease)=>value};
             }
         }
     }
+    // Recovery repeats inference only: no tool from an empty/truncated response has run.
+    // One repair belongs to this invalid protocol step, not a quota on the user's task.
+    if let Some(failed)=result.as_ref().err().and_then(|e|e.downcast_ref::<EmptyGeneration>()).map(|e|e.diagnostic.clone()).filter(|_|emitted.lock().unwrap().trim().is_empty()&&!cancel.is_cancelled()) {
+        let mut repair_messages=messages.to_vec();
+        if let Some(system)=repair_messages.first_mut().filter(|m|m["role"]=="system"){
+            let original=system["content"].as_str().unwrap_or("");system["content"]=json!(format!("{original}\nGeneration recovery: the previous inference ended without a usable answer or complete tool call. No proposed tool from that inference was executed. Continue the same request from the actual recorded observations. Provide a complete next tool call, a concrete answer, or a specific clarification. Do not repeat already successful actions merely to recover this generation. Do not present reasoning alone as the answer."));
+        }
+        let mut repair_mode=mode.clone();let mut auto_thinking_disabled=false;
+        if let InferenceMode::Configured(_,think,_,_)=&mut repair_mode {if think.is_null(){let show=crate::thinking::show_cancellable(app,model,cancel).await?;if crate::thinking::choices(&show).contains(&json!(false)){*think=json!(false);auto_thinking_disabled=true;}}}
+        emit(tx,json!({"type":"generation_recovery","diagnostic":failed,"auto_thinking_disabled":auto_thinking_disabled})).await?;
+        emit(tx,json!({"type":"notice","message":if auto_thinking_disabled{"Модель не дала ответа. Повторяю этот шаг без рассуждений; выполненные действия сохранены."}else{"Модель не дала законченного ответа. Восстанавливаю этот шаг; выполненные действия сохранены."}})).await?;
+        let recovery_force=force||crate::compute::force_cpu(app,&config).await;
+        result=tokio::select!{_=cancel.cancelled()=>Err(anyhow::anyhow!("Остановлено пользователем")),value=model_once(app,model,&repair_messages,repair_mode,tx,cancel,recovery_force,&emitted,&mut lease)=>value};
+        match &mut result{Ok(value)=>{value["generation_recovery"]=json!({"initial":failed,"auto_thinking_disabled":auto_thinking_disabled});},Err(error)=>{if let Some(final_error)=error.downcast_ref::<EmptyGeneration>(){emit(tx,json!({"type":"generation_incomplete","diagnostic":final_error.diagnostic})).await?;}}}
+    }
     if let Err(error) = &result {
         let partial = emitted.lock().unwrap().clone();
-        if !partial.is_empty() && error.downcast_ref::<Interrupted>().is_none() {
+        if !partial.trim().is_empty() && error.downcast_ref::<Interrupted>().is_none() {
             return Err(Interrupted {
                 text: partial,
                 cause: format!("{error:#}"),
@@ -275,10 +296,8 @@ async fn model_once(
     let mut device_checked = force_cpu || ["auto", "cpu"].contains(&config.backend.as_str());
     loop {
         let next = tokio::select! {_=cancel.cancelled()=>return Err(Interrupted{text:if agent {String::new()} else {content},cause:"Остановлено пользователем".into()}.into()),value=stream.next()=>value};
-        let Some(bytes) = next else {
-            break;
-        };
-        buffer.extend_from_slice(&bytes?);
+        match next{Some(bytes)=>buffer.extend_from_slice(&bytes?),None=>{if buffer.iter().all(|b|b.is_ascii_whitespace()){break;}buffer.push(b'\n');}}
+
         while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
             let line: Vec<_> = buffer.drain(..=end).collect();
             if line.iter().all(|b| b.is_ascii_whitespace()) {
@@ -366,11 +385,11 @@ async fn model_once(
     if length_limited {
         result["length_limited"] = json!(true);
     }
-    anyhow::ensure!(!(length_limited && !calls.is_empty()),"Модель достигла лимита ответа во время вызова инструментов. Эти вызовы не выполнялись; сократите задачу и повторите запрос.");
-    anyhow::ensure!(
-        completed,
-        "Поток модели оборвался до завершения. Незавершённые вызовы инструментов не выполнялись."
-    );
+    anyhow::ensure!(completed,"Поток модели оборвался до завершения. Незавершённые вызовы инструментов не выполнялись.");
+    lease.completed(); // A terminal response ended server work even if its output is unusable.
+    let diagnostic=json!({"kind":if length_limited&&!calls.is_empty(){"truncated_tool_call"}else if !calls.is_empty(){"tool_calls"}else if !content.trim().is_empty(){"content"}else if thinking.trim().is_empty(){"empty_response"}else{"reasoning_only"},"context":context_plan,"usage":usage,"thinking_characters":thinking.chars().count(),"discarded_tool_calls":calls.len(),"length_limited":length_limited,"effects_executed":false});
+    emit(tx,json!({"type":"generation_diagnostic","diagnostic":diagnostic})).await?;
+    if length_limited&&!calls.is_empty(){return Err(EmptyGeneration{diagnostic}.into());}
     if !calls.is_empty() {
         result["tool_calls"] = json!(calls);
     }
@@ -391,10 +410,7 @@ async fn model_once(
             result["length_limited"] = json!(true);
         }
     }
-    anyhow::ensure!(
-        !result["content"].as_str().unwrap_or("").is_empty() || result["tool_calls"].as_array().is_some_and(|calls| !calls.is_empty()),
-        "Модель вернула пустой ответ без вызова инструмента. Попробуйте повторить запрос или выбрать другую модель."
-    );
+    if result["content"].as_str().unwrap_or("").trim().is_empty()&&!result["tool_calls"].as_array().is_some_and(|calls|!calls.is_empty()){return Err(EmptyGeneration{diagnostic}.into());}
     result["context"] = json!(context_plan);
     result["usage"] = usage;
     if length_limited {
@@ -1119,6 +1135,7 @@ async fn run_inner(
                 if let Some(d)=answer.diagnostics.as_mut(){
                     if !response["context"].is_null(){d["context"]=response["context"].clone();d["usage"]=response["usage"].clone();}
                     if response["length_limited"]==true{d["length_limited"]=json!(true);}
+                    if !response["generation_recovery"].is_null(){d["generation_recoveries"].as_array_mut().map(|a|a.push(response["generation_recovery"].clone())).unwrap_or_else(||{d["generation_recoveries"]=json!([response["generation_recovery"]]);});}
                 }
 
                 let mut calls = response["tool_calls"].as_array().cloned().unwrap_or_default();
@@ -1324,6 +1341,7 @@ async fn run_inner(
         }Ok(())
     }.await;
     if let Err(error) = &result {
+        if let Some(incomplete)=error.downcast_ref::<EmptyGeneration>(){let diagnostics=answer.diagnostics.get_or_insert_with(||json!({}));diagnostics["generation_incomplete"]=incomplete.diagnostic.clone();diagnostics["context"]=incomplete.diagnostic["context"].clone();diagnostics["usage"]=incomplete.diagnostic["usage"].clone();}
         if let Some(partial) = error.downcast_ref::<Interrupted>() {
             answer.content.push_str(&partial.text);
         }
