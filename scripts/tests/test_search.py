@@ -29,16 +29,21 @@ class Fixture(BaseHTTPRequestHandler):
         inferences.append(body);messages=body['messages'];tools=[m for m in messages if m.get('role')=='tool'];names={tool['function']['name'] for tool in body.get('tools',[])};text='\n'.join(m.get('content','') for m in messages if m['role']=='user')
         def call(name,args):return self.reply({'message':{'role':'assistant','content':'','tool_calls':[{'function':{'name':name,'arguments':args}}]},'done':True})
         if 'CURRENT PHASE: prepare a public search query.' in messages[0].get('content',''):
-            assert names <= {'web_search','read_task','read_artifact','search_artifacts','read_run_log','read_sources','read_search_plan','update_search_plan'},names
+            assert names <= {'web_search','read_task','read_artifact','search_artifacts','read_run_log','read_sources','read_search_plan','update_search_plan','ask_search_question'},names
             latest=next(m['content'] for m in reversed(messages) if m['role']=='user')
             if 'PLANNER_CANCEL' in latest:planning_waiting.set();release_planning.wait(15);return
+            if 'PLANNER_META_RU' in latest:
+                if not any(m.get('tool_name')=='read_search_plan' for m in tools):return call('read_search_plan',{})
+                if 'Search planning protocol correction:' not in messages[0]['content']:return self.reply({'done':True,'message':{'role':'assistant','content':'What to do next? Continue with the research task by reading the latest research plan.'}})
+                return call('web_search',{'query':'James Simons mathematician biography'})
+            if 'PLANNER_STUCK' in latest:return self.reply({'done':True,'message':{'role':'assistant','content':'Continue with the research task by reading the latest research plan.'}})
             if 'PLANNER_EMPTY' in latest:
                 if not any(m.get('tool_name')=='read_search_plan' for m in tools):return call('read_search_plan',{})
                 if 'Generation recovery:' not in messages[0]['content']:return self.reply({'done':True,'done_reason':'stop','eval_count':178,'message':{'role':'assistant','content':'','thinking':'Reasoning without answer after state observation.'}})
                 return call('web_search',{'query':'primary fixture official documentation'})
 
-            if 'PLANNER_CLARIFY' in latest:return self.reply({'message':{'role':'assistant','content':'Which Rust version should be checked?'},'done':True})
-            if 'PLANNER_BAD_BATCH' in latest and any('Поисковый пакет не выполнен' in m.get('content','') for m in tools):return self.reply({'message':{'role':'assistant','content':'Which Rust version should be checked?'},'done':True})
+            if 'PLANNER_CLARIFY' in latest:return call('ask_search_question',{'question':'Which Rust version should be checked?','missing_information':'The requested Rust version is absent from the supplied task context.'})
+            if 'PLANNER_BAD_BATCH' in latest and any('Поисковый пакет не выполнен' in m.get('content','') for m in tools):return call('ask_search_question',{'question':'Which Rust version should be checked?','missing_information':'The requested Rust version is absent from the supplied task context.'})
             if 'COUNT_PACKET' in latest:
                 if not any('Поисковый пакет не выполнен' in m.get('content','') for m in tools):return call('web_search',{'query':'primary fixture official documentation','count':'24'})
                 if sum('Поисковый пакет не выполнен' in m.get('content','') for m in tools)==1:return call('web_search',['malformed','arguments'])
@@ -59,6 +64,7 @@ class Fixture(BaseHTTPRequestHandler):
                 if value.get('page_source'):pages.append(value)
             if pages and pages[-1].get('next_result_offset') is not None:
                 page=pages[-1];return call('web_search',{'query':'primary fixture official documentation','count':1000,'page_source':page['page_source']['id'],'result_offset':page['next_result_offset']})
+        if 'For this response use Russian (ru)' in messages[0]['content']:return self.reply({'done':True,'message':{'role':'assistant','content':'Найдены источники о математике Джеймсе Саймонсе. Результаты поиска сохранены.'}})
         if 'LOCAL_OFFLINE' in text:
             last_user=max(i for i,m in enumerate(messages) if m.get('role')=='user')
             tools=[m for m in messages[last_user+1:] if m.get('role')=='tool']
@@ -162,9 +168,14 @@ try:
     assert len(provider_calls)==before+1 and provider_calls[-1]['q']==['Rust E0382 ownership official documentation']
     for marker in ['PLANNER_CLARIFY','PLANNER_BAD_BATCH']:
         before=len(provider_calls);failed=turn(marker,mode='chat',allow_error=True);assert len(provider_calls)==before
-        if marker=='PLANNER_CLARIFY':assert 'Which Rust version' in failed['messages'][-1]['content'] and failed['messages'][-1]['diagnostics']['search']['status']=='needs_query'
+        if marker=='PLANNER_CLARIFY':assert 'Which Rust version' in failed['messages'][-1]['content'] and failed['messages'][-1]['diagnostics']['search']['status']=='needs_input'
         else:assert len(failed['messages'][-1]['tools'])==2 and all(t['status']=='failed' for t in failed['messages'][-1]['tools'])
     print('PASS local query planning, read-only context recovery after restart, private-message minimization, clarification and atomic unsafe-batch rejection')
+    before=len(provider_calls);meta=turn('PLANNER_META_RU Найди сведения о математике Саймонсе. Ответь на русском.',options={'depth':'deep'});answer=meta['messages'][-1]
+    assert len(provider_calls)==before+1 and sum(t['name']=='read_search_plan' for t in answer['tools'])==1 and 'Найдены источники' in answer['content'],answer
+    assert answer['diagnostics']['language_retry'] is True and answer['diagnostics']['search']['status']!='needs_input',answer
+    before=len(provider_calls);stuck=turn('PLANNER_STUCK Explain the public topic',allow_error=True);assert len(provider_calls)==before and stuck['messages'][-1]['diagnostics']['search']['status']=='preparation_failed'
+    print('PASS planner self-instructions do not become user clarification; protocol repair performs search once, language correction preserves evidence without repeating tools; repeated prose remains failed preparation')
     before=len(provider_calls);empty=turn('PLANNER_EMPTY primary fixture '+site+'/page?number=0',mode='search',options={'depth':'deep','domains':['127.0.0.1']});answer=empty['messages'][-1]
     assert len(provider_calls)==before+1 and sum(t['name']=='read_search_plan' for t in answer['tools'])==1,answer
     assert answer['diagnostics']['generation_recoveries'][0]['initial']['kind']=='reasoning_only' and 'SEARCH_FLOW_DONE' in answer['content'],answer
@@ -219,6 +230,9 @@ try:
         page.locator('.source-receipts').first.click();page.wait_for_selector('.source-history .source-index-row');assert page.locator('.source-history .source-index-row').count()>=2;assert page.locator('.source-history .source-close').bounding_box()['y']<760;page.locator('.source-history .source-close').click();page.wait_for_selector('.source-history',state='detached');page.locator('.source-close').click();browser.close()
     print('PASS Edge 320px search controls, literal source cards and no JS errors')
 finally:
+    for request in inferences:
+        if request.get('messages') and request['messages'][0].get('content','').startswith('You prepare a public web search query locally.') and any('PLANNER_META_RU' in m.get('content','') for m in request['messages'] if m.get('role')=='user'):
+            (root/'query-planning-payload.json').write_text(json.dumps(request,ensure_ascii=False),encoding='utf-8');break
     release_wait.set();release_planning.set()
     if process:stop()
     fixture.shutdown();log.close()
