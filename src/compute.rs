@@ -530,6 +530,9 @@ pub async fn install_package(
     backend: &str,
     tx: &tokio::sync::mpsc::Sender<Value>,
 ) -> Result<()> {
+    install_package_cancel(app,backend,tx,&app.shutdown.child_token()).await
+}
+pub async fn install_package_cancel(app:&Shared,backend:&str,tx:&tokio::sync::mpsc::Sender<Value>,cancel:&tokio_util::sync::CancellationToken)->Result<()> {
     anyhow::ensure!(
         std::env::var_os("LOCAL_GEMMA_OLLAMA").is_none(),
         "Установка модулей внешнего сервера выполняется отдельно"
@@ -564,7 +567,7 @@ pub async fn install_package(
         .arg("--version")
         .arg(version)
         .env("PYTHONUTF8", "1");
-    let result = tools::capture(cmd, &app.shutdown.child_token(), 0).await;
+    let result = tools::capture(cmd, cancel, 0).await;
     app.compute.lock().await.installing = false;
     // Bring back the private service even when a download fails.
     let restart = ensure(app, &config).await;

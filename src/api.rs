@@ -245,6 +245,7 @@ pub struct App {
     pub settings_write: Mutex<()>,
     pub resources: crate::resources::Broker,
     pub tasks: crate::task_store::Store,
+    pub installations: crate::installations::Runtime,
     pub root: PathBuf,
     pub data: PathBuf,
     pub client: reqwest::Client,
@@ -328,6 +329,7 @@ impl App {
             settings_write: Mutex::new(()),
             resources: Default::default(),
             tasks,
+            installations:Default::default(),
             grants: Mutex::new(crate::permissions::Grants::load(&data)?),
             root,
             data,
@@ -440,6 +442,11 @@ pub fn router(app: Shared) -> Router {
         .route("/api/assistant/config", get(assistant_config))
         .route("/api/thinking", get(thinking_options))
         .route("/api/web/install", post(install_browser))
+        .route("/api/installations",get(installations_list).post(installations_start))
+        .route("/api/installations/{id}",get(installation_get))
+        .route("/api/installations/{id}/events",get(installation_events))
+        .route("/api/installations/{id}/cancel",post(installation_cancel))
+        .route("/api/installations/{id}/retry",post(installation_retry))
         .route("/api/compute", get(compute_info))
         .route("/api/compute/refresh", post(compute_refresh))
         .route("/api/compute/retry", post(compute_retry))
@@ -484,6 +491,8 @@ pub fn router(app: Shared) -> Router {
         .route("/api/chats/{id}/tasks", get(conversation_tasks))
         .route("/api/tasks/{id}", get(task_state))
         .route("/api/tasks/{id}/requests/{sequence}", get(task_request))
+        .route("/api/tasks/{id}/ledger/{section}", get(task_ledger))
+        .route("/api/tasks/{id}/requirements/{requirement}/source", get(requirement_source))
         .route("/api/approve/{id}", post(approve))
         .route("/api/approve/{id}/preview", get(approval_preview))
         .route("/api/permissions", get(permission_grants))
@@ -666,7 +675,7 @@ async fn status(State(app): State<Shared>) -> Json<Value> {
     let models = crate::model_storage::tags(&app).await;
     let compute = crate::compute::summary(&app).await;
     Json(
-        json!({"process_recovery_errors":app.process_recovery_errors,"compute":compute,"online":models["online"],"model_locations":models["locations"],"storage_errors":models["errors"],"models":models["models"],"python":tools::python(&app).map(|p|p.to_string_lossy().to_string()),"models_path":app.data.join("models").to_string_lossy(),"speech_ready":tools::speech_model(&app).join("model.bin").exists(),"workspace":app.settings.lock().await.workspace,"hotkey":hotkey,"active_tasks":app.runs.lock().await.len(),"models_busy":app.model_lifecycle.try_write().is_err(),"quick_busy":matches!(app.quick.lock().await["status"].as_str(),Some("translating"|"capturing"))}),
+        json!({"process_recovery_errors":app.process_recovery_errors,"compute":compute,"online":models["online"],"model_locations":models["locations"],"storage_errors":models["errors"],"models":models["models"],"python":tools::python(&app).map(|p|p.to_string_lossy().to_string()),"models_path":app.data.join("models").to_string_lossy(),"speech_ready":tools::speech_ready(&app),"workspace":app.settings.lock().await.workspace,"hotkey":hotkey,"active_tasks":app.runs.lock().await.len(),"models_busy":app.model_lifecycle.try_write().is_err(),"quick_busy":matches!(app.quick.lock().await["status"].as_str(),Some("translating"|"capturing"))}),
     )
 }
 async fn settings(State(app):State<Shared>,Json(value):Json<Settings>)->ApiResult<Settings>{
@@ -824,42 +833,31 @@ async fn compute_retry(State(app): State<Shared>) -> ApiResult<Value> {
     }
     Ok(Json(crate::compute::info(&app, false).await))
 }
-async fn compute_install(
-    State(app): State<Shared>,
-    Json(value): Json<Value>,
-) -> Result<impl IntoResponse, ApiError> {
-    let backend = value["backend"].as_str().unwrap_or("").to_string();
-    require(
-        ["cuda", "vulkan", "rocm"].contains(&backend.as_str()),
-        "Неизвестный модуль",
-    )?;
-    require(
-        cfg!(windows),
-        "На этой платформе компоненты GPU устанавливаются вместе с системным движком Ollama",
-    )?;
-    require(
-        app.runs.lock().await.is_empty(),
-        "Дождитесь завершения текущей задачи",
-    )?;
-    let guard = app
-        .model_lifecycle
-        .clone()
-        .try_write_owned()
-        .map_err(|_| anyhow::anyhow!("Дождитесь окончания ответа, перевода или скачивания"))?;
-    let (tx, mut rx) = mpsc::channel::<Value>(32);
-    let worker = app.clone();
-    tokio::spawn(async move {
-        let _guard = guard;
-        if let Err(e) = crate::compute::install_package(&worker, &backend, &tx).await {
-            let _ = tx
-                .send(json!({"type":"error","message":format!("{e:#}")}))
-                .await;
-        }
-        let _ = tx.send(json!({"type":"done"})).await;
-    });
-    let stream = async_stream::stream! {while let Some(value)=rx.recv().await{yield Ok::<Event,Infallible>(Event::default().json_data(value).unwrap());}};
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+async fn compute_install(State(app):State<Shared>,Json(value):Json<Value>)->Result<Response,ApiError>{
+    let job=crate::installations::start(&app,value["request_id"].as_str().map(str::to_owned).unwrap_or_else(||Uuid::new_v4().to_string()),json!({"kind":"gpu","backend":value["backend"]})).await?;
+    Ok(installation_stream(app,job["id"].as_str().unwrap().to_string()))
 }
+async fn installations_list(State(app):State<Shared>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
+    let before=match(q.get("before_created"),q.get("before_id")){(None,None)=>None,(Some(created),Some(id))=>{Uuid::parse_str(id)?;Some((created.clone(),id.clone()))},_=>return Err(anyhow::anyhow!("Укажите обе части курсора установок").into())};Ok(Json(app.tasks.installation_list(before).await?))
+}
+async fn installations_start(State(app):State<Shared>,Json(value):Json<Value>)->ApiResult<Value>{
+    let id=value["request_id"].as_str().map(str::to_owned).unwrap_or_else(||Uuid::new_v4().to_string());Ok(Json(crate::installations::start(&app,id,value["spec"].clone()).await?))
+}
+async fn installation_get(State(app):State<Shared>,Path(id):Path<String>)->ApiResult<Value>{Uuid::parse_str(&id)?;Ok(Json(app.tasks.installation_get(id).await?))}
+async fn installation_events(State(app):State<Shared>,Path(id):Path<String>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{Uuid::parse_str(&id)?;let after=q.get("after").map(|v|v.parse::<i64>()).transpose()?.unwrap_or(0);Ok(Json(app.tasks.installation_events(id,after).await?))}
+async fn installation_cancel(State(app):State<Shared>,Path(id):Path<String>)->ApiResult<Value>{Uuid::parse_str(&id)?;Ok(Json(crate::installations::cancel(&app,id).await?))}
+async fn installation_retry(State(app):State<Shared>,Path(id):Path<String>)->ApiResult<Value>{Uuid::parse_str(&id)?;Ok(Json(crate::installations::retry(&app,id).await?))}
+fn installation_stream(app:Shared,id:String)->Response{
+    let stream=async_stream::stream!{
+        yield Ok::<Event,Infallible>(Event::default().json_data(json!({"type":"installation","id":id})).unwrap());let mut after=0;
+        loop{match app.tasks.installation_events(id.clone(),after).await{
+            Ok(page)=>{for item in page["items"].as_array().unwrap(){after=item["sequence"].as_i64().unwrap();yield Ok(Event::default().json_data(&item["event"]).unwrap());}
+                if page["has_more"]==true{continue;}let job=&page["job"];let state=job["status"].as_str().unwrap();if !["queued","running","stopping"].contains(&state){if state!="succeeded"{yield Ok(Event::default().json_data(json!({"type":"error","message":job["error"].as_str().unwrap_or("Установка остановлена"),"installation_id":id,"status":state})).unwrap());}yield Ok(Event::default().json_data(json!({"type":"done","installation_id":id,"status":state})).unwrap());break;}
+            },Err(e)=>{yield Ok(Event::default().json_data(json!({"type":"error","message":format!("{e:#}")})).unwrap());break;}
+        }tokio::time::sleep(std::time::Duration::from_millis(200)).await;}
+    };Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+}
+
 async fn chats(State(app):State<Shared>)->ApiResult<Value>{
     let mut items=app.tasks.chat_list().await?;let known=items.iter().filter_map(|v|v["id"].as_str().map(str::to_owned)).collect::<std::collections::HashSet<_>>();let path=app.data.join("chats");
     let headers=tokio::task::spawn_blocking(move||->anyhow::Result<Vec<crate::chat_headers::Header>>{let mut headers=vec![];for entry in std::fs::read_dir(path)?{let entry=entry?;if entry.path().extension().is_some_and(|e|e=="json")&&!entry.path().file_stem().and_then(|s|s.to_str()).is_some_and(|s|known.contains(s)){if let Ok(header)=crate::chat_headers::read(&entry.path()){headers.push(header);}}}Ok(headers)}).await??;
@@ -1177,15 +1175,8 @@ async fn thinking_options(
         json!({"model":model,"values":crate::thinking::choices(&show),"default":show["thinking"]["default"]}),
     ))
 }
-async fn install_browser(State(app): State<Shared>) -> ApiResult<Value> {
-    require(
-        app.runs.lock().await.is_empty(),
-        "Дождитесь завершения задач",
-    )?;
-    Ok(Json(
-        crate::web_tools::install(&app, &app.shutdown.child_token()).await?,
-    ))
-}
+async fn install_browser(State(app):State<Shared>)->ApiResult<Value>{Ok(Json(crate::installations::start(&app,Uuid::new_v4().to_string(),json!({"kind":"browser"})).await?))}
+
 async fn send(
     State(app): State<Shared>,
     Json(input): Json<ChatInput>,
@@ -1500,6 +1491,15 @@ async fn task_request(State(app):State<Shared>,Path((id,sequence)):Path<(String,
     let offset=q.get("offset").map(|v|v.parse::<usize>()).transpose()?.unwrap_or(0);
     Ok(Json(app.tasks.task_request(id,sequence,offset).await?))
 }
+async fn task_ledger(State(app):State<Shared>,Path((id,section)):Path<(String,String)>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
+    let mut args=json!({"limit":8});
+    if let Some(before)=q.get("before"){let before=before.parse::<i64>()?;require(before>0,"Некорректный курсор")?;args[match section.as_str(){"requirements"=>"before_requirement","requirement_checks"=>"before_check","attempts"=>"before_attempt",_=>return Err(anyhow::anyhow!("Неизвестный раздел требований").into())}]=json!(before);}
+    Ok(Json(app.tasks.task_requirement_page(id,section,args).await?))
+}
+async fn requirement_source(State(app):State<Shared>,Path((id,requirement)):Path<(String,String)>,axum::extract::Query(q):axum::extract::Query<HashMap<String,String>>)->ApiResult<Value>{
+    let offset=q.get("offset").map(|v|v.parse::<usize>()).transpose()?.unwrap_or(0);
+    Ok(Json(app.tasks.requirement_source(id,requirement,offset).await?))
+}
 async fn revoke_permission(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     app.grants.lock().await.revoke(&app.data, &id)?;
     Ok(Json(json!({"ok":true})))
@@ -1550,66 +1550,12 @@ async fn media(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult
     }
     Ok(Json(result?))
 }
-async fn pull(
-    State(app): State<Shared>,
-    Json(value): Json<Value>,
-) -> Result<impl IntoResponse, ApiError> {
-    let models: Vec<String> = if let Some(model) = value.get("model") {
-        vec![model
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Укажите модель"))?
-            .to_string()]
-    } else {
-        vec![
-            crate::models::default_translation(),
-            crate::models::default_assistant(),
-        ]
-    };
-    for model in &models {
-        require(
-            crate::models::catalog()
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|m| m["id"] == model.as_str()),
-            "Модель отсутствует в каталоге",
-        )?;
-    }
-    if let Some(directory) = value["directory"].as_str().filter(|s| !s.is_empty()) {
-        let _guard = app
-            .model_lifecycle
-            .try_write()
-            .map_err(|_| anyhow::anyhow!("Дождитесь завершения работы с моделями"))?;
-        if models[0] != "whisper-small"
-            && !crate::model_storage::locations(&app)?.contains_key(&models[0])
-        {
-            let tags = crate::model_storage::tags(&app).await;
-            if crate::models::installed(&models[0], &tags["models"]) {
-                let requested = dunce::canonicalize(directory).ok();
-                let current = dunce::canonicalize(app.data.join("models")).ok();
-                require(requested.is_some() && requested==current,"Модель уже установлена в основной папке. Удалите её перед скачиванием на другой диск")?;
-            }
-        }
-        let installed = crate::models::installed(
-            &models[0],
-            &crate::model_storage::tags(&app).await["models"],
-        );
-        crate::model_storage::set_location(&app, &models[0], directory, installed)?;
-    }
-    let (tx, mut rx) = mpsc::channel::<Value>(64);
-    let model_guard = app.model_lifecycle.clone().read_owned().await;
-    tokio::spawn(async move {
-        let _model_guard = model_guard;
-        if let Err(error) = engine::pull_models(&app, &models, &tx).await {
-            let _ = tx
-                .send(json!({"type":"error","message":format!("{error:#}")}))
-                .await;
-        }
-        let _ = tx.send(json!({"type":"done"})).await;
-    });
-    let stream = async_stream::stream! {while let Some(value)=rx.recv().await{yield Ok::<Event,Infallible>(Event::default().json_data(value).unwrap());}};
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+async fn pull(State(app):State<Shared>,Json(value):Json<Value>)->Result<Response,ApiError>{
+    let models=if value.get("model").is_some(){json!([value["model"]])}else{json!([crate::models::default_translation(),crate::models::default_assistant()])};
+    let mut spec=json!({"kind":"models","models":models});if let Some(directory)=value.get("directory"){spec["directory"]=directory.clone();}
+    let job=crate::installations::start(&app,value["request_id"].as_str().map(str::to_owned).unwrap_or_else(||Uuid::new_v4().to_string()),spec).await?;Ok(installation_stream(app,job["id"].as_str().unwrap().to_string()))
 }
+
 async fn delete_model(State(app): State<Shared>, Json(value): Json<Value>) -> ApiResult<Value> {
     let _guard = app
         .model_lifecycle

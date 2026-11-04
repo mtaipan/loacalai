@@ -45,9 +45,11 @@ pub fn associate(tx:&Transaction<'_>,run:&str,conversation:&str,input:&Value,pro
     Ok(())
 }
 pub fn snapshot(conn:&Connection,task:&str,after:i64)->Result<Value> {
-    let (conversation,project,goal,state):(String,String,String,String)=conn.query_row("SELECT conversation,project,goal,state FROM work_tasks WHERE id=?1",[task],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or(crate::task_store::MissingResource("Рабочая задача не найдена"))?;
-    let mut query=conn.prepare("SELECT sequence,run,substr(content,1,400),length(content),attachments FROM task_requests WHERE task=?1 AND sequence>?2 ORDER BY sequence LIMIT 32")?;
-    let requests=query.query_map(params![task,after],|r|Ok(json!({"sequence":r.get::<_,i64>(0)?,"run":r.get::<_,String>(1)?,"preview":r.get::<_,String>(2)?,"characters":r.get::<_,i64>(3)?,"attachments":serde_json::from_str::<Value>(&r.get::<_,String>(4)?).unwrap_or(json!([]))})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let (conversation,project,state):(String,String,String)=conn.query_row("SELECT conversation,project,state FROM work_tasks WHERE id=?1",[task],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(crate::task_store::MissingResource("Рабочая задача не найдена"))?;
+    let goal=crate::task_requirements::goal_preview(conn,task,8000)?;
+    let mut query=conn.prepare("SELECT sequence,run,attachments FROM task_requests WHERE task=?1 AND sequence>?2 ORDER BY sequence LIMIT 32")?;
+    let mut requests=query.query_map(params![task,after],|r|Ok(json!({"sequence":r.get::<_,i64>(0)?,"run":r.get::<_,String>(1)?,"attachments":serde_json::from_str::<Value>(&r.get::<_,String>(2)?).unwrap_or(json!([]))})))?.collect::<rusqlite::Result<Vec<_>>>()?;drop(query);
+    for row in &mut requests{let source=crate::task_requirements::request_page(conn,task,row["sequence"].as_i64().unwrap(),0,400)?;row["preview"]=source["text"].clone();row["characters"]=source["characters"].clone();row["sha256"]=source["sha256"].clone();}
     let next=requests.last().and_then(|r|r["sequence"].as_i64()).unwrap_or(after);
     let more:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM task_requests WHERE task=?1 AND sequence>?2)",params![task,next],|r|r.get(0))?;
     let plan:Option<(String,String,i64)>=conn.query_row("SELECT plan,source_run,revision FROM task_plans WHERE task=?1",[task],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
@@ -55,5 +57,5 @@ pub fn snapshot(conn:&Connection,task:&str,after:i64)->Result<Value> {
     let mut runs=conn.prepare("SELECT r.id,r.status,r.created FROM runs r JOIN task_runs t ON r.id=t.run WHERE t.task=?1 ORDER BY r.created DESC LIMIT 32")?;
     let runs=runs.query_map([task],|r|Ok(json!({"id":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?,"created":r.get::<_,String>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let legacy:Option<Value>=conn.query_row("SELECT request_count,original_workspace,created FROM legacy_task_imports WHERE task=?1",[task],|row|Ok(json!({"request_count":row.get::<_,i64>(0)?,"original_workspace":row.get::<_,String>(1)?,"imported":row.get::<_,String>(2)?,"origin":"legacy_json","grouping_verified":false,"effects_verified":false,"note":"Historical user requests, not verified execution receipts. Reconcile original grouping/workspace and actual effects before continuing. The current selected workspace governs project permissions."}))).optional()?;
-    Ok(json!({"id":task,"conversation":conversation,"project":project,"goal_preview":crate::tools::truncate(&goal,8000),"goal_characters":goal.chars().count(),"state":state,"requests":requests,"next_after":next,"has_more":more,"plan":plan,"runs":runs,"completion_verified":false,"legacy_context":legacy}))
+    Ok(json!({"id":task,"conversation":conversation,"project":project,"goal_preview":goal["text"],"goal_characters":goal["characters"],"goal_sha256":goal["sha256"],"state":state,"requests":requests,"next_after":next,"has_more":more,"plan":plan,"runs":runs,"completion_verified":false,"requirements":crate::task_requirements::summary_task(conn,task)?,"legacy_context":legacy}))
 }

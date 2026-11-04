@@ -5,8 +5,8 @@ import sys
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
-os.environ['PLAYWRIGHT_BROWSERS_PATH'] = str(root/'data/cache/browsers')
-os.environ['PIP_CACHE_DIR'] = str(root/'data/cache/pip')
+os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH', str(root/'data/cache/browsers'))
+os.environ.setdefault('PIP_CACHE_DIR', str(root/'data/cache/pip'))
 subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-warn-script-location', 'playwright==1.64.1'], check=True)
 from playwright.sync_api import sync_playwright
 with sync_playwright() as p:
@@ -20,4 +20,6 @@ with sync_playwright() as p:
             pass
     else:
         subprocess.run([sys.executable, '-m', 'playwright', 'install', 'chromium'], check=True)
-        print('Ready: Chromium downloaded to '+os.environ['PLAYWRIGHT_BROWSERS_PATH'])
+        browser = p.chromium.launch(headless=True)
+        browser.close()
+        print('Ready: Chromium launched from '+os.environ['PLAYWRIGHT_BROWSERS_PATH'])

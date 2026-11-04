@@ -49,7 +49,7 @@ impl Store {
         let mut conn = Connection::open(data.join("tasks.sqlite3"))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 11,
+            version <= 12,
             "База задач создана более новой версией приложения; исходный файл сохранён"
         );
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -75,7 +75,10 @@ impl Store {
         crate::source_index::install(&conn)?;
         crate::document_checkpoints::install(&conn)?;
         crate::chat_store::install(&conn)?;
-        conn.pragma_update(None,"user_version",11)?;
+        crate::installations::install(&conn)?;
+        crate::task_requirements::install(&conn)?;
+        crate::installations::recover(&conn)?;
+        conn.pragma_update(None,"user_version",12)?;
         conn.execute("UPDATE material_ingests SET status='interrupted',error=COALESCE(error,'Приложение завершилось до окончания подготовки') WHERE status='ingesting'",[])?;
         conn.execute("DELETE FROM chat_exports",[])?;
         // A crash leaves effects with unknown outcome. Never replay mutations automatically.
@@ -218,10 +221,10 @@ impl Store {
         }).await
     }
     pub async fn permission_task(&self,run:String)->Result<Option<(String,String)>>{
-        self.access(move|conn|Ok(conn.query_row("SELECT t.task,substr(w.goal,1,180) FROM task_runs t JOIN work_tasks w ON w.id=t.task WHERE t.run=?1 AND w.state='open'",[run],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).optional()?)).await
+        self.access(move|conn|{let task:Option<String>=conn.query_row("SELECT t.task FROM task_runs t JOIN work_tasks w ON w.id=t.task WHERE t.run=?1 AND w.state='open'",[run],|row|row.get(0)).optional()?;task.map(|id|{let title=crate::task_requirements::text_prefix(conn,&id,None,180)?;Ok((id,title))}).transpose()}).await
     }
     pub async fn permission_task_titles(&self,ids:Vec<String>)->Result<serde_json::Map<String,Value>>{
-        self.access(move|conn|{let mut query=conn.prepare("SELECT id,substr(goal,1,180) FROM work_tasks WHERE id IN (SELECT value FROM json_each(?1))")?;let rows=query.query_map([serde_json::to_string(&ids)?],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;Ok(rows.into_iter().map(|(id,title)|(id,json!(title))).collect())}).await
+        self.access(move|conn|{let mut query=conn.prepare("SELECT id FROM work_tasks WHERE id IN (SELECT value FROM json_each(?1))")?;let rows=query.query_map([serde_json::to_string(&ids)?],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;drop(query);let mut values=serde_json::Map::new();for id in rows{values.insert(id.clone(),json!(crate::task_requirements::text_prefix(conn,&id,None,180)?));}Ok(values)}).await
     }
     pub async fn work_task_ids(&self,conversation:String)->Result<Vec<String>>{
         self.access(move|conn|{let mut query=conn.prepare("SELECT id FROM work_tasks WHERE conversation=?1")?;let ids=query.query_map([conversation],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;Ok(ids)}).await
@@ -232,17 +235,14 @@ impl Store {
     }
     pub async fn task_request_slice(&self,id:String,sequence:i64,offset:usize,max_characters:usize)->Result<Value>{
         anyhow::ensure!((1..=16000).contains(&max_characters),"Размер страницы запроса от 1 до 16000 символов");
-        self.access(move|conn|{
-            let (text,total):(String,i64)=conn.query_row("SELECT substr(content,?3+1,?4),length(content) FROM task_requests WHERE task=?1 AND sequence=?2",params![id,sequence,i64::try_from(offset)?,i64::try_from(max_characters)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(MissingResource("Запрос задачи не найден"))?;
-            let next=offset.saturating_add(text.chars().count());
-            Ok(json!({"sequence":sequence,"text":text,"offset":offset,"next_offset":next,"characters":total,"has_more":(next as u64)<total as u64}))
-        }).await
+        self.access(move|conn|crate::task_requirements::request_page(conn,&id,sequence,offset,max_characters)).await
     }
     pub async fn task_list(&self,conversation:String)->Result<Value>{
         self.access(move|conn|{
-            let mut query=conn.prepare("SELECT id,goal,project,state,updated FROM work_tasks WHERE conversation=?1 ORDER BY created DESC,id DESC")?;
-            let rows=query.query_map([conversation],|r|Ok(json!({"id":r.get::<_,String>(0)?,"goal_preview":crate::tools::truncate(&r.get::<_,String>(1)?,300),"project":r.get::<_,String>(2)?,"state":r.get::<_,String>(3)?,"updated":r.get::<_,String>(4)?})))?;
-            Ok(json!(rows.collect::<rusqlite::Result<Vec<_>>>()?))
+            let mut query=conn.prepare("SELECT id,project,state,updated FROM work_tasks WHERE conversation=?1 ORDER BY created DESC,id DESC")?;
+            let mut rows=query.query_map([conversation],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"updated":r.get::<_,String>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;drop(query);
+            for row in &mut rows{row["goal_preview"]=json!(crate::task_requirements::text_prefix(conn,row["id"].as_str().unwrap(),None,300)?);}
+            Ok(json!(rows))
         }).await
     }
     pub async fn save_task_plan(&self,run:String,plan:Value)->Result<()> {

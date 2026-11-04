@@ -237,7 +237,7 @@ impl TaskScope {
     }
     pub fn allows(&self, name: &str) -> bool {
         if name=="discover_tools"{return !self.read_only;}
-        if ["read_sources","read_task","read_artifact","search_artifacts","read_run_log"].contains(&name) {return true;}
+        if ["read_sources","read_task","read_artifact","search_artifacts","read_run_log","record_requirement","record_requirement_check","record_attempt_resolution","review_requirement_source"].contains(&name) {return true;}
         if matches!(name,"update_search_plan"|"read_search_plan"){return self.research;}
         let web=crate::web_tools::is_web_tool(name);
         if name=="web_search"&&!self.web_enabled{return false;}
@@ -292,20 +292,19 @@ impl TaskScope {
             None
         }
     }
+    pub fn completion_issue_with_state(&self,tools:&[Value],state:&Value)->Option<String>{
+        if state["unresolved_attempts"].as_u64().unwrap_or(0)>0{
+            let count=state["unresolved_attempts"].as_u64().unwrap_or(0);
+            return Some(format!("Неразобранных неуспешных или незавершённых попыток: {count}. Прочитайте read_task(section=attempts, unresolved_only=true): статус и исходная ошибка сохранены. Уточните фактический результат; исправленную попытку можно связать с реальной успешной заменой через record_attempt_resolution. Такая связь — оценка агента, не проверка выполнения требования."));
+        }
+        if state["historical_index_pending"]==true{return Some("Исторические результаты ещё не полностью проиндексированы. Продолжите read_task(section=attempts) по курсорам; прежние ошибки не считаются устранёнными только по последнему успешному действию.".into());}
+        if self.creating_desktop&&tools.is_empty()&&!self.names.is_empty(){return Some("Запрошенный файл ещё не создан: успешного write_file нет.".into());}
+        None
+    }
     pub fn completion_issue(&self, tools: &[Value]) -> Option<String> {
-        let mutation = tools.iter().rev().find(|t| {
-            matches!(
-                t["name"].as_str(),
-                Some(
-                    "write_file"
-                        | "edit_file"
-                        | "copy_file"
-                        | "move_file"
-                        | "delete_file"
-                        | "translate_file"
-                )
-            )
-        });
+        if tools.iter().any(|tool|tool["mutation_history_partial"]==true){return Some("История попыток шире текущего окна. Проверьте сохранённый журнал read_task(section=attempts), прежде чем объявлять все операции завершёнными.".into());}
+        let mut mutations=Vec::new();for tool in tools{crate::timeline::fold_mutation(&mut mutations,tool);}
+        let mutation=mutations.iter().rev().find(|tool|tool["status"]!="succeeded").or_else(||mutations.last());
         if let Some(tool) = mutation.filter(|t| t["status"] == "failed") {
             return Some(format!(
                 "Операция «{}» не выполнена. Ошибка инструмента: {}",
@@ -318,7 +317,10 @@ impl TaskScope {
         }
         None
     }
-    pub fn guidance(&self) -> String {
+    pub fn guidance(&self)->String{
+        format!("{}\nFor substantive goals, preserve requirements with record_requirement using exact user request sequence and Unicode scalar ranges, and report source review separately with review_requirement_source. read_task sections requirements/requirement_checks/attempts retain the ledger. Attach checks through record_requirement_check to actual same-Task run/tool IDs. A passed exit-code/status/byte predicate is not semantic verification of the whole requirement. reported_complete is your assessment, not proof. Failed attempts are not user obligations: corrected arguments or a changed plan can be linked explicitly through record_attempt_resolution to a real successful replacement receipt, with an explanation. Such links are model-assessed, not verified equivalence or a user waiver. Never discard original requirements or declare a supersede/waiver on the user's behalf.",self.mode_guidance())
+    }
+    fn mode_guidance(&self) -> String {
         if self.creating_desktop {
             return format!("Create the requested Desktop file(s) {:?}. Use write_file. The destination is {:?}. Preserve the exact requested content. Do not inspect projects or read other files. Do not report success without a successful write_file result.",self.names,self.desktop_target());
         }
@@ -488,19 +490,27 @@ mod tests {
         scope.local_web=false;assert!(!scope.allows("fetch_url"));assert!(!scope.allows("browser_read"));
     }
     #[test]
+    fn later_unrelated_success_does_not_erase_a_failed_required_operation(){
+        let scope=TaskScope::new("Fix project files");let failed=json!({"name":"write_file","arguments":{"path":"a.txt","content":"required"},"status":"failed","result":"disk unavailable"});
+        let unrelated=json!({"name":"write_file","arguments":{"path":"b.txt","content":"other"},"status":"succeeded","result":"{}"});let changed_intent=json!({"name":"write_file","arguments":{"path":"a.txt","content":"different"},"status":"succeeded","result":"{}"});
+        let mut evidence=crate::timeline::Evidence::default();evidence.observe(&failed);for _ in 0..100{evidence.observe(&unrelated);}
+        assert!(scope.completion_issue(&evidence.mutation).is_some());evidence.observe(&changed_intent);assert!(scope.completion_issue(&evidence.mutation).is_some());
+        let mut resolved=failed;resolved["status"]=json!("succeeded");evidence.observe(&resolved);assert!(scope.completion_issue(&evidence.mutation).is_none());
+    }
+    #[test]
     fn failed_write_is_not_evidence_of_creation() {
         let s = TaskScope::new("Создай файл check.txt на рабочем столе");
         assert!(s.creating_desktop());
         assert!(!s.allows("inspect_project"));
         assert!(s.allows("write_file"));
         assert!(s.completion_issue(&[]).is_some());
-        let failed = json!({"name":"write_file","status":"failed","result":"wrong path"});
+        let failed = json!({"name":"write_file","arguments":{"path":"check.txt","content":"expected"},"status":"failed","result":"wrong path"});
         assert!(s
             .completion_issue(&[failed.clone()])
             .unwrap()
             .contains("не выполнена"));
         assert!(s
-            .completion_issue(&[failed, json!({"name":"write_file","status":"succeeded"})])
+            .completion_issue(&[failed, json!({"name":"write_file","arguments":{"path":"check.txt","content":"expected"},"status":"succeeded"})])
             .is_none());
     }
 }

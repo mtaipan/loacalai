@@ -24,6 +24,7 @@ pub fn record(conn:&Connection,run:&str,event:&Value)->Result<()>{
     crate::tools::public_record(&mut record);
     if let Some(id)=record["id"].as_str(){
         conn.execute("INSERT INTO run_tools(run,tool_id,payload) VALUES (?1,?2,?3) ON CONFLICT(run,tool_id) DO UPDATE SET payload=excluded.payload WHERE ?4 OR json_extract(run_tools.payload,'$.status')='running'",params![run,id,record.to_string(),event["type"]=="tool_result"])?;
+        if let Err(error)=crate::task_requirements::observe(conn,run,&record){eprintln!("Task mutation index: {error:#}");}
     }Ok(())
 }
 pub fn checkpoint(conn:&Connection,run:&str,sequence:i64,event:&Value)->Result<()>{
@@ -71,11 +72,28 @@ impl crate::task_store::Store{
         }).await
     }
 }
+pub fn mutation_key(tool:&Value)->Option<String>{
+    use sha2::{Digest,Sha256};
+    let name=tool["name"].as_str()?;
+    if !["write_file","edit_file","copy_file","move_file","delete_file","translate_file"].contains(&name){return None;}
+    if let Some(hash)=tool["arguments_artifact"]["sha256"].as_str(){return Some(format!("{name}:{hash}"));}
+    let args=tool["arguments"].as_object()?;
+    if args.is_empty(){return None;}
+    Some(format!("{name}:{:x}",Sha256::digest(tool["arguments"].to_string().as_bytes())))
+}
+/// Preserve every unresolved operation intent, not merely the final mutation.
+/// Only a receipt for the same exact intent can supersede an earlier attempt.
+pub fn fold_mutation(receipts:&mut Vec<Value>,tool:&Value){
+    if !["write_file","edit_file","copy_file","move_file","delete_file","translate_file"].contains(&tool["name"].as_str().unwrap_or("")){return;}
+    let key=mutation_key(tool);
+    receipts.retain(|old|old["status"]!="succeeded"&&!(key.is_some()&&mutation_key(old)==key));
+    receipts.push(tool.clone());
+}
 #[derive(Default)]
 pub struct Evidence{
     pub actions:u64,pub succeeded:u64,pub failed:u64,pub stopped:u64,
     pub opened:usize,pub read:usize,pub browser_actions:usize,
-    pub mutation:Vec<Value>,pub file:Vec<Value>,
+    pub mutation:Vec<Value>,pub file:Vec<Value>,pub mutation_partial:bool,
 }
 impl Evidence{
     pub fn observe(&mut self,tool:&Value){
@@ -84,13 +102,15 @@ impl Evidence{
         match tool["status"].as_str().unwrap_or(""){"succeeded"=>self.succeeded+=1,"failed"=>self.failed+=1,_=>self.stopped+=1}
         let name=tool["name"].as_str().unwrap_or("");
         if tool["status"]=="succeeded"{match name{"browser_open"=>self.opened+=1,"browser_read"|"fetch_url"=>self.read+=1,"browser_action"=>self.browser_actions+=1,_=>{}}}
-        if ["write_file","edit_file","copy_file","move_file","delete_file","translate_file"].contains(&name){self.mutation=vec![tool.clone()];}
+        fold_mutation(&mut self.mutation,tool);
+        if self.mutation.len()>32{self.mutation.drain(..self.mutation.len()-32);self.mutation_partial=true;}
+        if self.mutation_partial{if let Some(first)=self.mutation.first_mut(){first["mutation_history_partial"]=json!(true);}}
         if ["read_file","write_file","edit_file","copy_file","move_file","delete_file"].contains(&name){self.file=vec![tool.clone()];}
     }
     pub fn report(&self,recent:&[Value],run:&str)->Value{
         let mut report=crate::agent::execution_report(recent);
         report["actions"]=json!(self.actions);report["succeeded"]=json!(self.succeeded);report["failed"]=json!(self.failed);report["stopped"]=json!(self.stopped);
-        report["details_partial"]=json!(self.actions>recent.len() as u64);report["run_id"]=json!(run);report
+        report["details_partial"]=json!(self.actions>recent.len() as u64);report["mutation_details_partial"]=json!(self.mutation_partial);report["run_id"]=json!(run);report
     }
 }
 #[cfg(test)]

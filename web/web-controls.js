@@ -66,9 +66,10 @@ function sourcesHtml(tools){
 }
 async function installBrowserComponents(){
  const button=document.querySelector('[data-action="install-browser"]'),status=document.getElementById('browser-install-status');
- button.disabled=true;status.textContent='Установка компонентов… Браузер скачивается только при отсутствии Edge/Chrome. Файлы сохраняются в папке приложения.';
- try{const r=await api('/api/web/install',{method:'POST',body:{}});status.textContent=r.message||'Готово';}
- catch(error){status.textContent=error.message;}finally{button.disabled=false;}
+ button.disabled=true;status.textContent='Подготовка браузера…';
+ try{await runInstallation({kind:'browser'},text=>{if(status?.isConnected)status.textContent=text;});}
+ catch(error){if(status?.isConnected)status.textContent=error.message;}finally{if(button.isConnected)button.disabled=false;}
 }
+
 document.addEventListener('click',event=>{if(!event.target.closest('.tool-control'))document.querySelectorAll('.tool-control[open]').forEach(d=>d.open=false);});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')document.querySelectorAll('.tool-control[open]').forEach(d=>d.open=false);});

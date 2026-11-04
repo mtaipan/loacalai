@@ -107,7 +107,7 @@ class CheckpointTranslations(Mapping):
     def __init__(self,database,job):
         self.db=sqlite3.connect(Path(database).resolve().as_uri()+'?mode=ro',uri=True)
         self.db.execute('PRAGMA query_only=ON');self.job=job
-        if self.db.execute('PRAGMA user_version').fetchone()[0] not in (10,11):self.db.close();raise ValueError('Неизвестная версия сохранённых переводов.')
+        if self.db.execute('PRAGMA user_version').fetchone()[0] not in (10,11,12):self.db.close();raise ValueError('Неизвестная версия сохранённых переводов.')
     def __len__(self):return self.db.execute('SELECT COUNT(*) FROM document_parts WHERE job=?',(self.job,)).fetchone()[0]
     def __iter__(self):return (row[0] for row in self.db.execute('SELECT unit FROM document_parts WHERE job=? ORDER BY unit',(self.job,)))
     def __getitem__(self,key):

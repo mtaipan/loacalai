@@ -1213,11 +1213,16 @@ async fn run_inner(
                         break;
                     }
                     if use_tools {
-                        if let Some(issue)=scope.completion_issue(&evidence.mutation) {
+                        let completion=if current_task.is_empty(){None}else{match app.tasks.completion_state(storage_run.clone()).await{
+                            Ok(state)=>{if let Some(d)=answer.diagnostics.as_mut(){d["completion"]=state.clone();}Some(state)},
+                            Err(error)=>{if let Some(d)=answer.diagnostics.as_mut(){d["completion_state_error"]=json!(format!("{error:#}"));}None}
+                        }};
+                        let issue=if let Some(state)=completion.as_ref(){scope.completion_issue_with_state(&evidence.mutation,state)}else if !current_task.is_empty(){Some("Не удалось сверить сохранённые результаты задачи. Завершённость не подтверждена; выполненные действия сохранены в журнале.".to_owned())}else{scope.completion_issue(&evidence.mutation)};
+                        if let Some(issue)=issue {
                             if !completion_retry {
                                 completion_retry=true;
                                 if let Some(d)=answer.diagnostics.as_mut(){d["completion_retry"]=json!(true);d["unverified_reply"]=json!(text);}
-                                history[0]["content"]=json!(format!("{}\nThe requested operation has NOT succeeded: {issue} Correct the tool arguments using the actual paths already provided, then execute the relevant tool. Do not repeat a denied/expired action. If it cannot be completed, explain the tool error. Do not claim success without a successful relevant tool result.",history[0]["content"].as_str().unwrap_or("")));
+                                history[0]["content"]=json!(format!("{}\nUnresolved attempts / incomplete evidence remain: {issue}. Use read_task attempts and explicit record_attempt_resolution to explain real successful replacements. Failed tool arguments are not new user obligations. Do not repeat a denied/expired action, or already successful effects merely to clear this warning. If work remains incomplete, state the concrete result and remaining work. Do not claim semantic verification of project requirements.",history[0]["content"].as_str().unwrap_or("")));
                                 emit(tx,json!({"type":"notice","message":"Проверяю завершение задачи по результатам инструментов…"})).await?;
                                 continue;
                             }
@@ -1399,8 +1404,12 @@ async fn run_inner(
     result
 }
 pub async fn pull_models(app: &Shared, models: &[String], tx: &mpsc::Sender<Value>) -> Result<()> {
-    ensure_ollama(app).await?;
+    pull_models_cancel(app,models,tx,&app.shutdown.child_token()).await
+}
+pub async fn pull_models_cancel(app:&Shared,models:&[String],tx:&mpsc::Sender<Value>,cancel:&CancellationToken)->Result<()> {
+    if models.iter().any(|model|model!="whisper-small"){ensure_ollama(app).await?;}
     for model in models {
+        anyhow::ensure!(!cancel.is_cancelled(),"Загрузка остановлена");
         if model == "whisper-small" {
             emit(tx,json!({"type":"progress","model":model,"progress":{"status":"Загрузка Whisper Small"}})).await?;
             let mut command =
@@ -1408,8 +1417,10 @@ pub async fn pull_models(app: &Shared, models: &[String], tx: &mpsc::Sender<Valu
             command
                 .arg(app.root.join("runtime/setup_media.py"))
                 .env("LOCAL_GEMMA_SPEECH_PATH", tools::speech_model(app));
-            let (code, _, err) = tools::capture(command, &app.shutdown.child_token(), 0).await?;
+            let (code, _, err) = tools::capture(command, cancel, 0).await?;
             anyhow::ensure!(code == 0, "Whisper: {err}");
+            for name in ["config.json","model.bin","tokenizer.json"]{let file=tools::speech_model(app).join(name);anyhow::ensure!(std::fs::metadata(file).is_ok_and(|m|m.is_file()&&m.len()>0),"Whisper: отсутствует или пуст {name}");}
+            anyhow::ensure!(["vocabulary.json","vocabulary.txt"].iter().any(|name|std::fs::metadata(tools::speech_model(app).join(name)).is_ok_and(|m|m.is_file()&&m.len()>0)),"Whisper: нет словаря модели");
             continue;
         }
         let endpoint = crate::model_storage::endpoint(app, model).await?;
@@ -1430,17 +1441,12 @@ pub async fn pull_models(app: &Shared, models: &[String], tx: &mpsc::Sender<Valu
             .await?;
             continue;
         }
-        let response = app
-            .client
-            .post(format!("{}/api/pull", endpoint))
-            .json(&json!({"model":model,"stream":true}))
-            .send()
-            .await?;
+        let response = tokio::select!{_=cancel.cancelled()=>anyhow::bail!("Загрузка остановлена"),result=app.client.post(format!("{}/api/pull", endpoint)).json(&json!({"model":model,"stream":true})).send()=>result?};
         anyhow::ensure!(response.status().is_success(), "Ошибка скачивания {model}");
         let mut stream = response.bytes_stream();
         let mut buffer = Vec::new();
         let mut succeeded = false;
-        while let Some(bytes) = tokio::select! {_=app.shutdown.cancelled()=>anyhow::bail!("Загрузка остановлена"),next=stream.next()=>next}
+        while let Some(bytes) = tokio::select! {_=cancel.cancelled()=>anyhow::bail!("Загрузка остановлена"),next=stream.next()=>next}
         {
             buffer.extend_from_slice(&bytes?);
             anyhow::ensure!(

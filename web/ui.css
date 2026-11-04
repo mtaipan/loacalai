@@ -73,3 +73,7 @@ button,input,select,textarea{font:inherit}
  .composer-toolbar [data-action=voice]{grid-column:4;grid-row:2}
  .composer-toolbar #send{grid-column:5;grid-row:2}
 }
+
+.installation-item{padding:14px 0;border-bottom:1px solid var(--border,#444)}.installation-item h3{margin:0 0 6px}.installation-item p{overflow-wrap:anywhere}.installation-item details{margin-top:10px}
+
+.ledger-row{border-bottom:1px solid var(--border);padding:12px 0}.ledger-row h4{margin:0 0 8px}.ledger-source{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%;font-size:12px}.ledger-row button{margin:4px 8px 4px 0}
